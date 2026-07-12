@@ -20,6 +20,18 @@ from .extract import extract
 from .leak import Leak, find_leaks
 from .metrics import CorpusMetrics, evaluate
 
+# §8.3 gate thresholds (context.md rejection, defect 1). A redactor that destroys everything
+# scores 0 leaks / 100% recall on both the leak test and per-type recall — neither gate can
+# tell redaction from destruction. Retention and decoy-survival close that hole.
+RETENTION_MIN = 0.98
+DECOY_SURVIVAL_MIN = 0.95
+# §4.1 hard negatives (checksum-invalid RČ/IČO/IBAN) must reach the review bucket — i.e.
+# survive in the output — 100% of the time. Any loss is a checksum-invalid identifier
+# silently auto-redacted, the exact bug §4.1's checksum requirement exists to prevent
+# (context.md rejection round 2, defect D5). No tolerance: this is a correctness bug, not a
+# recall trade-off.
+FLAG_SURVIVAL_MIN = 1.0
+
 
 @dataclass
 class EvalOutcome:
@@ -31,14 +43,47 @@ class EvalOutcome:
     integrity_failures: list[str] = field(default_factory=list)
 
     @property
+    def coverage_ok(self) -> bool:
+        """Every non-refused input must produce an output file — exact count equality."""
+        return not self.missing_outputs
+
+    @property
+    def retention_ok(self) -> bool:
+        """§8.3 retention gate: an empty/near-empty output must not pass just because it
+        leaked nothing. ``None`` (gate not computed, e.g. no gradeable docs) is not a failure."""
+        r = self.metrics.retention
+        return r is None or r >= RETENTION_MIN
+
+    @property
+    def decoy_survival_ok(self) -> bool:
+        """§8.3 precision gate: decoys (must NOT be redacted) must mostly survive. Checked PER
+        TYPE (defect D6) — a corpus-wide sum can clear the bar while one decoy class is wiped
+        out entirely; that must still fail."""
+        return all(
+            t.decoy_survival is None or t.decoy_survival >= DECOY_SURVIVAL_MIN
+            for t in self.metrics.per_type.values()
+        )
+
+    @property
+    def flag_survival_ok(self) -> bool:
+        """§4.1/§8.3 flag gate: should_flag surfaces (checksum-invalid RČ/IČO/IBAN) must
+        survive in the output 100%% of the time, per type — they belong in the review bucket,
+        never auto-redacted (defect D5)."""
+        return all(
+            t.flag_survival is None or t.flag_survival >= FLAG_SURVIVAL_MIN
+            for t in self.metrics.per_type.values()
+        )
+
+    @property
     def passed(self) -> bool:
-        """§8.3 gates: zero leaks, no missing/corrupt outputs, no refused doc slipping through."""
+        """§8.3 gates: zero leaks, full coverage, no corrupt outputs, no refused doc slipping
+        through, non-PII content retained, decoys preserved per type, and flag items (hard
+        negatives) preserved per type."""
         return not (
             self.leaks
-            or self.missing_outputs
             or self.integrity_failures
             or self.unexpected_outputs
-        )
+        ) and self.coverage_ok and self.retention_ok and self.decoy_survival_ok and self.flag_survival_ok
 
 
 def _resolve_output(redacted_dir: Path, source_file: str) -> Path | None:
@@ -56,6 +101,7 @@ def run_eval(corpus_dir: Path | str, redacted_dir: Path | str) -> EvalOutcome:
     corpus_dir, redacted_dir = Path(corpus_dir), Path(redacted_dir)
     outcome = EvalOutcome()
     graded: list = []
+    originals: list = []
     files_total = 0
     files_opened = 0
 
@@ -83,10 +129,13 @@ def run_eval(corpus_dir: Path | str, redacted_dir: Path | str) -> EvalOutcome:
             continue
         files_opened += 1
         graded.append((gt, res))
+        originals.append(extract(corpus_dir / source))
         for lk in find_leaks(gt, res):
             outcome.leaks.append((source, lk))
 
-    outcome.metrics = evaluate(graded, files_total=files_total, files_opened=files_opened)
+    outcome.metrics = evaluate(
+        graded, files_total=files_total, files_opened=files_opened, originals=originals
+    )
     return outcome
 
 
@@ -109,20 +158,47 @@ def _format_report(outcome: EvalOutcome) -> str:
     else:
         lines.append("\n[LEAK] zero leaks.")
 
-    # §8.2 per-type recall / precision — never averaged.
-    lines.append("\n[RECALL / PRECISION] per PII type (auto_redact class):")
-    lines.append(f"  {'TYPE':<16} {'recall':>8} {'prec':>8} {'auto':>6} {'decoyOK':>7} {'flag':>6}")
+    # §8.2 per-type recall / decoy-survival / flag-survival — never averaged. No precision
+    # column: it is unmeasurable from output text alone (context.md rejection round 2,
+    # defect D4) — decoy_survival is the only honest precision proxy this harness has.
+    lines.append("\n[PER-TYPE] recall (auto_redact) / decoy survival / flag survival (should_flag):")
+    lines.append(f"  {'TYPE':<16} {'recall':>8} {'decoy':>10} {'flag':>10}")
     for ptype in sorted(m.per_type):
         t = m.per_type[ptype]
-        rec = "  n/a" if t.recall is None else f"{t.recall:6.1%}"
-        prec = "  n/a" if t.precision is None else f"{t.precision:6.1%}"
-        lines.append(
-            f"  {ptype:<16} {rec:>8} {prec:>8} {t.auto_total:>6} "
-            f"{t.decoy_preserved:>3}/{t.decoy_total:<3} {t.flag_total:>6}"
-        )
+        rec = "   n/a" if t.recall is None else f"{t.recall:6.1%}"
+        dec = "      n/a" if t.decoy_survival is None else f"{t.decoy_preserved:>3}/{t.decoy_total:<3} {t.decoy_survival:5.0%}"
+        flg = "      n/a" if t.flag_survival is None else f"{t.flag_retained:>3}/{t.flag_total:<3} {t.flag_survival:5.0%}"
+        lines.append(f"  {ptype:<16} {rec:>8} {dec:>10} {flg:>10}")
 
     lines.append(f"\n[FORMATTING] {m.files_opened}/{m.files_total} outputs opened cleanly "
                  f"({m.formatting_integrity:.0%}).")
+
+    # §8.3 gates that a redactor could otherwise cheat by destroying everything.
+    ret = "n/a" if m.retention is None else f"{m.retention:.1%}"
+    ret_verdict = "PASS" if outcome.retention_ok else f"FAIL (< {RETENTION_MIN:.0%})"
+    lines.append(f"[RETENTION] non-PII content surviving: {ret} — {ret_verdict}")
+
+    # Decoy survival and flag survival are GATED PER TYPE (defect D6 / D5) — a corpus-wide
+    # aggregate is reported for context only; the verdict lists which types actually failed.
+    agg = "n/a" if m.decoy_survival is None else f"{m.decoy_survival:.1%}"
+    failing_decoy = sorted(
+        t.type for t in m.per_type.values()
+        if t.decoy_survival is not None and t.decoy_survival < DECOY_SURVIVAL_MIN
+    )
+    dec_verdict = "PASS" if outcome.decoy_survival_ok else f"FAIL ({', '.join(failing_decoy)})"
+    lines.append(f"[DECOY SURVIVAL] {m.decoy_preserved}/{m.decoy_total} decoys preserved "
+                 f"(aggregate {agg}, gate is per-type at >= {DECOY_SURVIVAL_MIN:.0%}) — {dec_verdict}")
+
+    failing_flag = sorted(
+        t.type for t in m.per_type.values()
+        if t.flag_survival is not None and t.flag_survival < FLAG_SURVIVAL_MIN
+    )
+    flag_verdict = "PASS" if outcome.flag_survival_ok else f"FAIL ({', '.join(failing_flag)})"
+    lines.append(f"[FLAG SURVIVAL] should_flag items must survive 100% per type — {flag_verdict}")
+
+    cov_verdict = "PASS" if outcome.coverage_ok else f"FAIL ({len(outcome.missing_outputs)} missing)"
+    lines.append(f"[COVERAGE] {cov_verdict}")
+
     if outcome.refused:
         lines.append(f"[REFUSED] {len(outcome.refused)} no-text-layer fixture(s) correctly refused.")
     if outcome.unexpected_outputs:
