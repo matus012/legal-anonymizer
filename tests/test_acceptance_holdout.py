@@ -20,6 +20,14 @@ empty_output, refuse_all, greedy — so this module runs every one of them again
 corpus through the real ``run_eval`` pipeline and asserts each fails on its specific named
 gate. There is no real detector yet (context.md §11 build order, step 3+); when one lands,
 add its acceptance run here alongside these.
+
+``data/holdout/`` itself is gitignored and regenerable-only (context.md rejection round 4,
+defect: silent drift). If ``corpus/generate.py`` ever changes and someone regenerates the
+holdout corpus, it silently becomes a DIFFERENT corpus under the same directory name — any
+acceptance numbers measured before that point stop being comparable, and nobody would notice
+without a check. ``data/holdout.manifest.json`` IS tracked and committed (the one exception to
+"never touches git" here) — the sha256 of every file at generation time, the exact generator
+command, and the git commit of ``corpus/`` that produced it. See ``eval/manifest.py``.
 """
 from __future__ import annotations
 
@@ -35,6 +43,7 @@ from eval.baselines import (
     refuse_all_redactor,
     scorch_redactor,
 )
+from eval.manifest import MANIFEST_PATH, verify
 from eval.run import run_eval
 
 pytestmark = pytest.mark.acceptance
@@ -62,6 +71,26 @@ def test_holdout_corpus_is_seed_1337():
             f"{gt_path.name}: seed {gt['seed']} does not derive from 1337 — this is not the "
             "acceptance corpus (or it was regenerated with the wrong seed)"
         )
+
+
+def test_holdout_matches_its_tracked_manifest():
+    # Silent drift is the failure mode this test exists for: data/holdout/ is gitignored, so
+    # a regenerated (and therefore DIFFERENT) corpus would otherwise look identical to git and
+    # to every other test here — same filenames, same directory, wrong content. The manifest
+    # is the one artifact that would catch it, and it must name the exact file(s) that changed.
+    assert MANIFEST_PATH.exists(), (
+        f"{MANIFEST_PATH} is missing. Generate it with: python -m eval.manifest "
+        "--holdout data/holdout --command '<the exact command that produced data/holdout/>' "
+        "— and commit the result. It must exist whenever data/holdout/ does."
+    )
+    manifest = json.loads(MANIFEST_PATH.read_text("utf-8"))
+    problems = verify(manifest, HOLDOUT)
+    assert not problems, (
+        "data/holdout/ has drifted from data/holdout.manifest.json — the holdout corpus is "
+        "no longer the one the manifest pins (generator command: "
+        f"{manifest.get('generator_command')!r}, corpus commit "
+        f"{manifest.get('corpus_commit')!r}):\n" + "\n".join(problems)
+    )
 
 
 def _redact_holdout(redactor, out: Path) -> Path:
