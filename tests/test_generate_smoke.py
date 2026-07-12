@@ -194,6 +194,66 @@ def _md5(p: Path) -> str:
     return hashlib.md5(p.read_bytes()).hexdigest()
 
 
+def test_capitalised_common_decoy_present_every_document(corpus):
+    # context.md rejection round 5: the numeric decoy classes are trivially separable from
+    # PII by shape and test nothing about the real stage-3 precision risk (§5's
+    # declension-tolerant, over-matching gazetteer). CAPITALISED_COMMON must be present,
+    # >=3 per document, and correctly a decoy (never auto-redacted, never flagged).
+    counts = []
+    for gt_path in corpus.glob("*.gt.json"):
+        gt = json.loads(gt_path.read_text("utf-8"))
+        if not gt["text_layer"]:
+            continue
+        cc = [p for p in gt["pii"] if p["type"] == "CAPITALISED_COMMON"]
+        counts.append(len(cc))
+        for p in cc:
+            assert p["auto_redact"] is False, f"{gt_path.name}: {p['surface']!r} must not be auto_redact"
+            assert p["should_flag"] is False, f"{gt_path.name}: {p['surface']!r} must not be should_flag"
+    assert counts, "no CAPITALISED_COMMON entries found anywhere in the corpus"
+    assert min(counts) >= 3, f"every document needs >=3 CAPITALISED_COMMON decoys, got min {min(counts)}"
+
+
+def test_capitalised_common_is_never_a_real_word_that_is_also_a_declension(corpus):
+    # Safety net for the hand-curated real-word table (context.md rejection round 6): a
+    # CAPITALISED_COMMON decoy must never literally EQUAL any of this document's own
+    # recorded auto_redact MENO surfaces — that would mean the "decoy" is secretly PII.
+    for gt_path in corpus.glob("*.gt.json"):
+        gt = json.loads(gt_path.read_text("utf-8"))
+        if not gt["text_layer"]:
+            continue
+        cc_surfaces = {p["surface"] for p in gt["pii"] if p["type"] == "CAPITALISED_COMMON"}
+        meno_surfaces = {p["surface"] for p in gt["pii"] if p["type"] == "MENO" and p["auto_redact"]}
+        overlap = cc_surfaces & meno_surfaces
+        assert not overlap, f"{gt_path.name}: CAPITALISED_COMMON overlaps a real MENO surface: {overlap}"
+
+
+def test_capitalised_common_shares_a_stem_with_a_seeded_entity(corpus):
+    # The adversarial case the user called out as the one that actually breaks a stem
+    # matcher: a common noun/adjective sharing a STEM with this document's OWN seeded
+    # surname or obec — not a generic corpus-wide word list.
+    for gt_path in corpus.glob("*.gt.json"):
+        gt = json.loads(gt_path.read_text("utf-8"))
+        if not gt["text_layer"]:
+            continue
+        cc_surfaces = [p["surface"] for p in gt["pii"] if p["type"] == "CAPITALISED_COMMON"]
+        stems = set()
+        for e in gt["entities"]:
+            if e["category"] == "MENO":
+                stems.add(e["canonical"].split()[-1][:4].lower())
+        for p in gt["pii"]:
+            # The place passed to the decoy generator is recorded under type "KATASTER"
+            # (corpus/templates/_common.py's "Kataster:" paragraph) — a SEPARATE, independent
+            # place draw is what gets type "OBEC" (the textbox in seed_docx_failure_modes),
+            # so that one is not the reference for this specific adversarial claim.
+            if p["type"] == "KATASTER":
+                stems.add(p["surface"][:4].lower())
+        assert stems, f"{gt_path.name}: no reference entity/place stems to check against"
+        assert any(s.lower().startswith(stem) for s in cc_surfaces for stem in stems), (
+            f"{gt_path.name}: no CAPITALISED_COMMON decoy shares a stem with a seeded "
+            f"entity/place; stems={stems} surfaces={cc_surfaces}"
+        )
+
+
 def test_generation_is_deterministic(tmp_path):
     # Same seed → byte-identical files (no wall-clock timestamps leak into DOCX zip mtimes /
     # docProps dates or PDF /CreationDate, /ModDate, embedded-file params, trailer /ID).

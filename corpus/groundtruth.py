@@ -85,6 +85,25 @@ class Recorder:
         return pid
 
     # -- serialisation ------------------------------------------------------------
+    def _validate(self) -> None:
+        """Hard-fail if a decoy surface EQUALS a real (auto_redact or should_flag) surface in
+        this same document (context.md rejection round 8): eval.leak's exclusion is keyed on
+        exact span containment, so a decoy string identical to a real PII surface would blind
+        the leak gate to every occurrence of that string — a corpus mistake, not a redactor
+        failure, must never silently pass as one."""
+        decoy_surfaces = {
+            p["surface"] for p in self._pii if not p["auto_redact"] and not p["should_flag"]
+        }
+        real_surfaces = {
+            p["surface"] for p in self._pii if p["auto_redact"] or p["should_flag"]
+        }
+        collisions = decoy_surfaces & real_surfaces
+        if collisions:
+            raise ValueError(
+                f"{self.source_file}: decoy surface(s) equal a real auto_redact/should_flag "
+                f"surface in the same document: {sorted(collisions)!r}"
+            )
+
     def to_dict(self) -> dict:
         return {
             "source_file": self.source_file,
@@ -97,6 +116,7 @@ class Recorder:
         }
 
     def write(self, path: Path) -> None:
+        self._validate()
         path.write_text(
             json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
         )

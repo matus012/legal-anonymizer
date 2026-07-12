@@ -12,6 +12,7 @@ from ..groundtruth import PiiSpec
 from ..names.declension import CASES, NameBank, Person
 from ..pii import (
     amounts,
+    capitalised_common,
     dates,
     decoys,
     dic,
@@ -132,6 +133,23 @@ def seed_pdf_failure_modes(b, rng, bank, ids: dict, p_extra: Person, e_extra: st
     )
 
 
+def capitalised_common_decoys(b, rng: random.Random, person: Person, place) -> None:
+    """The real stage-3 precision risk (context.md §5, rejection rounds 5–6): a
+    declension-tolerant, over-matching gazetteer/known-entity matcher will hit ordinary
+    capitalised Slovak words that are NOT PII. >=3 per document. Where THIS document's own
+    seeded surname has a curated real-word derivative (``capitalised_common.
+    SURNAME_REAL_WORD_DECOYS`` — e.g. "Kováč" -> "Kováčska"), it's included; the place-based
+    decoy (a real regional adjective, e.g. "Košice" -> "Košický") is always present — the
+    case that actually breaks a stem+suffix matcher, not a generic corpus-wide word list.
+    Both are hand-curated REAL Slovak words, never algorithmically invented (context.md
+    rejection round 6) and never a declension of the entity itself."""
+    for surface, prefix, suffix in capitalised_common.generate(
+        rng, surname_nom=person.last["nom"], place_nom=place.nom, n=5,
+    ):
+        b.paragraph([prefix, PiiSpec(surface, "CAPITALISED_COMMON", auto_redact=False,
+                                      should_flag=False), suffix])
+
+
 def seed_all(b, rng, bank, rec, *, is_docx: bool, ids: dict, people: list) -> None:
     """Common failure-mode seeding shared by every template."""
     p_main, e_main = people[0]
@@ -157,6 +175,7 @@ def seed_all(b, rng, bank, rec, *, is_docx: bool, ids: dict, people: list) -> No
     b.paragraph(["Ďalšie údaje: ", ids["dic"], ", ", ids["ic_dph"], ", ", ids["lv"], ", ",
                  ids["parcela"], ", ", ids["spis"], ", ", ids["orsr"], ", dátum ", ids["datum"], "."])
     b.paragraph(["Referencie (nie PII): ", ids["decoy_b"], "."])
+    capitalised_common_decoys(b, rng, p_main, place)
     if is_docx:
         seed_docx_failure_modes(b, rng, bank, ids, p_extra, e_extra)
     else:

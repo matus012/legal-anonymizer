@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from pathlib import Path
 
 import pytest
 from lxml import etree
 
 from corpus.generate import generate
-from eval.baselines import empty_output_redactor, refuse_all_redactor
+from eval.baselines import empty_output_redactor, null_redactor, refuse_all_redactor
 from eval.extract import S_FOOTER, S_HEADER, S_INFO, S_XMP, ExtractResult, extract
 from eval.leak import find_leaks
 from eval.metrics import evaluate
@@ -243,3 +244,47 @@ def test_mutation_refuse_all_drives_coverage_gate_red(corpus, tmp_path):
     assert outcome.leaks == [], "nothing was produced, so nothing can leak"
     assert not outcome.coverage_ok, "refusing every input must fail coverage, not read as success"
     assert not outcome.passed
+
+
+# --------------------------------------------------------------- mutation 7: word-boundary fix
+# (context.md rejection round 6) proves the leak.py/metrics.py word-boundary fix cannot hide a
+# real leak. Runs against the REAL data/synthetic corpus on disk (seed 42), not a throwaway
+# fixture, because that is the exact corpus the user measured 3633 leaks against by hand.
+def test_mutation_word_boundary_fix_does_not_drop_real_leaks():
+    real_corpus = Path("data/synthetic")
+    if not real_corpus.is_dir():
+        pytest.skip("data/synthetic not present — regenerate with corpus.generate first")
+
+    # Matches eval.leak.find_leaks' own dedup key exactly: unique (surface, type) pairs per
+    # document — NOT unique surface strings alone (the same surface can legitimately appear
+    # under two different auto_redact types).
+    expected_surfaces = 0
+    for gt_path in real_corpus.glob("*.gt.json"):
+        gt = json.loads(gt_path.read_text("utf-8"))
+        if gt["must_be_refused"]:
+            continue
+        expected_surfaces += len({
+            (p["surface"], p["type"]) for p in gt["pii"] if p["auto_redact"]
+        })
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        for gt_path in real_corpus.glob("*.gt.json"):
+            gt = json.loads(gt_path.read_text("utf-8"))
+            if gt["must_be_refused"]:
+                continue
+            null_redactor(real_corpus / gt["source_file"], out / gt["source_file"])
+        outcome = run_eval(real_corpus, out)
+
+    assert len(outcome.leaks) == expected_surfaces, (
+        f"word-boundary leak matching dropped real leaks: expected "
+        f"{expected_surfaces} (every auto_redact surface, computed fresh from ground truth), "
+        f"got {len(outcome.leaks)}. STOP — this means the fix hid a genuine leak, do not "
+        f"proceed until this is understood."
+    )
+    # Floor tied to the exact count the user measured by hand before this fix (context.md
+    # rejection round 6) — a regenerated corpus can shift slightly, but not collapse.
+    assert len(outcome.leaks) >= 3000, (
+        f"leak count {len(outcome.leaks)} is far below the ~3633 baseline measured before "
+        f"the word-boundary fix — STOP and report why, do not adjust the metric."
+    )
