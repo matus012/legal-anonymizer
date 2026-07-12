@@ -1,0 +1,11 @@
+# CRITICAL: no client document may ever enter git history
+*.docx
+*.pdf
+
+# environment / build artifacts
+.venv/
+__pycache__/
+
+# data
+data/real/
+data/synthetic/

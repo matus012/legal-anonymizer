@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(python -m venv .venv)",
+      "Bash(./.venv/Scripts/python.exe -m pip install --upgrade pip -q)",
+      "Bash(./.venv/Scripts/python.exe -m pip install python-docx lxml PyMuPDF pytest)",
+      "Bash(./.venv/Scripts/python.exe -m pip freeze)"
+    ]
+  }
+}
