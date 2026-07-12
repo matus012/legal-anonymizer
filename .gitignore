@@ -9,3 +9,6 @@ __pycache__/
 # data
 data/real/
 data/synthetic/
+
+check_*.py
+data/tmp*/

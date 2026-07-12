@@ -8,6 +8,7 @@ all three decision classes and that the checksum flags match reality.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import zipfile
@@ -19,6 +20,8 @@ from lxml import etree
 
 from corpus.generate import generate
 from corpus.pii import iban, ico, rodne_cislo
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory) -> Path:
@@ -59,7 +62,10 @@ def _pdf_parts(path: Path) -> dict:
     # writes faithful whitespace and mirrors PyMuPDF's hyphen remap). If a surface isn't found
     # verbatim, that is a real generator bug, not something to paper over.
     d = fitz.open(path)
-    body = "\n".join(p.get_text() for p in d)
+    # PyMuPDF's TextWriter font subsetting extracts a drawn hyphen-minus as U+00AD (soft
+    # hyphen) — an artifact absent from real Word/Acrobat PDFs. Repair it on the HAYSTACK only;
+    # ground truth keeps the authored U+002D. (NBSP is genuine Slovak typography, not repaired.)
+    body = "\n".join(p.get_text() for p in d).replace("\xad", "-")
     annotation = " ".join((a.info.get("content") or "") for p in d for a in p.annots())
     form_field = " ".join((w.field_value or "") for p in d for w in p.widgets())
     attachment = " ".join(d.embfile_get(n).decode("utf-8") for n in d.embfile_names())
@@ -149,3 +155,52 @@ def test_entities_carry_inconsistent_variants(corpus):
         if not gt["entities"]:
             continue
         assert any(len(set(e["variants"])) >= 3 for e in gt["entities"])
+
+
+def _docx_split_trap_surfaces(path: Path, gt: dict) -> set:
+    """Ground-truth surfaces that reconstruct from a paragraph's runs but are NOT contained in
+    any single text node — i.e. genuinely split across runs, invisible to a per-run regex."""
+    z = zipfile.ZipFile(path)
+    root = etree.fromstring(z.read("word/document.xml"))
+    z.close()
+    paras = ["".join(p.itertext()) for p in root.iter(_W + "p")]
+    atomic = [e.text for e in root.iter() if e.tag in (_W + "t", _W + "delText") and e.text]
+    trap = set()
+    for pii in gt["pii"]:
+        s = pii["surface"]
+        if any(s in para for para in paras) and not any(s in a for a in atomic):
+            trap.add(s)
+    return trap
+
+
+def test_split_run_trap_exists(corpus):
+    # A corpus without split surfaces is a broken corpus (context.md §7): the classic silent
+    # failure where a name straddles <w:r> boundaries and regex on run.text finds nothing.
+    docx_gts = list(corpus.glob("*.docx.gt.json"))
+    total = 0
+    docs_with_trap = 0
+    for gt_path in docx_gts:
+        gt = json.loads(gt_path.read_text("utf-8"))
+        trap = _docx_split_trap_surfaces(corpus / gt["source_file"], gt)
+        total += len(trap)
+        docs_with_trap += bool(trap)
+    assert total > 0, "no split-run surfaces in the whole corpus"
+    assert docs_with_trap >= len(docx_gts) // 2, (
+        f"only {docs_with_trap}/{len(docx_gts)} documents contain a split-run surface"
+    )
+
+
+def _md5(p: Path) -> str:
+    return hashlib.md5(p.read_bytes()).hexdigest()
+
+
+def test_generation_is_deterministic(tmp_path):
+    # Same seed → byte-identical files (no wall-clock timestamps leak into DOCX zip mtimes /
+    # docProps dates or PDF /CreationDate, /ModDate, embedded-file params, trailer /ID).
+    a, b = tmp_path / "a", tmp_path / "b"
+    generate(n=6, out=a, seed=99, formats=["docx", "pdf"])
+    generate(n=6, out=b, seed=99, formats=["docx", "pdf"])
+    files = sorted(a.glob("*"))
+    assert files
+    mismatches = [f.name for f in files if _md5(f) != _md5(b / f.name)]
+    assert not mismatches, f"non-deterministic files: {mismatches}"

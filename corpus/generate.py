@@ -28,7 +28,7 @@ def _emit(doc_type: str, index: int, fmt: str, seed: int, out: Path, bank: NameB
     fname = f"{stem}.{ext}"
     rec = Recorder(fname, doc_type, seed)
     if fmt == "docx":
-        builder = DocxBuilder(rec)
+        builder = DocxBuilder(rec, rng)
     else:
         builder = PdfBuilder(rec, image_only=image_only)
     TEMPLATES[doc_type](builder, rng, bank, is_docx=(fmt == "docx"))

@@ -9,6 +9,10 @@ Every placed :class:`PiiSpec` is recorded in the shared :class:`Recorder` with t
 """
 from __future__ import annotations
 
+import datetime as _dt
+import os
+import random
+import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -25,6 +29,30 @@ W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 Item = "str | PiiSpec"
 
+_SPLIT_PROB = 0.30  # fraction of PII surfaces split across runs (context.md §7 failure mode)
+
+# Fixed timestamps so the same seed yields byte-identical files (no wall-clock in the output).
+_FIXED_DT = _dt.datetime(2025, 1, 1, 0, 0, 0)
+_FIXED_ZIP_TIME = (2025, 1, 1, 0, 0, 0)
+
+
+def _pin_zip_timestamps(path: Path) -> None:
+    """Rewrite every zip entry with a fixed mtime — otherwise DOCX save stamps wall-clock time
+    into each entry and the same seed produces different bytes."""
+    with zipfile.ZipFile(str(path)) as zin:
+        infos = zin.infolist()
+        blobs = {i.filename: zin.read(i.filename) for i in infos}
+    tmp = str(path) + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for i in infos:
+            zi = zipfile.ZipInfo(i.filename, date_time=_FIXED_ZIP_TIME)
+            zi.compress_type = i.compress_type
+            zi.external_attr = i.external_attr
+            zi.internal_attr = i.internal_attr
+            zi.create_system = i.create_system
+            zout.writestr(zi, blobs[i.filename])
+    os.replace(tmp, str(path))
+
 
 def _text_of(items: list) -> str:
     return "".join(it if isinstance(it, str) else it.surface for it in items)
@@ -35,8 +63,9 @@ def _run_xml(text: str) -> str:
 
 
 class DocxBuilder:
-    def __init__(self, recorder: Recorder):
+    def __init__(self, recorder: Recorder, rng=None):
         self.rec = recorder
+        self.rng = rng if rng is not None else random.Random(0)
         self.doc = docx.Document()
         self._para_idx = -1
         self._fn_id = 0
@@ -55,13 +84,41 @@ class DocxBuilder:
             if isinstance(it, PiiSpec):
                 self.rec.record(it, part=part, detail=detail)
 
+    def _split_surface(self, s: str) -> list[str]:
+        """~30% of the time, cut ``s`` into 2-3 pieces at random offsets (the split-run trap)."""
+        if len(s) < 4 or self.rng.random() >= _SPLIT_PROB:
+            return [s]
+        n = min(self.rng.choice((2, 3)), len(s))
+        cuts = sorted(self.rng.sample(range(1, len(s)), n - 1))
+        parts, prev = [], 0
+        for c in cuts:
+            parts.append(s[prev:c])
+            prev = c
+        parts.append(s[prev:])
+        return parts
+
+    def _render_and_record(self, paragraph, items: list, part: str, detail: dict) -> None:
+        """Add runs for ``items``; each PiiSpec surface is sometimes split across several runs
+        so a regex over individual ``run.text`` finds nothing (context.md §7, §10). Ground
+        truth still records the full logical surface — that is the whole point of the trap."""
+        for it in items:
+            if isinstance(it, str):
+                if it:
+                    paragraph.add_run(it)
+            else:
+                chunks = self._split_surface(it.surface)
+                for ch in chunks:
+                    paragraph.add_run(ch)
+                d = dict(detail)
+                if len(chunks) > 1:
+                    d["split_runs"] = True
+                self.rec.record(it, part=part, detail=d)
+
     def paragraph(self, items: list, *, style: str | None = None) -> None:
-        """A body paragraph built from plain strings and PiiSpecs (each its own run)."""
+        """A body paragraph built from plain strings and PiiSpecs (PII sometimes split-run)."""
         self._para_idx += 1
         p = self.doc.add_paragraph(style=style)
-        for it in items:
-            p.add_run(it if isinstance(it, str) else it.surface)
-        self._record_items(items, "body", {"paragraph_index": self._para_idx})
+        self._render_and_record(p, items, "body", {"paragraph_index": self._para_idx})
 
     def split_run_paragraph(self, prefix: str, spec: PiiSpec, suffix: str, chunks: int = 3) -> None:
         """Place ``spec.surface`` split across several runs — the classic silent-miss case.
@@ -92,8 +149,8 @@ class DocxBuilder:
         for r, row in enumerate(rows):
             for c, cell_items in enumerate(row):
                 cell = t.cell(r, c)
-                cell.text = _text_of(cell_items)
-                self._record_items(cell_items, "table_cell", {"row": r, "col": c})
+                self._render_and_record(cell.paragraphs[0], cell_items, "table_cell",
+                                        {"row": r, "col": c})
 
     # ---------------------------------------------------------------- header / footer
     def header(self, items: list) -> None:
@@ -241,4 +298,8 @@ class DocxBuilder:
             ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
             part = Part(PackURI("/word/comments.xml"), ct, xml.encode("utf-8"), self.doc.part.package)
             self.doc.part.relate_to(part, RT.COMMENTS)
+        cp = self.doc.core_properties  # pin document dates
+        cp.created = _FIXED_DT
+        cp.modified = _FIXED_DT
         self.doc.save(str(path))
+        _pin_zip_timestamps(path)

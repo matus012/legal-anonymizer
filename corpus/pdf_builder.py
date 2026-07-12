@@ -4,12 +4,13 @@ Text is drawn with an embedded Unicode font so Slovak diacritics survive extract
 fonts drop them). PII is seeded into the text layer, freetext annotations, form-field widgets,
 document metadata, XMP, and an embedded attachment — every surface §8.1 says to extract.
 
-**Ground truth equals what is extractable.** Whitespace is written faithfully: a normal space
-is drawn as a real positional gap (extracts as U+0020), an authored NBSP is drawn as a glyph
-(extracts as U+00A0) — exactly as real Slovak legal PDFs mix them. Each PII is written as an
-atomic unit so it never wraps across a line. The one unavoidable artifact is that PyMuPDF's
-font subsetting maps a hyphen-minus glyph to U+00AD (detected per font at runtime); ground
-truth records that, so the future leak test greps for the string that is really in the file.
+**Ground truth records the authored surface** — what a real Word/Acrobat PDF contains. Whitespace
+is written faithfully: a normal space is drawn as a real positional gap (extracts as U+0020), an
+authored NBSP is drawn as a glyph (extracts as U+00A0) — exactly as real Slovak legal PDFs mix
+them. Each PII is written as an atomic unit so it never wraps across a line. One PyMuPDF-specific
+artifact remains: its TextWriter font subsetting extracts a drawn hyphen-minus as U+00AD (soft
+hyphen), which real PDFs do not contain — so the *test's* extraction helper repairs that on the
+haystack, and the artifact never enters ground truth.
 
 A separate :meth:`build_image_only` produces a no-text-layer scan the app must *refuse* (§3).
 """
@@ -34,6 +35,26 @@ _LEADING = 15.0
 _RIGHT = _PAGE.width - _MARGIN
 _BOTTOM = _PAGE.height - _MARGIN
 
+# Fixed creation/modification date so the same seed yields byte-identical PDFs (no wall clock).
+_FIXED_PDF_DATE = "D:20250101000000Z"
+
+
+def _pin_embfile_dates(doc: fitz.Document) -> None:
+    """Embedded-file streams get wall-clock /Params CreationDate/ModDate from MuPDF; pin them so
+    the same seed yields identical bytes (set_metadata only reaches the trailer /Info dict)."""
+    lit = f"({_FIXED_PDF_DATE})"
+    for xref in range(1, doc.xref_length()):
+        if "/Type/EmbeddedFile" in doc.xref_object(xref, compressed=True):
+            doc.xref_set_key(xref, "Params/CreationDate", lit)
+            doc.xref_set_key(xref, "Params/ModDate", lit)
+
+
+def _pdf_save_deterministic(doc: fitz.Document, path: Path) -> None:
+    """Save without a wall-clock-derived trailer /ID (PyMuPDF derives it partly from time, so
+    a fresh id would make identical content differ byte-for-byte across runs)."""
+    _pin_embfile_dates(doc)
+    doc.save(str(path), garbage=4, deflate=True, no_new_id=True)
+
 
 def _find_font() -> str:
     for p in _FONT_CANDIDATES:
@@ -49,27 +70,9 @@ class PdfBuilder:
         self.font = fitz.Font(fontfile=self.font_path)
         self.image_only = image_only
         self.doc = fitz.open()
-        self._hyphen_out = self._detect_char("a-a")
         self._author: PiiSpec | None = None
         self._xmp_creator: PiiSpec | None = None
         self._new_page()
-
-    # ------------------------------------------------------------------ round-trip probe
-    def _detect_char(self, probe: str) -> str:
-        """Write ``probe`` and read back the middle char — captures PyMuPDF's glyph→Unicode
-        remap for this font (e.g. hyphen-minus → U+00AD) so ground truth can mirror it."""
-        d = fitz.open()
-        p = d.new_page()
-        tw = fitz.TextWriter(p.rect)
-        tw.append((50, 50), probe, font=self.font, fontsize=11)
-        tw.write_text(p)
-        out = d[0].get_text().strip()
-        d.close()
-        return out[1:2] if len(out) >= 2 else probe[1:2]
-
-    def _extractable(self, text: str) -> str:
-        """The form of ``text`` as it will extract from the drawn text layer."""
-        return text.replace("-", self._hyphen_out)
 
     # ------------------------------------------------------------------ page flow
     def _new_page(self) -> None:
@@ -126,8 +129,11 @@ class PdfBuilder:
                         self._place_unit(word, size)
             else:
                 page = self._place_unit(it.surface, size)
-                self.rec.record(it, part=record_part, detail={"page": page},
-                                surface=self._extractable(it.surface))
+                # Ground truth records the AUTHORED surface (real U+002D hyphen), matching what
+                # a real Word/Acrobat PDF contains. PyMuPDF's TextWriter subsetting extracts the
+                # drawn hyphen as U+00AD; the test's extraction helper repairs that on the
+                # haystack side — the artifact never enters ground truth.
+                self.rec.record(it, part=record_part, detail={"page": page})
         self._newline()
 
     # ------------------------------------------------------------------ content
@@ -186,16 +192,18 @@ class PdfBuilder:
         self.rec.record(author_spec, part="metadata", detail={"field": "author"})
         self.rec.record(xmp_creator_spec, part="xmp", detail={"field": "dc:creator"})
 
-    def _apply_metadata(self) -> None:
+    def _apply_metadata(self, doc: fitz.Document) -> None:
+        meta = {"creationDate": _FIXED_PDF_DATE, "modDate": _FIXED_PDF_DATE}
         if self._author is not None:
-            self.doc.set_metadata({"author": self._author.surface, "title": self.rec.doc_type})
+            meta["author"] = self._author.surface
+            meta["title"] = self.rec.doc_type
+        doc.set_metadata(meta)
         if self._xmp_creator is not None:
-            self.doc.set_xml_metadata(_xmp_packet(self._xmp_creator.surface))
+            doc.set_xml_metadata(_xmp_packet(self._xmp_creator.surface))
 
     # ------------------------------------------------------------------ save
     def save(self, path: Path) -> None:
         self._flush()
-        self._apply_metadata()
         if self.image_only:
             self.rec.text_layer = False
             self.rec.must_be_refused = True
@@ -204,10 +212,12 @@ class PdfBuilder:
                 pix = pg.get_pixmap(dpi=150)
                 ipg = img_doc.new_page(width=pix.width, height=pix.height)
                 ipg.insert_image(ipg.rect, pixmap=pix)
-            img_doc.save(str(path), garbage=4, deflate=True)
+            self._apply_metadata(img_doc)
+            _pdf_save_deterministic(img_doc, path)
             img_doc.close()
         else:
-            self.doc.save(str(path), garbage=4, deflate=True)
+            self._apply_metadata(self.doc)
+            _pdf_save_deterministic(self.doc, path)
         self.doc.close()
 
 
