@@ -4,6 +4,13 @@ Text is drawn with an embedded Unicode font so Slovak diacritics survive extract
 fonts drop them). PII is seeded into the text layer, freetext annotations, form-field widgets,
 document metadata, XMP, and an embedded attachment — every surface §8.1 says to extract.
 
+**Ground truth equals what is extractable.** Whitespace is written faithfully: a normal space
+is drawn as a real positional gap (extracts as U+0020), an authored NBSP is drawn as a glyph
+(extracts as U+00A0) — exactly as real Slovak legal PDFs mix them. Each PII is written as an
+atomic unit so it never wraps across a line. The one unavoidable artifact is that PyMuPDF's
+font subsetting maps a hyphen-minus glyph to U+00AD (detected per font at runtime); ground
+truth records that, so the future leak test greps for the string that is really in the file.
+
 A separate :meth:`build_image_only` produces a no-text-layer scan the app must *refuse* (§3).
 """
 from __future__ import annotations
@@ -24,6 +31,8 @@ _FONT_CANDIDATES = (
 _PAGE = fitz.paper_rect("a4")
 _MARGIN = 56.0
 _LEADING = 15.0
+_RIGHT = _PAGE.width - _MARGIN
+_BOTTOM = _PAGE.height - _MARGIN
 
 
 def _find_font() -> str:
@@ -33,10 +42,6 @@ def _find_font() -> str:
     raise RuntimeError("no Unicode TTF found; Slovak diacritics require an embedded font")
 
 
-def _text_of(items: list) -> str:
-    return "".join(it if isinstance(it, str) else it.surface for it in items)
-
-
 class PdfBuilder:
     def __init__(self, recorder: Recorder, image_only: bool = False):
         self.rec = recorder
@@ -44,15 +49,34 @@ class PdfBuilder:
         self.font = fitz.Font(fontfile=self.font_path)
         self.image_only = image_only
         self.doc = fitz.open()
+        self._hyphen_out = self._detect_char("a-a")
         self._author: PiiSpec | None = None
         self._xmp_creator: PiiSpec | None = None
         self._new_page()
+
+    # ------------------------------------------------------------------ round-trip probe
+    def _detect_char(self, probe: str) -> str:
+        """Write ``probe`` and read back the middle char — captures PyMuPDF's glyph→Unicode
+        remap for this font (e.g. hyphen-minus → U+00AD) so ground truth can mirror it."""
+        d = fitz.open()
+        p = d.new_page()
+        tw = fitz.TextWriter(p.rect)
+        tw.append((50, 50), probe, font=self.font, fontsize=11)
+        tw.write_text(p)
+        out = d[0].get_text().strip()
+        d.close()
+        return out[1:2] if len(out) >= 2 else probe[1:2]
+
+    def _extractable(self, text: str) -> str:
+        """The form of ``text`` as it will extract from the drawn text layer."""
+        return text.replace("-", self._hyphen_out)
 
     # ------------------------------------------------------------------ page flow
     def _new_page(self) -> None:
         self.page = self.doc.new_page(width=_PAGE.width, height=_PAGE.height)
         self.tw = fitz.TextWriter(self.page.rect)
         self.y = _MARGIN
+        self.x = _MARGIN
 
     def _flush(self) -> None:
         self.tw.write_text(self.page)
@@ -61,70 +85,78 @@ class PdfBuilder:
     def page_no(self) -> int:
         return self.doc.page_count
 
-    def _wrap(self, text: str, size: float) -> list[str]:
-        max_w = _PAGE.width - 2 * _MARGIN
-        lines: list[str] = []
-        for raw in text.split("\n"):
-            words, cur = raw.split(" "), ""
-            for w in words:
-                cand = w if not cur else f"{cur} {w}"
-                if self.font.text_length(cand, size) <= max_w:
-                    cur = cand
-                else:
-                    if cur:
-                        lines.append(cur)
-                    cur = w
-            lines.append(cur)
-        return lines
+    def _newline(self) -> None:
+        self.y += _LEADING
+        self.x = _MARGIN
+        if self.y + _LEADING > _BOTTOM:
+            self._flush()
+            self._new_page()
 
-    def _write(self, text: str, size: float = 11.0, gap_after: float = 4.0) -> None:
-        # Place words at computed x-positions (real gaps, no space glyph). PyMuPDF's
-        # get_text() renders an embedded space glyph as U+00A0, which would break matching
-        # of multi-word surfaces ("Ján Novák"); real gaps extract as normal spaces.
+    def _unit_width(self, text: str, size: float) -> float:
+        subs = text.split(" ")
         space_w = self.font.text_length(" ", size)
-        for line in self._wrap(text, size):
-            if self.y + _LEADING > _PAGE.height - _MARGIN:
-                self._flush()
-                self._new_page()
-            x = _MARGIN
-            baseline = self.y + size
-            for word in line.split(" "):
-                if not word:
-                    x += space_w
-                    continue
-                self.tw.append((x, baseline), word, font=self.font, fontsize=size)
-                x += self.font.text_length(word, size) + space_w
-            self.y += _LEADING
-        self.y += gap_after
+        return sum(self.font.text_length(s, size) for s in subs) + space_w * (len(subs) - 1)
+
+    def _place_unit(self, text: str, size: float) -> int:
+        """Place one non-breaking unit on the current line; internal normal spaces become real
+        positional gaps (extract as U+0020); NBSP chars stay inside sub-tokens (extract as
+        U+00A0). Returns the page it landed on."""
+        space_w = self.font.text_length(" ", size)
+        w = self._unit_width(text, size)
+        if self.x != _MARGIN and self.x + space_w + w > _RIGHT:
+            self._newline()
+        elif self.x != _MARGIN:
+            self.x += space_w  # gap between units → normal space
+        page = self.page_no
+        baseline = self.y + size
+        for i, sub in enumerate(text.split(" ")):
+            if i:
+                self.x += space_w
+            if sub:
+                self.tw.append((self.x, baseline), sub, font=self.font, fontsize=size)
+                self.x += self.font.text_length(sub, size)
+        return page
+
+    def _flow(self, items: list, record_part: str, size: float = 11.0) -> None:
+        self.x = _MARGIN
+        for it in items:
+            if isinstance(it, str):
+                for word in it.split(" "):
+                    if word:
+                        self._place_unit(word, size)
+            else:
+                page = self._place_unit(it.surface, size)
+                self.rec.record(it, part=record_part, detail={"page": page},
+                                surface=self._extractable(it.surface))
+        self._newline()
 
     # ------------------------------------------------------------------ content
     def heading(self, text: str) -> None:
-        self._write(text, size=15.0, gap_after=8.0)
+        self._flow([text], "body", size=15.0)
+        self.y += 4
 
     def paragraph(self, items: list) -> None:
-        page = self.page_no
-        self._write(_text_of(items), size=11.0)
-        for it in items:
-            if isinstance(it, PiiSpec):
-                self.rec.record(it, part="body", detail={"page": page})
+        self._flow(items, "body")
+        self.y += 4
 
     def table(self, rows: list[list[list]]) -> None:
         for row in rows:
-            page = self.page_no
-            self._write("    ".join(_text_of(c) for c in row), size=11.0, gap_after=2.0)
-            for cell in row:
-                for it in cell:
-                    if isinstance(it, PiiSpec):
-                        self.rec.record(it, part="body", detail={"page": page})
+            flat: list = []
+            for c, cell in enumerate(row):
+                if c:
+                    flat.append("    ")
+                flat.extend(cell)
+            self._flow(flat, "body")
 
     # ------------------------------------------------------------------ annotations
     def annotation(self, items: list) -> None:
         page = self.page_no
-        rect = fitz.Rect(_MARGIN, self.y, _PAGE.width - _MARGIN, self.y + 40)
-        self.page.add_freetext_annot(rect, _text_of(items), fontsize=10)
+        text = "".join(it if isinstance(it, str) else it.surface for it in items)
+        rect = fitz.Rect(_MARGIN, self.y, _RIGHT, self.y + 40)
+        self.page.add_freetext_annot(rect, text, fontsize=10)
         self.y += 46
         for it in items:
-            if isinstance(it, PiiSpec):
+            if isinstance(it, PiiSpec):  # /Contents stores the exact string — no remap
                 self.rec.record(it, part="annotation", detail={"page": page})
 
     # ------------------------------------------------------------------ form field
@@ -141,7 +173,8 @@ class PdfBuilder:
 
     # ------------------------------------------------------------------ attachment
     def attachment(self, filename: str, items: list) -> None:
-        self.doc.embfile_add(filename, _text_of(items).encode("utf-8"))
+        text = "".join(it if isinstance(it, str) else it.surface for it in items)
+        self.doc.embfile_add(filename, text.encode("utf-8"))
         for it in items:
             if isinstance(it, PiiSpec):
                 self.rec.record(it, part="attachment", detail={"file": filename})

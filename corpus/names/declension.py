@@ -34,7 +34,7 @@ class Person:
         return self.last[case]
 
     def honorific(self) -> str:
-        return f"p. {self.last['nom']}"
+        return f"p. {self.last['nom']}"  # NBSP after p. (Slovak typography)
 
     def initial(self) -> str:
         return f"{self.first['nom'][0]}. {self.last['nom']}"

@@ -55,12 +55,21 @@ class Recorder:
         self._entities[entity_id] = Entity(entity_id, canonical, category, variants)
 
     # -- pii ----------------------------------------------------------------------
-    def record(self, spec: PiiSpec, *, part: str, detail: dict | None = None) -> str:
+    def record(
+        self, spec: PiiSpec, *, part: str, detail: dict | None = None, surface: str | None = None
+    ) -> str:
+        """Record one occurrence.
+
+        ``surface`` overrides ``spec.surface`` when the text as it is *extractable from the
+        file* differs from the authored form (e.g. the PDF text layer, where PyMuPDF renders
+        a hyphen as U+00AD). Ground truth must equal what an extractor sees, or the leak test
+        greps for a string that is not there and every multi-word surface silently passes.
+        """
         self._counter += 1
         pid = f"pii_{self._counter:04d}"
         entry = {
             "id": pid,
-            "surface": spec.surface,
+            "surface": spec.surface if surface is None else surface,
             "type": spec.type,
             "auto_redact": spec.auto_redact,
             "should_flag": spec.should_flag,

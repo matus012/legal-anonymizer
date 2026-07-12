@@ -20,17 +20,6 @@ from lxml import etree
 from corpus.generate import generate
 from corpus.pii import iban, ico, rodne_cislo
 
-_WS = re.compile(r"\s+")
-
-
-def _norm(text: str) -> str:
-    # PyMuPDF's text extraction renders written spaces as U+00A0 and hyphen-minus as U+00AD
-    # (soft hyphen). Since PyMuPDF is the mandated PDF engine (§10), the detector faces the
-    # same artifacts, so normalising them here mirrors what downstream extraction must do.
-    text = text.replace("\xa0", " ").replace("\xad", "-")
-    return _WS.sub(" ", text)
-
-
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory) -> Path:
     out = tmp_path_factory.mktemp("corpus")
@@ -43,11 +32,14 @@ def _docx_parts(path: Path) -> dict:
     z = zipfile.ZipFile(path)
 
     def xml_text(name: str) -> str:
-        return " ".join(etree.fromstring(z.read(name)).itertext()) if name in z.namelist() else ""
+        # Concatenate run texts WITHOUT a separator so a name split across runs reconstructs
+        # (context.md §10) — this is exactly what the detector must do. No normalization: the
+        # DOCX stores characters (NBSP, hyphen) literally, so ground truth must match verbatim.
+        return "".join(etree.fromstring(z.read(name)).itertext()) if name in z.namelist() else ""
 
     doc = xml_text("word/document.xml")
-    header = " ".join(xml_text(n) for n in z.namelist() if re.search(r"header\d*\.xml", n))
-    footer = " ".join(xml_text(n) for n in z.namelist() if re.search(r"footer\d*\.xml", n))
+    header = "".join(xml_text(n) for n in z.namelist() if re.search(r"header\d*\.xml", n))
+    footer = "".join(xml_text(n) for n in z.namelist() if re.search(r"footer\d*\.xml", n))
     buckets = {
         "body": doc, "table_cell": doc, "textbox": doc,
         "tracked_change_ins": doc, "tracked_change_del": doc,
@@ -59,23 +51,20 @@ def _docx_parts(path: Path) -> dict:
         "metadata_app": z.read("docProps/app.xml").decode("utf-8"),
     }
     z.close()
-    return {k: _norm(v) for k, v in buckets.items()}
+    return buckets
 
 
 def _pdf_parts(path: Path) -> dict:
+    # No normalization: ground truth already records the exact extractable form (the generator
+    # writes faithful whitespace and mirrors PyMuPDF's hyphen remap). If a surface isn't found
+    # verbatim, that is a real generator bug, not something to paper over.
     d = fitz.open(path)
-    body = _norm("\n".join(p.get_text() for p in d))
-    annotation = _norm(" ".join(
-        (a.info.get("content") or "") for p in d for a in p.annots()
-    ))
-    form_field = _norm(" ".join(
-        (w.field_value or "") for p in d for w in p.widgets()
-    ))
-    attachment = _norm(" ".join(
-        d.embfile_get(n).decode("utf-8") for n in d.embfile_names()
-    ))
-    metadata = _norm(" ".join(str(v) for v in (d.metadata or {}).values()))
-    xmp = _norm(d.get_xml_metadata())
+    body = "\n".join(p.get_text() for p in d)
+    annotation = " ".join((a.info.get("content") or "") for p in d for a in p.annots())
+    form_field = " ".join((w.field_value or "") for p in d for w in p.widgets())
+    attachment = " ".join(d.embfile_get(n).decode("utf-8") for n in d.embfile_names())
+    metadata = " ".join(str(v) for v in (d.metadata or {}).values())
+    xmp = d.get_xml_metadata()
     d.close()
     return {
         "body": body, "annotation": annotation, "form_field": form_field,
@@ -102,8 +91,8 @@ def test_ground_truth_never_lies_about_location(corpus):
         for pii in gt["pii"]:
             part = pii["location"]["surface_part"]
             assert part in parts, f"{src.name}: unknown part {part}"
-            assert _norm(pii["surface"]) in parts[part], (
-                f"{src.name}: {pii['surface']!r} not found in part {part!r}"
+            assert pii["surface"] in parts[part], (
+                f"{src.name}: {pii['surface']!r} not found verbatim in part {part!r}"
             )
             checked += 1
     assert checked > 200  # the corpus really did seed a lot of PII
