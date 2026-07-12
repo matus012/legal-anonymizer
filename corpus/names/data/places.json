@@ -1,0 +1,19 @@
+{
+  "_comment": "Slovak place names with case tables (context.md §4.2, §5). 'rhythmic' marks names whose oblique cases shorten/alter the stem vowel (Košice→Košíc, Levoča→Levoče) — the case a naive suffix-stripper fails on. Cases: nom gen dat acc loc ins.",
+  "places": [
+    {"kind": "obec", "rhythmic": true,  "nom": "Košice", "gen": "Košíc", "dat": "Košiciam", "acc": "Košice", "loc": "Košiciach", "ins": "Košicami"},
+    {"kind": "obec", "rhythmic": true,  "nom": "Levoča", "gen": "Levoče", "dat": "Levoči", "acc": "Levoču", "loc": "Levoči", "ins": "Levočou"},
+    {"kind": "obec", "rhythmic": true,  "nom": "Michalovce", "gen": "Michaloviec", "dat": "Michalovciam", "acc": "Michalovce", "loc": "Michalovciach", "ins": "Michalovcami"},
+    {"kind": "obec", "rhythmic": false, "nom": "Bratislava", "gen": "Bratislavy", "dat": "Bratislave", "acc": "Bratislavu", "loc": "Bratislave", "ins": "Bratislavou"},
+    {"kind": "obec", "rhythmic": false, "nom": "Žilina", "gen": "Žiliny", "dat": "Žiline", "acc": "Žilinu", "loc": "Žiline", "ins": "Žilinou"},
+    {"kind": "obec", "rhythmic": false, "nom": "Nitra", "gen": "Nitry", "dat": "Nitre", "acc": "Nitru", "loc": "Nitre", "ins": "Nitrou"},
+    {"kind": "obec", "rhythmic": false, "nom": "Trnava", "gen": "Trnavy", "dat": "Trnave", "acc": "Trnavu", "loc": "Trnave", "ins": "Trnavou"},
+    {"kind": "obec", "rhythmic": false, "nom": "Prešov", "gen": "Prešova", "dat": "Prešovu", "acc": "Prešov", "loc": "Prešove", "ins": "Prešovom"},
+    {"kind": "obec", "rhythmic": false, "nom": "Poprad", "gen": "Popradu", "dat": "Popradu", "acc": "Poprad", "loc": "Poprade", "ins": "Popradom"},
+    {"kind": "obec", "rhythmic": false, "nom": "Trenčín", "gen": "Trenčína", "dat": "Trenčínu", "acc": "Trenčín", "loc": "Trenčíne", "ins": "Trenčínom"},
+    {"kind": "obec", "rhythmic": false, "nom": "Zvolen", "gen": "Zvolena", "dat": "Zvolenu", "acc": "Zvolen", "loc": "Zvolene", "ins": "Zvolenom"},
+    {"kind": "obec", "rhythmic": false, "nom": "Banská Bystrica", "gen": "Banskej Bystrice", "dat": "Banskej Bystrici", "acc": "Banskú Bystricu", "loc": "Banskej Bystrici", "ins": "Banskou Bystricou"},
+    {"kind": "kataster", "rhythmic": false, "nom": "Staré Mesto", "gen": "Starého Mesta", "dat": "Starému Mestu", "acc": "Staré Mesto", "loc": "Starom Meste", "ins": "Starým Mestom"},
+    {"kind": "kataster", "rhythmic": false, "nom": "Ružinov", "gen": "Ružinova", "dat": "Ružinovu", "acc": "Ružinov", "loc": "Ružinove", "ins": "Ružinovom"}
+  ]
+}
