@@ -38,6 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .extract import ExtractResult
+from .leak import surface_present
 from .retention import score as retention_score
 
 
@@ -169,23 +170,30 @@ def evaluate(
     for gt, res in graded:
         classes = _unique_by_class(gt)
         review = flagged.get(gt["source_file"], set())
+        # Presence is decided by the SAME canonical predicate as the leak gate
+        # (eval/leak.py::surface_present), with the SAME decoy list find_leaks derives — one
+        # string, one predicate, one answer. Raw ``in`` let the leak gate and these metrics
+        # disagree about whether a surface embedded in a longer decoy is present.
+        decoy_surfaces = [
+            p["surface"] for p in gt["pii"] if not p["auto_redact"] and not p["should_flag"]
+        ]
         for ptype, surfaces in classes["auto"].items():
             tm = bucket(ptype)
             for s in surfaces:
                 tm.auto_total += 1
-                if s not in res.full_text:
+                if not surface_present(res.full_text, s, decoy_surfaces):
                     tm.auto_removed += 1
         for ptype, surfaces in classes["decoy"].items():
             tm = bucket(ptype)
             for s in surfaces:
                 tm.decoy_total += 1
-                if s in res.full_text:
+                if surface_present(res.full_text, s, decoy_surfaces):
                     tm.decoy_preserved += 1
         for ptype, surfaces in classes["flag"].items():
             tm = bucket(ptype)
             for s in surfaces:
                 tm.flag_total += 1
-                if s in res.full_text:
+                if surface_present(res.full_text, s, decoy_surfaces):
                     tm.flag_retained += 1
                 if s in review:
                     tm.flag_in_review += 1

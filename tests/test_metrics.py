@@ -149,3 +149,57 @@ def test_flag_survival_zero_on_scorch(corpus):
     assert flag_types
     for t in flag_types:
         assert t.flag_survival == 0.0
+
+
+# --------------------------------------------------------------------------- canonical presence
+# evaluate() must decide "is this surface present?" with eval/leak.py::surface_present — the
+# SAME predicate (and same decoy list) as the leak gate — not a raw ``in``. With raw ``in`` a
+# surface that only appears as a substring of a longer, present decoy is miscounted, so the
+# metric disagrees with the leak gate about reality. Hand-built GT, NOT corpus-derived.
+def _one_doc_gt(pii: list[dict]) -> dict:
+    return {"source_file": "x.docx", "must_be_refused": False, "text_layer": True, "pii": pii}
+
+
+def test_auto_surface_only_inside_a_present_decoy_counts_as_removed():
+    # auto "Novák" appears ONLY as a substring of the present decoy "Nováková zmluva". Its span
+    # falls strictly inside the decoy's span, so it is NOT an independent occurrence -> removed
+    # -> recall 1.0. Raw ``in`` sees "Novák" in the text and scores it a miss (recall 0.0),
+    # the exact false leak that makes the leak gate and this metric disagree.
+    gt = _one_doc_gt([
+        {"surface": "Novák", "type": "MENO", "auto_redact": True, "should_flag": False,
+         "location": {"surface_part": "body"}},
+        {"surface": "Nováková zmluva", "type": "CAPITALISED_COMMON", "auto_redact": False,
+         "should_flag": False, "location": {"surface_part": "body"}},
+    ])
+    res = ExtractResult(
+        full_text="Predmetom je Nováková zmluva o prevode.",
+        by_surface={"body": "Predmetom je Nováková zmluva o prevode."},
+    )
+    m = evaluate([(gt, res)])
+    assert m.per_type["MENO"].auto_total == 1
+    assert m.per_type["MENO"].recall == 1.0, (
+        f"auto surface embedded in a decoy must count as removed, got {m.per_type['MENO'].recall}"
+    )
+
+
+def test_flag_surface_only_inside_a_present_decoy_counts_as_not_retained():
+    # Same predicate, flag class: should_flag "Kováč" appears ONLY inside the present decoy
+    # "Kováčska dielňa". Its span is strictly inside the decoy's, so it did NOT survive as an
+    # independent flag item -> flag_survival 0.0. Raw ``in`` wrongly reports it retained (1.0),
+    # disagreeing with the leak gate's decoy-span exclusion for the very same string.
+    gt = _one_doc_gt([
+        {"surface": "Kováč", "type": "RODNE_CISLO", "auto_redact": False, "should_flag": True,
+         "location": {"surface_part": "body"}},
+        {"surface": "Kováčska dielňa", "type": "CAPITALISED_COMMON", "auto_redact": False,
+         "should_flag": False, "location": {"surface_part": "body"}},
+    ])
+    res = ExtractResult(
+        full_text="Neďaleko je Kováčska dielňa.",
+        by_surface={"body": "Neďaleko je Kováčska dielňa."},
+    )
+    m = evaluate([(gt, res)])
+    assert m.per_type["RODNE_CISLO"].flag_total == 1
+    assert m.per_type["RODNE_CISLO"].flag_survival == 0.0, (
+        "flag surface present only inside a decoy span must not count as retained, got "
+        f"{m.per_type['RODNE_CISLO'].flag_survival}"
+    )
