@@ -1,27 +1,51 @@
 """Baseline "redactors" that grade the harness itself (context.md §8, steps 4 & 5).
 
-None are real detectors — they exist so the test suite can prove the harness is not lying
-in any direction:
+None are real detectors — they exist so the test suite can prove the eval harness can
+actually FAIL, and fail for the right reason. Each drives a known, deliberate failure mode.
+The harness verdict is a vector of the seven booleans ``EvalOutcome`` exposes (eval/run.py):
+no-leak, no-integrity-failure, no-unexpected-output, ``coverage_ok``, ``retention_ok``,
+``decoy_survival_ok``, ``flag_survival_ok``. There is NO "each baseline fails exactly one
+gate" property — that was never true (see scorch/empty_output below). Measured against the
+mutation-test corpus (n=10, seed=23), each baseline trips exactly these gates, all others
+green (pinned in ``tests/test_baseline_gate_matrix.py``):
 
-* :func:`null_redactor` copies the input unchanged. The harness MUST report massive leaks
-  and ~0%% recall. A harness that passes this is broken.
+* :func:`null_redactor` copies the input byte-for-byte. Trips the LEAK gate alone (every
+  ``auto_redact`` surface survives, ~0%% recall). A harness that passes this is broken.
 * :func:`scorch_redactor` / :func:`empty_output_redactor` destroy every character (emit a
-  valid but empty file). The harness MUST report zero leaks, 100%% recall, terrible decoy
-  survival, AND fail the §8.3 retention gate. A harness that reports success by finding
-  nothing is caught here (context.md rejection, defect 1a) — this is the exact scenario the
-  original harness passed with ``VERDICT: PASS`` on a corpus of blank pages.
+  valid but empty file). Both trip THREE gates together — ``retention_ok`` (no non-PII
+  content survived), ``decoy_survival_ok`` (every decoy destroyed) and ``flag_survival_ok``
+  (every checksum-invalid ``should_flag`` hard-negative destroyed). Tripping three gates is
+  the CORRECT behaviour of total destruction, not a defect: the point (context.md rejection,
+  defect 1a) is that zero leaks and 100%% recall must NOT read as success when the file was
+  simply annihilated — the exact scenario the original harness passed with ``VERDICT: PASS``
+  on a corpus of blank pages. The two are the same strategy under two names and so measure to
+  an IDENTICAL vector (see DISCRIMINATION below).
 * :func:`refuse_all_redactor` writes NO output for any input, not just the no-text-layer
-  fixtures a real redactor is allowed to refuse. The harness MUST fail the §8.3 coverage
-  gate (context.md rejection, defect 1b).
+  fixtures a real redactor is allowed to refuse. Trips the COVERAGE gate alone: zero leaks is
+  not success when nothing was produced (context.md rejection, defect 1b).
 * :func:`greedy_redactor` is an ORACLE (it reads the ground truth alongside each input to
   know exactly what to redact — no detection logic, no stage-3 dependency): it redacts every
   ``auto_redact`` surface AND every checksum-invalid RODNE_CISLO/ICO/IBAN (``should_flag``
   hard negatives that must reach the review bucket, never be auto-redacted, per §4.1). It
-  leaks nothing, retains everything else, preserves every decoy — so it clears leak /
-  retention / decoy-survival / coverage cleanly, and MUST fail on the §8.3 flag-survival
-  gate alone (context.md rejection round 2, defect D5). A harness that cannot catch an
-  over-eager detector auto-redacting a checksum-invalid identifier is exactly the bug §4.1's
-  checksum requirement exists to prevent.
+  leaks nothing, retains everything else, preserves every decoy, produces output for every
+  doc — so it trips the FLAG-SURVIVAL gate (a checksum-invalid identifier auto-redacted
+  instead of routed to review, context.md rejection round 2, defect D5). A harness that
+  cannot catch an over-eager detector auto-redacting a checksum-invalid identifier is exactly
+  the bug §4.1's checksum requirement exists to prevent.
+
+Two properties over the whole set, both pinned in ``tests/test_baseline_gate_matrix.py``:
+
+  COVERAGE       — every §8.3 falsification gate (leak, coverage, retention, decoy_survival,
+                   flag_survival) is tripped red by at least one baseline; a gate no baseline
+                   can trip has never been proven to fire. The other two ``EvalOutcome``
+                   gates — integrity (a corrupt, unopenable output) and unexpected-output (an
+                   output for a ``must_be_refused`` doc) — are structural invariants none of
+                   these five trip: none emit a corrupt file, none are handed a refused doc.
+  DISCRIMINATION — no two baselines share a gate vector, with ONE known, intentional
+                   exception: :func:`scorch_redactor` and :func:`empty_output_redactor` are
+                   two names for the same total-destruction strategy and measure identically.
+                   Any OTHER collision means a baseline has gone redundant as a falsification
+                   instrument and must be investigated.
 """
 from __future__ import annotations
 
