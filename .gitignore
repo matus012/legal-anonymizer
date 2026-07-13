@@ -9,6 +9,10 @@ __pycache__/
 # data
 data/real/
 data/synthetic/
-
-check_*.py
 data/tmp*/
+
+# scratch
+check_*.py
+diff.txt
+review_baselines.diff
+status.txt
