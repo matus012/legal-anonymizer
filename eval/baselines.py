@@ -87,22 +87,71 @@ _DOCX_METADATA_PART = {"docProps/core.xml", "docProps/app.xml"}
 
 def _greedy_targets(gt: dict) -> list[str]:
     """Every auto_redact surface, plus every checksum-invalid RODNE_CISLO/ICO/IBAN
-    (should_flag) — the over-eager behaviour §8.3's flag gate exists to catch. Longest first
-    so a shorter surface that is a substring of a longer one never clips it mid-replace."""
+    (should_flag) — the over-eager behaviour §8.3's flag gate exists to catch."""
     surfaces = {
         p["surface"] for p in gt["pii"]
         if p["auto_redact"] or (p["should_flag"] and p["type"] in _FLAG_TYPES)
     }
-    return sorted(surfaces, key=len, reverse=True)
+    return sorted(surfaces)
 
 
-def _substitute(text: str, targets: list[str]) -> str:
-    for s in targets:
-        text = text.replace(s, _GREEDY_LABEL)
-    return text
+def _greedy_decoys(gt: dict) -> list[str]:
+    """Every decoy surface (auto_redact=False, should_flag=False) — must never be touched.
+    CAPITALISED_COMMON decoys are deliberately built to share a stem/prefix with a seeded
+    surname (context.md §5, rejection round 5, e.g. surname "Novák" -> decoy "Novákov dom"),
+    which means a target like "Novák" is a literal substring of the decoy. A plain
+    ``str.replace`` would clip into it; span-exclusion (see ``_find_spans``) is what makes
+    this oracle actually correct instead of just usually-correct."""
+    return sorted({p["surface"] for p in gt["pii"] if not p["auto_redact"] and not p["should_flag"]})
 
 
-def _redact_docx_xml_part(blob: bytes, targets: list[str]) -> bytes:
+def _find_spans(text: str, surfaces: list[str]) -> list[tuple[int, int]]:
+    """Every occurrence of every surface in ``text``, by exact character offset."""
+    spans = []
+    for s in surfaces:
+        start = 0
+        while True:
+            idx = text.find(s, start)
+            if idx == -1:
+                break
+            spans.append((idx, idx + len(s)))
+            start = idx + len(s)
+    return spans
+
+
+def _substitute(text: str, targets: list[str], decoys: list[str] | None = None) -> str:
+    """Replace every occurrence of every target with the label, EXCEPT an occurrence that
+    falls entirely inside a decoy's own span — that's not an independent target occurrence,
+    it's a substring artifact of a decoy that must survive untouched (e.g. "Novák" inside the
+    decoy "Novákov dom")."""
+    decoy_spans = _find_spans(text, decoys) if decoys else []
+    target_spans = [
+        span for span in _find_spans(text, targets)
+        if not any(
+            d0 <= span[0] and span[1] <= d1 and (d1 - d0) > (span[1] - span[0])
+            for d0, d1 in decoy_spans
+        )
+    ]
+    if not target_spans:
+        return text
+    target_spans.sort()
+    merged: list[list[int]] = []
+    for start, end in target_spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    out: list[str] = []
+    pos = 0
+    for start, end in merged:
+        out.append(text[pos:start])
+        out.append(_GREEDY_LABEL)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _redact_docx_xml_part(blob: bytes, targets: list[str], decoys: list[str]) -> bytes:
     """Collapse this part's ENTIRE reconstructed text (all its w:t/w:delText nodes, matching
     how eval/extract.py reconstructs a part — no separator) into its first text-bearing node
     after substitution, blanking the rest. Token/substring-based checks (leak, retention) only
@@ -113,7 +162,7 @@ def _redact_docx_xml_part(blob: bytes, targets: list[str]) -> bytes:
     if not nodes:
         return blob
     joined = "".join(el.text or "" for el in nodes)
-    new_text = _substitute(joined, targets)
+    new_text = _substitute(joined, targets, decoys)
     if new_text == joined:
         return blob
     nodes[0].text = new_text
@@ -122,16 +171,16 @@ def _redact_docx_xml_part(blob: bytes, targets: list[str]) -> bytes:
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
-def _redact_docx(src: Path, dst: Path, targets: list[str]) -> None:
+def _redact_docx(src: Path, dst: Path, targets: list[str], decoys: list[str]) -> None:
     with zipfile.ZipFile(src) as zin:
         infos = zin.infolist()
         blobs = {i.filename: zin.read(i.filename) for i in infos}
 
     for name in list(blobs):
         if _DOCX_CONTENT_PART.match(name):
-            blobs[name] = _redact_docx_xml_part(blobs[name], targets)
+            blobs[name] = _redact_docx_xml_part(blobs[name], targets, decoys)
         elif name in _DOCX_METADATA_PART:
-            blobs[name] = _substitute(blobs[name].decode("utf-8"), targets).encode("utf-8")
+            blobs[name] = _substitute(blobs[name].decode("utf-8"), targets, decoys).encode("utf-8")
 
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
         for i in infos:
@@ -149,7 +198,20 @@ def _search_variants(page, s: str) -> list:
     return rects
 
 
-def _redact_pdf(src: Path, dst: Path, targets: list[str]) -> None:
+def _rect_inside(inner, outer) -> bool:
+    """True only when ``outer`` STRICTLY covers ``inner``: fully containing it AND strictly
+    larger in area. The geometric analog of eval/leak.py::surface_present's
+    ``(d1 - d0) > target_len`` — an EQUAL rect satisfies all four ``<=`` comparisons but
+    suppresses nothing, so a decoy box coinciding exactly with a target box can never blind
+    the PDF path to that PII (mirrors the round-8 equal-span fix)."""
+    covers = (outer.x0 <= inner.x0 and outer.y0 <= inner.y0
+              and inner.x1 <= outer.x1 and inner.y1 <= outer.y1)
+    outer_area = (outer.x1 - outer.x0) * (outer.y1 - outer.y0)
+    inner_area = (inner.x1 - inner.x0) * (inner.y1 - inner.y0)
+    return covers and outer_area > inner_area
+
+
+def _redact_pdf(src: Path, dst: Path, targets: list[str], decoys: list[str]) -> None:
     doc = fitz.open(src)
     try:
         # apply_redactions() clears EVERY FreeText annotation on the page as a side effect,
@@ -165,28 +227,34 @@ def _redact_pdf(src: Path, dst: Path, targets: list[str]) -> None:
                 page.delete_annot(annot)
 
         # text layer: genuine glyph destruction via PyMuPDF redaction annotations, the
-        # real technique context.md §10 specifies — not a text-substitution hack.
+        # real technique context.md §10 specifies — not a text-substitution hack. A target
+        # rect fully inside a decoy's own rect is a substring artifact (e.g. "Novák" is a
+        # literal substring of the decoy "Novákov"), not an independent occurrence — skip it,
+        # same reasoning as the DOCX span-exclusion in ``_substitute``.
         for page in doc:
+            decoy_rects = [r for s in decoys for r in _search_variants(page, s)]
             for s in targets:
                 for rect in _search_variants(page, s):
+                    if any(_rect_inside(rect, dr) for dr in decoy_rects):
+                        continue
                     page.add_redact_annot(rect, text=_GREEDY_LABEL, fill=(1, 1, 1))
             page.apply_redactions()
 
         for page_no, rect, content in saved_annots:
-            new_content = _substitute(content, targets)
+            new_content = _substitute(content, targets, decoys)
             doc[page_no].add_freetext_annot(rect, new_content, fontsize=10)
 
         for page in doc:
             for widget in page.widgets():
                 value = widget.field_value or ""
-                new_value = _substitute(value, targets)
+                new_value = _substitute(value, targets, decoys)
                 if new_value != value:
                     widget.field_value = new_value
                     widget.update()
 
         for name in doc.embfile_names():
             text = doc.embfile_get(name).decode("utf-8", "replace")
-            new_text = _substitute(text, targets)
+            new_text = _substitute(text, targets, decoys)
             if new_text != text:
                 # embfile_upd(buffer_=...) hits a bytes/Buffer mismatch in this PyMuPDF
                 # build; delete-and-re-add is the stable path to replace embedded content.
@@ -197,7 +265,7 @@ def _redact_pdf(src: Path, dst: Path, targets: list[str]) -> None:
         changed = False
         for k, v in list(meta.items()):
             if isinstance(v, str) and v:
-                new_v = _substitute(v, targets)
+                new_v = _substitute(v, targets, decoys)
                 if new_v != v:
                     meta[k] = new_v
                     changed = True
@@ -205,7 +273,7 @@ def _redact_pdf(src: Path, dst: Path, targets: list[str]) -> None:
             doc.set_metadata(meta)
 
         xmp = doc.get_xml_metadata() or ""
-        new_xmp = _substitute(xmp, targets)
+        new_xmp = _substitute(xmp, targets, decoys)
         if new_xmp != xmp:
             doc.set_xml_metadata(new_xmp)
 
@@ -216,15 +284,17 @@ def _redact_pdf(src: Path, dst: Path, targets: list[str]) -> None:
 
 def greedy_redactor(src: Path, dst: Path) -> None:
     """Oracle redactor: reads ``<src>.gt.json`` alongside ``src`` and redacts every
-    auto_redact surface AND every checksum-invalid RODNE_CISLO/ICO/IBAN. See module
-    docstring — must fail the §8.3 flag-survival gate alone."""
+    auto_redact surface AND every checksum-invalid RODNE_CISLO/ICO/IBAN, while protecting
+    every decoy surface from substring collateral damage. See module docstring — must fail
+    the §8.3 flag-survival gate alone."""
     gt_path = src.parent / f"{src.name}.gt.json"
     gt = json.loads(gt_path.read_text("utf-8"))
     targets = _greedy_targets(gt)
+    decoys = _greedy_decoys(gt)
     suffix = src.suffix.lower()
     if suffix == ".docx":
-        _redact_docx(src, dst, targets)
+        _redact_docx(src, dst, targets, decoys)
     elif suffix == ".pdf":
-        _redact_pdf(src, dst, targets)
+        _redact_pdf(src, dst, targets, decoys)
     else:
         raise ValueError(f"unsupported file type: {src.suffix!r} ({src.name})")
