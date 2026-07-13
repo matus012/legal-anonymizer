@@ -1,13 +1,14 @@
 """Baseline gate MATRIX — coverage, discrimination, and pinned vectors.
 
-eval/baselines.py's five baseline "redactors" exist to prove the eval harness can actually
+eval/baselines.py's seven baseline "redactors" exist to prove the eval harness can actually
 FAIL, and fail for the right reason. The property they must satisfy is NOT "each fails exactly
 one gate" — that was never true: scorch and empty_output destroy every character and therefore
 trip three gates at once. The real, weaker, true properties are:
 
-  1. COVERAGE       — every §8.3 falsification gate (leak, coverage, retention, decoy_survival,
-                      flag_survival) is tripped red by at least one baseline. A gate no baseline
-                      can trip has never been proven to fire.
+  1. COVERAGE       — every one of the seven EvalOutcome gates (leak, integrity,
+                      unexpected-output, coverage, retention, decoy_survival, flag_survival) is
+                      tripped red by at least one baseline. A gate no baseline can trip has
+                      never been proven to fire.
   2. DISCRIMINATION — no two baselines share a gate vector, with ONE known, intentional
                       exception: scorch_redactor and empty_output_redactor are two names for the
                       same total-destruction strategy and measure identically.
@@ -25,9 +26,11 @@ from pathlib import Path
 import pytest
 
 from eval.baselines import (
+    corrupt_output_redactor,
     empty_output_redactor,
     greedy_redactor,
     null_redactor,
+    overeager_refusal_redactor,
     refuse_all_redactor,
     scorch_redactor,
 )
@@ -56,18 +59,15 @@ BASELINES = {
     "empty_output_redactor": empty_output_redactor,
     "refuse_all_redactor": refuse_all_redactor,
     "greedy_redactor": greedy_redactor,
+    "corrupt_output_redactor": corrupt_output_redactor,
+    "overeager_refusal_redactor": overeager_refusal_redactor,
 }
 
-# The five §8.3 falsification gates the baselines exist to exercise. COVERAGE is asserted over
-# exactly this set.
-FALSIFICATION_GATES = frozenset({
-    "no_leaks", "coverage_ok", "retention_ok", "decoy_survival_ok", "flag_survival_ok",
-})
-# The remaining two EvalOutcome gates. NO baseline here trips them, by construction: none emit
-# a corrupt/unopenable file (integrity), and none are handed a must_be_refused doc, so none
-# produce an output-for-a-refused-doc (unexpected). They are structural invariants, exercised
-# elsewhere — pinned here so a future baseline that DOES trip one is caught.
-STRUCTURAL_INVARIANTS = frozenset({"no_integrity_failures", "no_unexpected_outputs"})
+# Baselines that must ALSO be handed the must_be_refused documents (not just the gradeable
+# ones): overeager_refusal_redactor exists precisely to emit an output for a doc that should
+# be refused, so _apply must not filter those out for it. Every other baseline is only handed
+# the gradeable docs (a real redactor never sees the refused ones), matching eval/run.py.
+APPLY_TO_REFUSED = frozenset({"overeager_refusal_redactor"})
 
 # scorch and empty_output are two names for the same total-destruction strategy (both emit a
 # valid empty file) and therefore MUST share a vector. This is the only allowed collision.
@@ -122,16 +122,36 @@ PINNED = {
         "decoy_survival_ok": True,
         "flag_survival_ok": False,      # RED — auto-redacts checksum-invalid hard-negatives
     },
+    "corrupt_output_redactor": {
+        "no_leaks": True,               # nothing opened -> nothing graded -> nothing to leak
+        "no_integrity_failures": False,  # RED — output bytes are not a valid docx/pdf
+        "no_unexpected_outputs": True,
+        "coverage_ok": True,            # a (corrupt) output file DOES exist for every doc
+        "retention_ok": True,           # no graded docs -> gate not computed -> not a failure
+        "decoy_survival_ok": True,
+        "flag_survival_ok": True,
+    },
+    "overeager_refusal_redactor": {
+        "no_leaks": True,
+        "no_integrity_failures": True,
+        "no_unexpected_outputs": False,  # RED — emits an output for a must_be_refused doc
+        "coverage_ok": True,
+        "retention_ok": True,
+        "decoy_survival_ok": True,
+        "flag_survival_ok": False,      # RED — inherits greedy's over-redaction of hard-negatives
+    },
 }
 
 
-def _apply(redactor, corpus: Path, dst: Path) -> None:
-    """Run ``redactor`` over every non-refused corpus doc. Mirrors eval/run.py's contract:
-    ``must_be_refused`` docs are expected to have NO output, so no baseline is handed one."""
+def _apply(redactor, corpus: Path, dst: Path, *, include_refused: bool = False) -> None:
+    """Run ``redactor`` over the corpus docs. By default the ``must_be_refused`` docs are
+    withheld — eval/run.py expects them to have NO output, so a real redactor never sees them.
+    ``include_refused=True`` hands those docs over too, which is how overeager_refusal_redactor
+    gets a chance to (wrongly) emit an output for one."""
     dst.mkdir(parents=True, exist_ok=True)
     for gt_path in corpus.glob("*.gt.json"):
         gt = json.loads(gt_path.read_text("utf-8"))
-        if gt["must_be_refused"]:
+        if gt["must_be_refused"] and not include_refused:
             continue
         redactor(corpus / gt["source_file"], dst / gt["source_file"])
 
@@ -143,7 +163,7 @@ def measured(corpus, tmp_path_factory) -> dict[str, dict[str, bool]]:
     vectors: dict[str, dict[str, bool]] = {}
     for name, redactor in BASELINES.items():
         dst = root / name
-        _apply(redactor, corpus, dst)
+        _apply(redactor, corpus, dst, include_refused=name in APPLY_TO_REFUSED)
         outcome = run_eval(corpus, dst)
         vectors[name] = {gate: is_green(outcome) for gate, is_green in GATES.items()}
     return vectors
@@ -160,20 +180,15 @@ def test_full_gate_vector_is_pinned(name, measured):
 
 
 # --------------------------------------------------------------- property 1: COVERAGE
-def test_every_falsification_gate_is_tripped_by_some_baseline(measured):
+def test_every_gate_is_tripped_by_some_baseline(measured):
+    # ALL SEVEN EvalOutcome gates must be proven fireable — including integrity and
+    # unexpected-output, which corrupt_output_redactor and overeager_refusal_redactor now
+    # cover. No structural-invariant carve-out remains: a gate no baseline can trip has never
+    # been proven to work.
     tripped = {gate for v in measured.values() for gate, green in v.items() if not green}
-
-    missing = FALSIFICATION_GATES - tripped
-    assert not missing, f"§8.3 gate(s) no baseline can trip (never proven to fire): {missing}"
-
-    # Exactly the falsification gates are tripped: the two structural-invariant gates
-    # (integrity, unexpected-output) stay green across all five, by construction.
-    assert tripped == set(FALSIFICATION_GATES), (
-        f"a gate outside the falsification set was tripped: {tripped - FALSIFICATION_GATES}"
-    )
-    assert FALSIFICATION_GATES | STRUCTURAL_INVARIANTS == set(GATES), (
-        "the falsification + structural gate sets must partition every EvalOutcome gate"
-    )
+    missing = set(GATES) - tripped
+    assert not missing, f"gate(s) no baseline can trip (never proven to fire): {missing}"
+    assert tripped == set(GATES)
 
 
 # --------------------------------------------------------------- property 2: DISCRIMINATION

@@ -32,15 +32,24 @@ green (pinned in ``tests/test_baseline_gate_matrix.py``):
   instead of routed to review, context.md rejection round 2, defect D5). A harness that
   cannot catch an over-eager detector auto-redacting a checksum-invalid identifier is exactly
   the bug §4.1's checksum requirement exists to prevent.
+* :func:`corrupt_output_redactor` writes an output with the correct extension but bytes that
+  are not a valid docx/pdf, so eval/extract.py cannot open it. Trips the INTEGRITY gate
+  (no_integrity_failures) alone: nothing opens, so nothing is graded and there is nothing
+  left to leak. Proves the harness rejects an unopenable output instead of scoring it 0-leak.
+* :func:`overeager_refusal_redactor` redacts normally (delegating to greedy) but NEVER
+  refuses — it emits an output even for the no-text-layer scans §3 says must be refused. Trips
+  the UNEXPECTED-OUTPUT gate (no_unexpected_outputs), and, because it reuses greedy's
+  redaction, ALSO the flag-survival gate. Proves the harness rejects a redactor that fails to
+  refuse an image-only document.
 
 Two properties over the whole set, both pinned in ``tests/test_baseline_gate_matrix.py``:
 
-  COVERAGE       — every §8.3 falsification gate (leak, coverage, retention, decoy_survival,
-                   flag_survival) is tripped red by at least one baseline; a gate no baseline
-                   can trip has never been proven to fire. The other two ``EvalOutcome``
-                   gates — integrity (a corrupt, unopenable output) and unexpected-output (an
-                   output for a ``must_be_refused`` doc) — are structural invariants none of
-                   these five trip: none emit a corrupt file, none are handed a refused doc.
+  COVERAGE       — every one of the seven ``EvalOutcome`` gates (leak, integrity,
+                   unexpected-output, coverage, retention, decoy_survival, flag_survival) is
+                   tripped red by at least one baseline; a gate no baseline can trip has never
+                   been proven to fire. Integrity and unexpected-output — untested until
+                   :func:`corrupt_output_redactor` and :func:`overeager_refusal_redactor` were
+                   added — now each have a baseline that fires them.
   DISCRIMINATION — no two baselines share a gate vector, with ONE known, intentional
                    exception: :func:`scorch_redactor` and :func:`empty_output_redactor` are
                    two names for the same total-destruction strategy and measure identically.
@@ -322,3 +331,21 @@ def greedy_redactor(src: Path, dst: Path) -> None:
         _redact_pdf(src, dst, targets, decoys)
     else:
         raise ValueError(f"unsupported file type: {src.suffix!r} ({src.name})")
+
+
+def corrupt_output_redactor(src: Path, dst: Path) -> None:
+    """Write an output with the CORRECT extension but bytes that are not a valid docx/pdf, so
+    eval/extract.py cannot open it. Trips the integrity gate (no_integrity_failures) — an
+    output that will not open / cannot be extracted (context.md §8.2). Every other gate stays
+    green: nothing opens, so nothing is graded, so there is nothing left to leak."""
+    dst.write_bytes(b"this is not a valid docx or pdf file\n")
+
+
+def overeager_refusal_redactor(src: Path, dst: Path) -> None:
+    """Redact normally (delegates to :func:`greedy_redactor`) but NEVER refuse: emit an output
+    for EVERY document, including the no-text-layer scans context.md §3 says a real redactor
+    MUST refuse. Producing an output for a ``must_be_refused`` document trips the
+    unexpected-output gate (no_unexpected_outputs). Because it reuses greedy's oracle
+    redaction, it also inherits greedy's flag-survival failure — that extra red is measured
+    and pinned, not tuned away."""
+    greedy_redactor(src, dst)
