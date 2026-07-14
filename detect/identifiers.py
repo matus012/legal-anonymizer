@@ -278,6 +278,8 @@ def _detect_telefon(text: str) -> list[Candidate]:
 
 
 def detect(text: str) -> list[Candidate]:
+    from .datetime_amounts import detect_datetime_amounts
+
     candidates: list[Candidate] = []
     candidates.extend(_detect_rc(text))
     candidates.extend(_detect_ico(text))
@@ -289,6 +291,7 @@ def detect(text: str) -> list[Candidate]:
     candidates.extend(_detect_email(text))
     candidates.extend(_detect_url(text))
     candidates.extend(_detect_telefon(text))
+    candidates.extend(detect_datetime_amounts(text))
     candidates = _suppress_urls_inside_emails(candidates)
     candidates.sort(key=lambda c: (c.start, c.end))
     spans = [(c.start, c.end) for c in candidates]
