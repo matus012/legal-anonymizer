@@ -15,4 +15,4 @@ data/tmp*/
 check_*.py
 diff.txt
 review_baselines.diff
-status.txt
+handoff.md
