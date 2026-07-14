@@ -209,6 +209,74 @@ def _resolve_type_precedence(candidates: list[Candidate]) -> list[Candidate]:
     return out
 
 
+# --------------------------------------------------------------------------- EMAIL
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b")
+
+
+def _detect_email(text: str) -> list[Candidate]:
+    return [
+        Candidate(type="EMAIL", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
+        for m in _EMAIL_RE.finditer(text)
+    ]
+
+
+# --------------------------------------------------------------------------- URL
+# Bare-scheme form ("name.tld") is shape-identical to an email domain part; EMAIL wins
+# via containment suppression below, not via _TYPE_PRECEDENCE (no exact-span collision).
+# A scheme-less match ("name.tld") is otherwise indistinguishable from a filename
+# ("dokument.pdf"), so it is only accepted when the final label is a real-world TLD;
+# an explicit http(s)/www scheme disambiguates intent, so that form keeps the looser rule.
+_URL_TLD_ALLOW = r"(?:sk|cz|com|eu|org|net|info|biz|edu|gov|io|dev)"
+_URL_RE = re.compile(
+    r"\b(?:https?://(?:www\.)?|www\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
+    r"|"
+    rf"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.{_URL_TLD_ALLOW}\b"
+)
+
+
+def _detect_url(text: str) -> list[Candidate]:
+    return [
+        Candidate(type="URL", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
+        for m in _URL_RE.finditer(text)
+    ]
+
+
+def _suppress_urls_inside_emails(candidates: list[Candidate]) -> list[Candidate]:
+    email_spans = [(c.start, c.end) for c in candidates if c.type == "EMAIL"]
+    return [
+        c
+        for c in candidates
+        if not (
+            c.type == "URL"
+            and any(c.start >= es and c.end <= ee for es, ee in email_spans)
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- TELEFON
+# Every generated phone carries structure (+421, a leading-0 mobile prefix, or an
+# area/local slash) with a group separator that is a normal space or NBSP (U+00A0),
+# never both collapsed into a bare \s (that would also swallow newlines). A contiguous
+# digit run (RODNE_CISLO, DIC, ICO) is never matched: every alternative below requires
+# a literal separator or slash between digit groups, which a bare digit run lacks.
+_SEP = "[  ]"
+_TELEFON_RE = re.compile(
+    r"\+421"
+    rf"{_SEP}\d{{1,3}}{_SEP}\d{{3,4}}{_SEP}\d{{3,4}}"  # mobile_intl / landline_intl
+    r"|"
+    rf"\b0\d{{3}}{_SEP}\d{{3}}{_SEP}\d{{3}}\b"  # mobile_local
+    r"|"
+    rf"\b0\d{{1,2}}/\d{{3}}{_SEP}\d{{3}}{_SEP}\d{{3}}\b"  # landline_local
+)
+
+
+def _detect_telefon(text: str) -> list[Candidate]:
+    return [
+        Candidate(type="TELEFON", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
+        for m in _TELEFON_RE.finditer(text)
+    ]
+
+
 def detect(text: str) -> list[Candidate]:
     candidates: list[Candidate] = []
     candidates.extend(_detect_rc(text))
@@ -218,6 +286,10 @@ def detect(text: str) -> list[Candidate]:
     candidates.extend(_detect_iban(text))
     candidates = _resolve_flag_survival(candidates)
     candidates = _resolve_type_precedence(candidates)
+    candidates.extend(_detect_email(text))
+    candidates.extend(_detect_url(text))
+    candidates.extend(_detect_telefon(text))
+    candidates = _suppress_urls_inside_emails(candidates)
     candidates.sort(key=lambda c: (c.start, c.end))
     spans = [(c.start, c.end) for c in candidates]
     assert len(spans) == len(set(spans)), "duplicate candidates on identical span"
