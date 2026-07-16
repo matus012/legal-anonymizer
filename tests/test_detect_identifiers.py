@@ -176,7 +176,7 @@ def test_iban_legacy_domestic_form_valid_detected_auto_true():
     # 123406-1234567805/1100: prefix weighted-mod11 and base weighted-mod11 both
     # independently verified to sum to 0 mod 11.
     text = "Bankové spojenie: 123406-1234567805/1100."
-    hits = _find(detect(text), "IBAN", "123406-1234567805/1100")
+    hits = _find(detect(text), "BANKOVY_UCET", "123406-1234567805/1100")
     assert len(hits) == 1
     assert hits[0].auto is True
 
@@ -184,14 +184,14 @@ def test_iban_legacy_domestic_form_valid_detected_auto_true():
 def test_iban_legacy_domestic_form_checksum_broken_detected_auto_false():
     # break the base's last digit: 1234567805 -> 1234567806 (still shaped, fails weighted mod11)
     text = "Bankové spojenie: 123406-1234567806/1100."
-    hits = _find(detect(text), "IBAN", "123406-1234567806/1100")
+    hits = _find(detect(text), "BANKOVY_UCET", "123406-1234567806/1100")
     assert len(hits) == 1
     assert hits[0].auto is False
 
 
 def test_iban_legacy_domestic_form_shape_broken_not_detected():
     text = "Bankové spojenie: 123406-1234567805-1100."  # no slash before bank code
-    assert not any(c.type == "IBAN" for c in detect(text))
+    assert not any(c.type in ("IBAN", "BANKOVY_UCET") for c in detect(text))
 
 
 # ------------------------------------------------------------ adjacency / disambiguation

@@ -107,22 +107,12 @@ def _detect_dic(text: str) -> list[Candidate]:
 
 # --------------------------------------------------------------------------- IBAN
 _IBAN_RE = re.compile(r"\bSK\d{2}(?: ?\d{4}){5}\b")
-_LEGACY_RE = re.compile(r"\b(?:(\d{1,6})-)?(\d{2,10})/(\d{4})\b")
-
-_PREFIX_WEIGHTS = (10, 5, 8, 4, 2, 1)
-_BASE_WEIGHTS = (6, 3, 7, 9, 10, 5, 8, 4, 2, 1)
 
 
 def _iban_mod97_ok(compact: str) -> bool:
     s = compact[4:] + compact[:4]
     digits = "".join(str(int(c, 36)) for c in s)  # A-Z -> 10-35
     return int(digits) % 97 == 1
-
-
-def _weighted_mod11_ok(number: str, weights: tuple[int, ...]) -> bool:
-    tail = number[-len(weights):]
-    s = sum(int(c) * w for c, w in zip(reversed(tail), reversed(weights)))
-    return s % 11 == 0
 
 
 def _detect_iban(text: str) -> list[Candidate]:
@@ -138,17 +128,36 @@ def _detect_iban(text: str) -> list[Candidate]:
                 auto=_iban_mod97_ok(compact),
             )
         )
-    for m in _LEGACY_RE.finditer(text):
-        prefix, base, _bank = m.group(1), m.group(2), m.group(3)
-        if len(base) != 10:
-            continue
-        if prefix is not None and not _weighted_mod11_ok(prefix, _PREFIX_WEIGHTS):
-            valid = False
-        else:
-            valid = _weighted_mod11_ok(base, _BASE_WEIGHTS)
+    return out
+
+
+# --------------------------------------------------------------------------- BANKOVY_UCET
+# Legacy SK domestic account, prefix-base/bankcode (GT labels this BANKOVY_UCET, not
+# IBAN). The dashed prefix is REQUIRED: a bare base/bankcode (no dash) collides with
+# decoy order numbers ("Obj. c. 123/2019"), so the prefixless form is deliberately not
+# matched. The bank code is not validated against any list.
+_BANKOVY_UCET_RE = re.compile(r"(?<!\d)(\d{1,6})-(\d{2,10})/(\d{4})(?!\d)")
+
+_PREFIX_WEIGHTS = (10, 5, 8, 4, 2, 1)
+_BASE_WEIGHTS = (6, 3, 7, 9, 10, 5, 8, 4, 2, 1)
+
+
+def _weighted_mod11_ok(number: str, weights: tuple[int, ...]) -> bool:
+    tail = number[-len(weights):]
+    s = sum(int(c) * w for c, w in zip(reversed(tail), reversed(weights)))
+    return s % 11 == 0
+
+
+def _detect_bankovy_ucet(text: str) -> list[Candidate]:
+    out = []
+    for m in _BANKOVY_UCET_RE.finditer(text):
+        prefix, base = m.group(1), m.group(2)
+        valid = _weighted_mod11_ok(prefix, _PREFIX_WEIGHTS) and _weighted_mod11_ok(
+            base, _BASE_WEIGHTS
+        )
         out.append(
             Candidate(
-                type="IBAN",
+                type="BANKOVY_UCET",
                 surface=m.group(0),
                 start=m.start(),
                 end=m.end(),

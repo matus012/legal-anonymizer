@@ -24,6 +24,7 @@ class Candidate:
 from .datetime_amounts import detect_datetime_amounts  # noqa: E402
 from .registry_refs import detect_registry  # noqa: E402
 from .identifiers import (  # noqa: E402
+    _detect_bankovy_ucet,
     _detect_dic,
     _detect_email,
     _detect_ic_dph,
@@ -63,7 +64,7 @@ def _resolve_flag_survival(candidates: list[Candidate]) -> list[Candidate]:
 # with no checksum -- the weakest claim on a span, so it always yields. A genuine DIC
 # that coincidentally looks like an RC gets labelled RODNE_CISLO; it is still redacted,
 # only the report label differs. Recall over precision (context.md §6).
-_TYPE_PRECEDENCE = ("RODNE_CISLO", "IBAN", "IC_DPH", "ICO", "DIC")
+_TYPE_PRECEDENCE = ("RODNE_CISLO", "IBAN", "BANKOVY_UCET", "IC_DPH", "ICO", "DIC")
 _TYPE_RANK = {t: i for i, t in enumerate(_TYPE_PRECEDENCE)}
 
 
@@ -75,6 +76,31 @@ def _resolve_type_precedence(candidates: list[Candidate]) -> list[Candidate]:
     for group in by_span.values():
         out.append(min(group, key=lambda c: _TYPE_RANK[c.type]))
     return out
+
+
+# ------------------------------------------------------------------ CONTAINMENT SUPPRESSION
+# A BANKOVY_UCET surface (prefix-base/bankcode) always carries a 10-digit base as a
+# strict sub-span, and that base independently matches the bare-DIC shape (and can
+# match the slashless-RC shape). Those are DIFFERENT (start, end) spans, so neither
+# flag-survival nor type precedence (both exact-span) ever sees the collision — without
+# this step detect() would double-emit the full account AND an inner DIC/RC. The full
+# account claims everything strictly inside it; equal spans are left to the exact-span
+# precedence stages.
+def _suppress_identifiers_inside_bankovy_ucet(
+    candidates: list[Candidate],
+) -> list[Candidate]:
+    account_spans = [
+        (c.start, c.end) for c in candidates if c.type == "BANKOVY_UCET"
+    ]
+    return [
+        c
+        for c in candidates
+        if c.type == "BANKOVY_UCET"
+        or not any(
+            s <= c.start and c.end <= e and (c.start, c.end) != (s, e)
+            for s, e in account_spans
+        )
+    ]
 
 
 def _suppress_urls_inside_emails(candidates: list[Candidate]) -> list[Candidate]:
@@ -96,6 +122,8 @@ def detect(text: str) -> list[Candidate]:
     candidates.extend(_detect_ic_dph(text))
     candidates.extend(_detect_dic(text))
     candidates.extend(_detect_iban(text))
+    candidates.extend(_detect_bankovy_ucet(text))
+    candidates = _suppress_identifiers_inside_bankovy_ucet(candidates)
     candidates = _resolve_flag_survival(candidates)
     candidates = _resolve_type_precedence(candidates)
     candidates.extend(_detect_email(text))
