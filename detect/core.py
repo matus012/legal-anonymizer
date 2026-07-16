@@ -22,6 +22,7 @@ class Candidate:
 # Detector imports come AFTER Candidate so that detector modules importing Candidate
 # from this partially-initialized module always find it already defined.
 from .datetime_amounts import detect_datetime_amounts  # noqa: E402
+from .registry_refs import detect_registry  # noqa: E402
 from .identifiers import (  # noqa: E402
     _detect_dic,
     _detect_email,
@@ -101,6 +102,7 @@ def detect(text: str) -> list[Candidate]:
     candidates.extend(_detect_url(text))
     candidates.extend(_detect_telefon(text))
     candidates.extend(detect_datetime_amounts(text))
+    candidates.extend(detect_registry(text))
     candidates = _suppress_urls_inside_emails(candidates)
     candidates.sort(key=lambda c: (c.start, c.end))
     spans = [(c.start, c.end) for c in candidates]
