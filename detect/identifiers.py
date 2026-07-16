@@ -14,17 +14,8 @@ only). For those two, shape validity is the only gate: shape valid -> auto=True 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 
-
-@dataclass(frozen=True)
-class Candidate:
-    type: str
-    surface: str
-    start: int
-    end: int
-    auto: bool
-
+from .core import Candidate
 
 # --------------------------------------------------------------------------- RODNE_CISLO
 _RC_RE = re.compile(r"\b(\d{6})(/?)(\d{4})\b")
@@ -167,48 +158,6 @@ def _detect_iban(text: str) -> list[Candidate]:
     return out
 
 
-# --------------------------------------------------------------- FLAG-SURVIVAL PRECEDENCE RULE
-# A shape-valid span can be claimed by more than one detector (e.g. a slashless RČ is
-# also a bare 10-digit DIC). If any detector on that exact span calls it a checksum
-# failure (auto=False), that verdict wins outright: every auto=True candidate on the
-# same (start, end) is dropped. A span some detector believes fails its checksum must
-# reach the review bucket — losing an auto-redaction there costs the reviewer one tick;
-# auto-redacting it is the §4.1 flag-survival bug the checksum requirement exists to
-# prevent. Partial overlaps (different spans) are untouched by this rule.
-def _resolve_flag_survival(candidates: list[Candidate]) -> list[Candidate]:
-    by_span: dict[tuple[int, int], list[Candidate]] = {}
-    for c in candidates:
-        by_span.setdefault((c.start, c.end), []).append(c)
-    out = []
-    for group in by_span.values():
-        if any(not c.auto for c in group) and any(c.auto for c in group):
-            out.extend(c for c in group if not c.auto)
-        else:
-            out.extend(group)
-    return out
-
-
-# --------------------------------------------------------------------------- TYPE PRECEDENCE
-# If flag-survival resolution still leaves more than one candidate on the same exact
-# span (both agreed auto=True, or both agreed auto=False), pick one by type: most
-# specific shape/checksum first. DIC is last because it is pure shape (\b\d{10}\b)
-# with no checksum -- the weakest claim on a span, so it always yields. A genuine DIC
-# that coincidentally looks like an RC gets labelled RODNE_CISLO; it is still redacted,
-# only the report label differs. Recall over precision (context.md §6).
-_TYPE_PRECEDENCE = ("RODNE_CISLO", "IBAN", "IC_DPH", "ICO", "DIC")
-_TYPE_RANK = {t: i for i, t in enumerate(_TYPE_PRECEDENCE)}
-
-
-def _resolve_type_precedence(candidates: list[Candidate]) -> list[Candidate]:
-    by_span: dict[tuple[int, int], list[Candidate]] = {}
-    for c in candidates:
-        by_span.setdefault((c.start, c.end), []).append(c)
-    out = []
-    for group in by_span.values():
-        out.append(min(group, key=lambda c: _TYPE_RANK[c.type]))
-    return out
-
-
 # --------------------------------------------------------------------------- EMAIL
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b")
 
@@ -222,7 +171,7 @@ def _detect_email(text: str) -> list[Candidate]:
 
 # --------------------------------------------------------------------------- URL
 # Bare-scheme form ("name.tld") is shape-identical to an email domain part; EMAIL wins
-# via containment suppression below, not via _TYPE_PRECEDENCE (no exact-span collision).
+# via containment suppression in detect.core, not via type precedence (no exact-span collision).
 # A scheme-less match ("name.tld") is otherwise indistinguishable from a filename
 # ("dokument.pdf"), so it is only accepted when the final label is a real-world TLD;
 # an explicit http(s)/www scheme disambiguates intent, so that form keeps the looser rule.
@@ -238,18 +187,6 @@ def _detect_url(text: str) -> list[Candidate]:
     return [
         Candidate(type="URL", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
         for m in _URL_RE.finditer(text)
-    ]
-
-
-def _suppress_urls_inside_emails(candidates: list[Candidate]) -> list[Candidate]:
-    email_spans = [(c.start, c.end) for c in candidates if c.type == "EMAIL"]
-    return [
-        c
-        for c in candidates
-        if not (
-            c.type == "URL"
-            and any(c.start >= es and c.end <= ee for es, ee in email_spans)
-        )
     ]
 
 
@@ -275,25 +212,3 @@ def _detect_telefon(text: str) -> list[Candidate]:
         Candidate(type="TELEFON", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
         for m in _TELEFON_RE.finditer(text)
     ]
-
-
-def detect(text: str) -> list[Candidate]:
-    from .datetime_amounts import detect_datetime_amounts
-
-    candidates: list[Candidate] = []
-    candidates.extend(_detect_rc(text))
-    candidates.extend(_detect_ico(text))
-    candidates.extend(_detect_ic_dph(text))
-    candidates.extend(_detect_dic(text))
-    candidates.extend(_detect_iban(text))
-    candidates = _resolve_flag_survival(candidates)
-    candidates = _resolve_type_precedence(candidates)
-    candidates.extend(_detect_email(text))
-    candidates.extend(_detect_url(text))
-    candidates.extend(_detect_telefon(text))
-    candidates.extend(detect_datetime_amounts(text))
-    candidates = _suppress_urls_inside_emails(candidates)
-    candidates.sort(key=lambda c: (c.start, c.end))
-    spans = [(c.start, c.end) for c in candidates]
-    assert len(spans) == len(set(spans)), "duplicate candidates on identical span"
-    return candidates

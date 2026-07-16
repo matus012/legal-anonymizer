@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from .identifiers import Candidate
+from .core import Candidate
 
 _SEP = "[  ]"  # NBSP-or-space; every generator separator is one of the two, never \s
 
