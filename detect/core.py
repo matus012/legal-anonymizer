@@ -22,6 +22,7 @@ class Candidate:
 # Detector imports come AFTER Candidate so that detector modules importing Candidate
 # from this partially-initialized module always find it already defined.
 from .datetime_amounts import detect_datetime_amounts  # noqa: E402
+from .known_entities import detect_known_entities  # noqa: E402
 from .registry_refs import detect_registry  # noqa: E402
 from .identifiers import (  # noqa: E402
     _detect_bankovy_ucet,
@@ -64,7 +65,7 @@ def _resolve_flag_survival(candidates: list[Candidate]) -> list[Candidate]:
 # with no checksum -- the weakest claim on a span, so it always yields. A genuine DIC
 # that coincidentally looks like an RC gets labelled RODNE_CISLO; it is still redacted,
 # only the report label differs. Recall over precision (context.md §6).
-_TYPE_PRECEDENCE = ("RODNE_CISLO", "IBAN", "BANKOVY_UCET", "IC_DPH", "ICO", "DIC")
+_TYPE_PRECEDENCE = ("RODNE_CISLO", "IBAN", "BANKOVY_UCET", "IC_DPH", "ICO", "DIC", "MENO")
 _TYPE_RANK = {t: i for i, t in enumerate(_TYPE_PRECEDENCE)}
 
 
@@ -115,7 +116,9 @@ def _suppress_urls_inside_emails(candidates: list[Candidate]) -> list[Candidate]
     ]
 
 
-def detect(text: str) -> list[Candidate]:
+def detect(text: str, known_entities: list[str] | None = None) -> list[Candidate]:
+    if known_entities is None:
+        known_entities = []
     candidates: list[Candidate] = []
     candidates.extend(_detect_rc(text))
     candidates.extend(_detect_ico(text))
@@ -123,6 +126,7 @@ def detect(text: str) -> list[Candidate]:
     candidates.extend(_detect_dic(text))
     candidates.extend(_detect_iban(text))
     candidates.extend(_detect_bankovy_ucet(text))
+    candidates.extend(detect_known_entities(text, known_entities))
     candidates = _suppress_identifiers_inside_bankovy_ucet(candidates)
     candidates = _resolve_flag_survival(candidates)
     candidates = _resolve_type_precedence(candidates)
