@@ -9,9 +9,13 @@ mapped back to exact character offsets inside runs, the covered characters remov
 type label inserted at the span start, and any boundary run split into fragments that each
 keep a clone of the original run's <w:rPr>.
 
-Scope is BODY ONLY (doc.paragraphs): tables, headers/footers, notes, comments and textboxes
-are W2/W3 and are intentionally left untouched here. Labels are type-only ("[MENO]"); per
--entity numbering ("[MENO_1]") is W5. The input file is never modified — output is a new file.
+W2 (context.md §10) extends coverage past doc.paragraphs to every OTHER place Word hides a
+<w:p>: table cells, header/footer paragraphs, header/footer tables, and VML textboxes (in
+the body and in header/footer parts). All of them are ordinary <w:p> once located, so the
+SAME run-remap core (_redact_paragraph) is reused verbatim — nothing about the run-splitting
+is re-implemented. Footnotes, endnotes and comments remain W3 and are left untouched. Labels
+are type-only ("[MENO]"); per-entity numbering ("[MENO_1]") is W5. The input file is never
+modified — output is a new file.
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from copy import deepcopy
 
 from docx import Document
 from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
 
 from detect.core import detect
 
@@ -106,12 +111,61 @@ def _redact_paragraph(paragraph, known_entities) -> None:
         _rebuild_run(r, fragments)
 
 
+def _redact_cells(table, known_entities) -> None:
+    """Redact every cell paragraph in ``table``. A merged cell makes several (row, col)
+    positions return the SAME <w:tc> element; dedup by tc identity so a shared paragraph is
+    processed exactly once (reprocessing is otherwise wasted work and re-runs detect on
+    already-labelled text)."""
+    seen: set[int] = set()
+    for row in table.rows:
+        for cell in row.cells:
+            if id(cell._tc) in seen:
+                continue
+            seen.add(id(cell._tc))
+            for paragraph in cell.paragraphs:
+                _redact_paragraph(paragraph, known_entities)
+
+
+def _redact_textboxes(element, parent, known_entities) -> None:
+    """Redact every <w:p> nested in any <w:txbxContent> under ``element`` (a document body
+    or a header/footer part element). VML textboxes are unreachable through python-docx's
+    paragraph APIs, so each inner <w:p> is wrapped as a Paragraph — whose .runs then expose
+    the inner runs — and pushed through the same remap. ``parent`` is only a proxy handle;
+    the remap operates on the run elements directly, so its exact value is not load-bearing."""
+    for txbx in element.findall(".//" + qn("w:txbxContent")):
+        for p_elem in txbx.findall(qn("w:p")):
+            _redact_paragraph(Paragraph(p_elem, parent), known_entities)
+
+
 def redact_docx_body(
     in_path: str, out_path: str, known_entities: list[str] | None = None
 ) -> None:
-    """Open ``in_path``, redact auto-detected PII in every top-level body paragraph, and save
-    the result to a NEW file ``out_path``. ``in_path`` is never modified."""
+    """Open ``in_path``, redact auto-detected PII across every <w:p> location W2 covers —
+    body paragraphs, table cells, header/footer paragraphs, header/footer tables and VML
+    textboxes (body + header/footer parts) — and save the result to a NEW file ``out_path``.
+    ``in_path`` is never modified."""
     doc = Document(in_path)
+
+    # 1) top-level body paragraphs (W1).
     for paragraph in doc.paragraphs:
         _redact_paragraph(paragraph, known_entities)
+
+    # 2) body tables' cells.
+    for table in doc.tables:
+        _redact_cells(table, known_entities)
+
+    # 3) header/footer paragraphs + their tables, across every section.
+    for section in doc.sections:
+        for hf in (section.header, section.footer):
+            for paragraph in hf.paragraphs:
+                _redact_paragraph(paragraph, known_entities)
+            for table in hf.tables:
+                _redact_cells(table, known_entities)
+
+    # 4) VML textboxes anywhere: body part, then every header/footer part.
+    _redact_textboxes(doc.element.body, doc, known_entities)
+    for section in doc.sections:
+        for hf in (section.header, section.footer):
+            _redact_textboxes(hf._element, hf, known_entities)
+
     doc.save(out_path)
