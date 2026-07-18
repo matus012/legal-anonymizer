@@ -21,9 +21,17 @@ part-type asymmetry (see _redact_notes_part) but every note is an ordinary <w:p>
 so the SAME core is reused again. W3 does NOT scrub the comment w:author attribute — that is
 W4 metadata scope. Labels are type-only ("[MENO]"); per-entity numbering ("[MENO_1]") is W5.
 The input file is never modified — output is a new file.
+
+W4b (context.md §10) scrubs document METADATA that carries PII: docProps/core.xml properties
+(dc:creator, cp:lastModifiedBy, ...), docProps/app.xml's Company/Manager free-text fields, and
+the comment w:author/w:initials attributes deferred from W3 (see _redact_notes_part). These are
+BLANKED UNCONDITIONALLY BY POSITION — detect() never runs over metadata, since an author or
+manager name is PII regardless of whether it matches a detector pattern, and the original value
+is never preserved (see _scrub_metadata).
 """
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 
 from docx import Document
@@ -220,6 +228,52 @@ def _redact_notes_part(part, known_entities) -> None:
     part._blob = etree.tostring(tree, encoding="UTF-8", standalone=True)
 
 
+_APP_XML_PII_TAGS = ("Company", "Manager")
+
+
+def _scrub_metadata(doc) -> None:
+    """W4b (context.md §10): blank the three PII-bearing metadata locations, by position —
+    never via detect(), never preserving the original value.
+
+    * docProps/core.xml: exposed through python-docx's ``doc.core_properties`` (each is a
+      settable str property backed by a ZeroOrOne element); the API write persists through
+      doc.save(). created/modified/revision are dates/ints, not PII, and are left alone.
+    * docProps/app.xml: python-docx has no API for this part — it comes back as a generic
+      blob-backed Part. Company/Manager are located with a targeted regex on the decoded
+      blob so every unrelated tag (HeadingPairs, TitlesOfParts, vt: vectors, the <?xml?>
+      declaration) is byte-preserved; only a NON-EMPTY <Tag>...</Tag> is rewritten, so an
+      already-empty <Tag/>/<Tag></Tag> is left as-is rather than needlessly touched.
+    * word/comments.xml <w:comment w:author=...>: deferred from W3's _redact_notes_part.
+      Same element-vs-blob asymmetry applies — a CommentsPart's .blob RE-SERIALIZES from its
+      live .element, so the attribute is mutated ON THE ELEMENT, never via a ._blob reassign
+      (which would be silently discarded on save). w:id/w:date are not PII and are untouched.
+    """
+    cp = doc.core_properties
+    for attr in ("author", "last_modified_by", "title", "subject", "keywords", "category", "comments"):
+        setattr(cp, attr, "")
+
+    for part in doc.part.package.iter_parts():
+        if str(part.partname) != "/docProps/app.xml":
+            continue
+        xml = part._blob.decode("utf-8")
+        for tag in _APP_XML_PII_TAGS:
+            xml = re.sub(rf"<{tag}>.+?</{tag}>", f"<{tag}></{tag}>", xml, flags=re.DOTALL)
+        part._blob = xml.encode("utf-8")
+        break
+
+    for rel in doc.part.rels.values():
+        if not rel.reltype.endswith("comments"):
+            continue
+        part = rel.target_part
+        if not hasattr(part, "element") or part.element is None:
+            continue
+        for comment in part.element.findall(".//" + qn("w:comment")):
+            if comment.get(qn("w:author")) is not None:
+                comment.set(qn("w:author"), "")
+            if comment.get(qn("w:initials")) is not None:
+                comment.set(qn("w:initials"), "")
+
+
 def redact_docx_body(
     in_path: str, out_path: str, known_entities: list[str] | None = None
 ) -> None:
@@ -271,5 +325,9 @@ def redact_docx_body(
         rt = rel.reltype
         if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
             _redact_notes_part(rel.target_part, known_entities)
+
+    # 6) W4b: blank PII-bearing metadata (core.xml properties, app.xml Company/Manager, and
+    #    the comment w:author/w:initials deferred from W3) LAST, unconditionally by position.
+    _scrub_metadata(doc)
 
     doc.save(out_path)

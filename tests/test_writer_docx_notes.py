@@ -152,8 +152,9 @@ def test_comment_element_path_persists_through_save(tmp_path):
     ]
     reopened = comments_part.blob.decode("utf-8")
     assert IBAN not in reopened and "[IBAN]" in reopened
-    # author attribute is W4 scope — W3 leaves it:
-    assert 'w:author="Advokat"' in xml
+    # author attribute is W4b scope, now scrubbed unconditionally:
+    assert 'w:author="Advokat"' not in xml
+    assert 'w:author=""' in xml
 
 
 def test_body_still_clean_and_all_parts_reopen(tmp_path):
