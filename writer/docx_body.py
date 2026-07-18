@@ -177,13 +177,23 @@ def _redact_cells(table, known_entities) -> None:
     """Redact every cell paragraph in ``table``. A merged cell makes several (row, col)
     positions return the SAME <w:tc> element; dedup by tc identity so a shared paragraph is
     processed exactly once (reprocessing is otherwise wasted work and re-runs detect on
-    already-labelled text)."""
-    seen: set[int] = set()
+    already-labelled text).
+
+    Key the set on the <w:tc> ELEMENT (``cell._tc``) itself, NOT ``id(cell._tc)``. row.cells
+    mints a fresh _Cell proxy per row, and each row's proxies are GC'd before the next row's
+    are allocated; CPython then reuses the freed address, so a later distinct cell's proxy can
+    collide with an earlier cell's id() and be silently skipped (leaking its PII). The lxml
+    element is stable for the table's lifetime and hashes/compares by identity, and a genuine
+    horizontal span yields the SAME element object from every spanned cell access (python-docx
+    _Row.cells builds one _Cell per <w:tc> and yields it grid_span times) — so merged cells
+    still collapse to one, while distinct cells never alias. Holding the elements in the set
+    also keeps them alive, so no address recycling can occur mid-table."""
+    seen: set = set()
     for row in table.rows:
         for cell in row.cells:
-            if id(cell._tc) in seen:
+            if cell._tc in seen:
                 continue
-            seen.add(id(cell._tc))
+            seen.add(cell._tc)
             for paragraph in cell.paragraphs:
                 _redact_paragraph(paragraph, known_entities)
 
