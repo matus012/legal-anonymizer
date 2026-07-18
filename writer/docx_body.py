@@ -39,6 +39,53 @@ from detect.core import detect
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 
+def _strip_tracked_changes(root) -> None:
+    """W4a (context.md §10): accept ALL Word tracked revisions inside ``root`` (a w:document /
+    header / footer / notes tree) BEFORE any redaction runs. The structure is ASYMMETRIC
+    (verified against corpus bytes, kupna_zmluva_000.docx):
+
+    * <w:ins ...><w:r><w:t>TEXT</w:t></w:r></w:ins> — accepted INSERTED content: promote the
+      ins's children into its parent at the ins's position, then drop the now-empty ins. The
+      runs SURVIVE as ordinary body runs and remain subject to the normal redaction passes.
+    * <w:del ...><w:r><w:delText>TEXT</w:delText></w:r></w:del> — DELETED content that is still
+      PHYSICALLY in the file: remove the whole subtree. Getting these backwards either drops
+      accepted text or leaks deleted PII. w:delText only ever lives inside w:del, so once every
+      w:del is gone no w:delText remains.
+
+    Every w:del is stripped first (removing its whole subtree), then w:ins is re-found on the
+    mutated tree — so content that was inserted-then-deleted (a w:del nested in a w:ins, or an
+    ins nested in a del) resolves correctly with no dangling detached-parent inserts. Both lists
+    are materialised (findall + list) so the tree is never mutated under a live iterator."""
+    for dele in list(root.findall(".//" + qn("w:del"))):
+        parent = dele.getparent()
+        if parent is not None:
+            parent.remove(dele)
+
+    for ins in list(root.findall(".//" + qn("w:ins"))):
+        parent = ins.getparent()
+        if parent is None:
+            continue
+        idx = parent.index(ins)
+        # Materialise the children: each insert MOVES the child out of ins into parent, so the
+        # live child list shrinks as we go; enumerate over the snapshot keeps order + offsets.
+        for offset, child in enumerate(list(ins)):
+            parent.insert(idx + offset, child)
+        parent.remove(ins)
+
+
+def _strip_notes_tracked_changes(part) -> None:
+    """Accept all tracked revisions in a footnotes/endnotes/comments OPC part, honouring the SAME
+    element-vs-blob asymmetry as _redact_notes_part: a CommentsPart exposes a live ``.element``
+    that re-serialises into ``.blob`` (mutate it in place); generic footnote/endnote Parts are
+    blob-backed with no ``.element`` (parse, strip, reassign ``._blob``)."""
+    if hasattr(part, "element") and part.element is not None:
+        _strip_tracked_changes(part.element)  # live tree; mutate in place
+        return
+    tree = parse_xml(part._blob)
+    _strip_tracked_changes(tree)
+    part._blob = etree.tostring(tree, encoding="UTF-8", standalone=True)
+
+
 def _rebuild_run(run, fragments: list[tuple[str, str]]) -> None:
     """Replace a single <w:r> with one new <w:r> per fragment, cloning the original run's
     formatting onto each. ``fragments`` is an ordered list of ('t', text) surviving-text and
@@ -181,6 +228,21 @@ def redact_docx_body(
     textboxes (body + header/footer parts) — and save the result to a NEW file ``out_path``.
     ``in_path`` is never modified."""
     doc = Document(in_path)
+
+    # 0) W4a: accept ALL tracked revisions FIRST, before any _redact_paragraph call. Deleted
+    #    text is then physically gone (it must never reach detect() as a redaction candidate);
+    #    inserted text, once unwrapped, is ordinary body text that the passes below still redact
+    #    (so an insertion carrying PII is caught by the existing W1-W3 code — no special-casing).
+    #    Covers the document element, every section header/footer element, and each note part
+    #    (same discovery + blob-vs-element asymmetry as the W3 pass below).
+    _strip_tracked_changes(doc.element)
+    for section in doc.sections:
+        for hf in (section.header, section.footer):
+            _strip_tracked_changes(hf._element)
+    for rel in doc.part.rels.values():
+        rt = rel.reltype
+        if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
+            _strip_notes_tracked_changes(rel.target_part)
 
     # 1) top-level body paragraphs (W1).
     for paragraph in doc.paragraphs:
