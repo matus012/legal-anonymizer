@@ -13,17 +13,24 @@ W2 (context.md §10) extends coverage past doc.paragraphs to every OTHER place W
 <w:p>: table cells, header/footer paragraphs, header/footer tables, and VML textboxes (in
 the body and in header/footer parts). All of them are ordinary <w:p> once located, so the
 SAME run-remap core (_redact_paragraph) is reused verbatim — nothing about the run-splitting
-is re-implemented. Footnotes, endnotes and comments remain W3 and are left untouched. Labels
-are type-only ("[MENO]"); per-entity numbering ("[MENO_1]") is W5. The input file is never
-modified — output is a new file.
+is re-implemented.
+
+W3 (context.md §10) closes the last <w:p> locations, the three note parts Word keeps OUTSIDE
+document.xml as separate OPC parts: footnotes.xml, endnotes.xml and comments.xml. They carry a
+part-type asymmetry (see _redact_notes_part) but every note is an ordinary <w:p> once located,
+so the SAME core is reused again. W3 does NOT scrub the comment w:author attribute — that is
+W4 metadata scope. Labels are type-only ("[MENO]"); per-entity numbering ("[MENO_1]") is W5.
+The input file is never modified — output is a new file.
 """
 from __future__ import annotations
 
 from copy import deepcopy
 
 from docx import Document
+from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
+from lxml import etree
 
 from detect.core import detect
 
@@ -137,6 +144,35 @@ def _redact_textboxes(element, parent, known_entities) -> None:
             _redact_paragraph(Paragraph(p_elem, parent), known_entities)
 
 
+def _redact_notes_part(part, known_entities) -> None:
+    """Redact every <w:p> in a footnotes/endnotes/comments OPC part, honouring the part-type
+    asymmetry python-docx exposes on reopen (verified by probe):
+
+    * comments.xml maps to a registered CommentsPart (an XmlPart): its ``.element`` is a live
+      tree and its ``.blob`` RE-SERIALIZES from that tree, so a ``._blob`` reassignment would be
+      silently discarded. The tree is mutated IN PLACE and doc.save() picks it up.
+    * footnotes.xml / endnotes.xml have no registered class and come back as generic blob-backed
+      Parts with no ``.element``. Their bytes are parsed, the parsed tree is mutated, and the
+      serialized result is written back to ``._blob`` (generic ``Part.blob`` returns ``_blob``,
+      so doc.save() persists it).
+
+    Branch on element-vs-blob, never on part name or note id. Each <w:p> — including the
+    separator / continuationSeparator entries that carry no <w:t> — is wrapped as a Paragraph so
+    ``.runs`` exposes the inner runs, then pushed through the same _redact_paragraph core; an
+    empty separator paragraph no-ops (detect() over "" yields nothing)."""
+    if hasattr(part, "element") and part.element is not None:
+        tree = part.element  # live tree; mutate in place
+        for p_elem in tree.findall(".//" + qn("w:p")):
+            _redact_paragraph(Paragraph(p_elem, part), known_entities)
+        return
+
+    tree = parse_xml(part._blob)
+    for p_elem in tree.findall(".//" + qn("w:p")):
+        _redact_paragraph(Paragraph(p_elem, part), known_entities)
+    # Mirror python-docx's own part serialization (UTF-8, standalone declaration).
+    part._blob = etree.tostring(tree, encoding="UTF-8", standalone=True)
+
+
 def redact_docx_body(
     in_path: str, out_path: str, known_entities: list[str] | None = None
 ) -> None:
@@ -167,5 +203,11 @@ def redact_docx_body(
     for section in doc.sections:
         for hf in (section.header, section.footer):
             _redact_textboxes(hf._element, hf, known_entities)
+
+    # 5) footnotes / endnotes / comments — each a SEPARATE OPC part, not in document.xml (W3).
+    for rel in doc.part.rels.values():
+        rt = rel.reltype
+        if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
+            _redact_notes_part(rel.target_part, known_entities)
 
     doc.save(out_path)
