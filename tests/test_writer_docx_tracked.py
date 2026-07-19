@@ -188,6 +188,6 @@ def test_inserted_pii_flows_through_redaction(tmp_path):
     xml = _member_xml(out_path, "word/document.xml")
 
     assert ICO not in xml, f"inserted PII {ICO!r} leaked un-redacted in {xml!r}"
-    assert "[ICO]" in xml
+    assert "[ICO_1]" in xml
     assert _no_tracked_elements(xml)
     Document(out_path)

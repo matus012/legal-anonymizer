@@ -113,7 +113,7 @@ def test_footnote_pii_redacted(tmp_path):
     out = _redacted(tmp_path)
     xml = _part_xml(out, "word/footnotes.xml")
     assert RC not in xml, f"LEAKED footnote RC: {RC!r} survived in {xml!r}"
-    assert "[RODNE_CISLO]" in xml
+    assert "[RODNE_CISLO_1]" in xml
     # separator entries untouched
     assert "<w:separator/>" in xml and "<w:continuationSeparator/>" in xml
     Document(out)  # reopens without corruption
@@ -123,7 +123,7 @@ def test_endnote_pii_redacted(tmp_path):
     out = _redacted(tmp_path)
     xml = _part_xml(out, "word/endnotes.xml")
     assert ICO not in xml, f"LEAKED endnote ICO: {ICO!r} survived in {xml!r}"
-    assert "[ICO]" in xml
+    assert "[ICO_1]" in xml
     assert "<w:separator/>" in xml and "<w:continuationSeparator/>" in xml
     Document(out)
 
@@ -132,7 +132,7 @@ def test_comment_pii_redacted(tmp_path):
     out = _redacted(tmp_path)
     xml = _part_xml(out, "word/comments.xml")
     assert IBAN not in xml, f"LEAKED comment IBAN: {IBAN!r} survived in {xml!r}"
-    assert "[IBAN]" in xml
+    assert "[IBAN_1]" in xml
     Document(out)
 
 
@@ -144,14 +144,14 @@ def test_comment_element_path_persists_through_save(tmp_path):
     out = _redacted(tmp_path)
     # persisted on disk:
     xml = _part_xml(out, "word/comments.xml")
-    assert IBAN not in xml and "[IBAN]" in xml
+    assert IBAN not in xml and "[IBAN_1]" in xml
     # and the reopened object sees the same:
     doc = Document(out)
     (comments_part,) = [
         r.target_part for r in doc.part.rels.values() if r.reltype.endswith("comments")
     ]
     reopened = comments_part.blob.decode("utf-8")
-    assert IBAN not in reopened and "[IBAN]" in reopened
+    assert IBAN not in reopened and "[IBAN_1]" in reopened
     # author attribute is W4b scope, now scrubbed unconditionally:
     assert 'w:author="Advokat"' not in xml
     assert 'w:author=""' in xml

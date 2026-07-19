@@ -41,6 +41,7 @@ from docx.text.paragraph import Paragraph
 from lxml import etree
 
 from detect.core import detect
+from writer.labelmap import LabelMap
 
 # xml:space lives in the reserved XML namespace, which is not in python-docx's nsmap, so it
 # cannot go through qn(); set it by its literal Clark-notation name.
@@ -118,7 +119,7 @@ def _rebuild_run(run, fragments: list[tuple[str, str]]) -> None:
     parent.remove(r_elem)
 
 
-def _redact_paragraph(paragraph, known_entities) -> None:
+def _redact_paragraph(paragraph, known_entities, labelmap) -> None:
     runs = list(paragraph.runs)
     if not runs:
         return
@@ -145,9 +146,13 @@ def _redact_paragraph(paragraph, known_entities) -> None:
     for c in cands:
         for i in range(c.start, c.end):
             covered[i] = True
-        # detect() guarantees non-overlapping spans, so one label per start is unambiguous;
-        # setdefault keeps this robust if two spans ever shared a start.
-        label_at.setdefault(c.start, f"[{c.type}]")
+        # detect() guarantees non-overlapping spans, so one label per start is unambiguous.
+        # The explicit "not in" guard (NOT setdefault) is load-bearing: setdefault would
+        # eagerly evaluate labelmap.label_for(c) even when c.start is already present, and
+        # label_for mints/caches a number on first sighting — so an already-present start
+        # would spuriously bump the per-type counter. Guarding keeps numbering exact.
+        if c.start not in label_at:
+            label_at[c.start] = labelmap.label_for(c)
 
     # Build, per touched run, the ordered surviving-text / label fragments, then rewrite it.
     for ri, r in enumerate(runs):
@@ -173,7 +178,7 @@ def _redact_paragraph(paragraph, known_entities) -> None:
         _rebuild_run(r, fragments)
 
 
-def _redact_cells(table, known_entities) -> None:
+def _redact_cells(table, known_entities, labelmap) -> None:
     """Redact every cell paragraph in ``table``. A merged cell makes several (row, col)
     positions return the SAME <w:tc> element; dedup by tc identity so a shared paragraph is
     processed exactly once (reprocessing is otherwise wasted work and re-runs detect on
@@ -195,10 +200,10 @@ def _redact_cells(table, known_entities) -> None:
                 continue
             seen.add(cell._tc)
             for paragraph in cell.paragraphs:
-                _redact_paragraph(paragraph, known_entities)
+                _redact_paragraph(paragraph, known_entities, labelmap)
 
 
-def _redact_textboxes(element, parent, known_entities) -> None:
+def _redact_textboxes(element, parent, known_entities, labelmap) -> None:
     """Redact every <w:p> nested in any <w:txbxContent> under ``element`` (a document body
     or a header/footer part element). VML textboxes are unreachable through python-docx's
     paragraph APIs, so each inner <w:p> is wrapped as a Paragraph — whose .runs then expose
@@ -206,10 +211,10 @@ def _redact_textboxes(element, parent, known_entities) -> None:
     the remap operates on the run elements directly, so its exact value is not load-bearing."""
     for txbx in element.findall(".//" + qn("w:txbxContent")):
         for p_elem in txbx.findall(qn("w:p")):
-            _redact_paragraph(Paragraph(p_elem, parent), known_entities)
+            _redact_paragraph(Paragraph(p_elem, parent), known_entities, labelmap)
 
 
-def _redact_notes_part(part, known_entities) -> None:
+def _redact_notes_part(part, known_entities, labelmap) -> None:
     """Redact every <w:p> in a footnotes/endnotes/comments OPC part, honouring the part-type
     asymmetry python-docx exposes on reopen (verified by probe):
 
@@ -228,12 +233,12 @@ def _redact_notes_part(part, known_entities) -> None:
     if hasattr(part, "element") and part.element is not None:
         tree = part.element  # live tree; mutate in place
         for p_elem in tree.findall(".//" + qn("w:p")):
-            _redact_paragraph(Paragraph(p_elem, part), known_entities)
+            _redact_paragraph(Paragraph(p_elem, part), known_entities, labelmap)
         return
 
     tree = parse_xml(part._blob)
     for p_elem in tree.findall(".//" + qn("w:p")):
-        _redact_paragraph(Paragraph(p_elem, part), known_entities)
+        _redact_paragraph(Paragraph(p_elem, part), known_entities, labelmap)
     # Mirror python-docx's own part serialization (UTF-8, standalone declaration).
     part._blob = etree.tostring(tree, encoding="UTF-8", standalone=True)
 
@@ -293,6 +298,12 @@ def redact_docx_body(
     ``in_path`` is never modified."""
     doc = Document(in_path)
 
+    # ONE LabelMap for the whole document, built BEFORE the passes: it is threaded through every
+    # _redact_paragraph call so a given entity gets the same [TYPE_N] number everywhere (body,
+    # tables, headers/footers, textboxes, notes). First-seen group order == the fixed traversal
+    # order of the passes below, so the numbering is deterministic (W5a, context.md §10).
+    labelmap = LabelMap(known_entities)
+
     # 0) W4a: accept ALL tracked revisions FIRST, before any _redact_paragraph call. Deleted
     #    text is then physically gone (it must never reach detect() as a redaction candidate);
     #    inserted text, once unwrapped, is ordinary body text that the passes below still redact
@@ -310,31 +321,31 @@ def redact_docx_body(
 
     # 1) top-level body paragraphs (W1).
     for paragraph in doc.paragraphs:
-        _redact_paragraph(paragraph, known_entities)
+        _redact_paragraph(paragraph, known_entities, labelmap)
 
     # 2) body tables' cells.
     for table in doc.tables:
-        _redact_cells(table, known_entities)
+        _redact_cells(table, known_entities, labelmap)
 
     # 3) header/footer paragraphs + their tables, across every section.
     for section in doc.sections:
         for hf in (section.header, section.footer):
             for paragraph in hf.paragraphs:
-                _redact_paragraph(paragraph, known_entities)
+                _redact_paragraph(paragraph, known_entities, labelmap)
             for table in hf.tables:
-                _redact_cells(table, known_entities)
+                _redact_cells(table, known_entities, labelmap)
 
     # 4) VML textboxes anywhere: body part, then every header/footer part.
-    _redact_textboxes(doc.element.body, doc, known_entities)
+    _redact_textboxes(doc.element.body, doc, known_entities, labelmap)
     for section in doc.sections:
         for hf in (section.header, section.footer):
-            _redact_textboxes(hf._element, hf, known_entities)
+            _redact_textboxes(hf._element, hf, known_entities, labelmap)
 
     # 5) footnotes / endnotes / comments — each a SEPARATE OPC part, not in document.xml (W3).
     for rel in doc.part.rels.values():
         rt = rel.reltype
         if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
-            _redact_notes_part(rel.target_part, known_entities)
+            _redact_notes_part(rel.target_part, known_entities, labelmap)
 
     # 6) W4b: blank PII-bearing metadata (core.xml properties, app.xml Company/Manager, and
     #    the comment w:author/w:initials deferred from W3) LAST, unconditionally by position.

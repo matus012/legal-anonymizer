@@ -22,6 +22,7 @@ from docx import Document
 
 import writer.docx_body as docx_body
 from writer.docx_body import _redact_cells, redact_docx_body
+from writer.labelmap import LabelMap
 
 # A checksum-VALID legacy SK account (auto=True BANKOVY_UCET); prefix 19 and base 1000002 both
 # pass the weighted mod-11 gates in detect.identifiers. Its presence in output = a real leak.
@@ -69,7 +70,7 @@ def test_late_table_cell_bankovy_ucet_not_leaked(tmp_path):
 
     text = _all_cell_text(out)
     assert VALID_BANKOVY_UCET not in text, f"leaked bank account in output: {text!r}"
-    assert "[BANKOVY_UCET]" in text  # positive: it was actually redacted, not just missing
+    assert "[BANKOVY_UCET_1]" in text  # positive: it was actually redacted, not just missing
 
 
 # --------------------------------------------------------------------------- Fixture 2
@@ -90,13 +91,13 @@ def test_merged_cell_redacted_exactly_once(tmp_path, monkeypatch):
     visited: list = []
     orig = docx_body._redact_paragraph
 
-    def spy(paragraph, known_entities):
+    def spy(paragraph, known_entities, labelmap):
         visited.append(paragraph._p)
-        return orig(paragraph, known_entities)
+        return orig(paragraph, known_entities, labelmap)
 
     monkeypatch.setattr(docx_body, "_redact_paragraph", spy)
 
-    _redact_cells(table, None)
+    _redact_cells(table, None, LabelMap(None))
 
     merged_p = merged.paragraphs[0]._p
     assert visited.count(merged_p) == 1, "merged cell processed more than once"
@@ -108,7 +109,7 @@ def test_merged_cell_redacted_exactly_once(tmp_path, monkeypatch):
     # Check the merged cell itself (row.cells surfaces a span twice, so _all_cell_text would
     # double-count its text); the merged cell holds exactly one label after a single redaction.
     merged_out = reopened.tables[0].cell(0, 0)
-    assert merged_out.text == "[EMAIL]", f"expected one label, got: {merged_out.text!r}"
+    assert merged_out.text == "[EMAIL_1]", f"expected one label, got: {merged_out.text!r}"
 
 
 # --------------------------------------------------------------------------- Fixture 3
@@ -130,7 +131,7 @@ def test_every_cell_visited_no_token_skipped(tmp_path):
 
     # Force the proxy churn / GC that triggers the address-reuse collision on the old key.
     gc.collect()
-    _redact_cells(table, None)
+    _redact_cells(table, None, LabelMap(None))
     gc.collect()
 
     survivors = [t for t in tokens if any(t in cell.text for row in table.rows for cell in row.cells)]

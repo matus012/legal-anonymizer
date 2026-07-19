@@ -55,7 +55,7 @@ def test_name_split_mid_token_across_three_runs_is_redacted(tmp_path):
     txt = _body_text(out)
     assert "Lucie" not in txt
     assert "Molnárovej" not in txt
-    assert "[MENO]" in txt
+    assert "[MENO_1]" in txt
     # input file untouched.
     assert "Lucie Molnárovej" in _body_text(src)
 
@@ -74,7 +74,7 @@ def test_name_starting_and_ending_mid_run_is_redacted_keeping_surrounding_text(t
     txt = _body_text(out)
     assert "Jánom" not in txt
     assert "Novákom" not in txt
-    assert "[MENO]" in txt
+    assert "[MENO_1]" in txt
     # the non-PII head and tail glued into the boundary runs must survive intact.
     assert txt.startswith("Zmluva medzi ")
     assert txt.endswith(" dnes")
@@ -96,7 +96,7 @@ def test_partially_overlapped_bold_run_keeps_its_rpr_on_surviving_fragment(tmp_p
 
     txt = _body_text(out)
     assert "Ján Novák" not in txt
-    assert "[MENO]" in txt
+    assert "[MENO_1]" in txt
 
     doc = Document(str(out))
     survivors = [r for p in doc.paragraphs for r in p.runs if "súhlasí" in r.text]
@@ -116,7 +116,7 @@ def test_valid_ico_self_detects_without_known_entities(tmp_path):
 
     txt = _body_text(out)
     assert "12345679" not in txt
-    assert "[ICO]" in txt
+    assert "[ICO_1]" in txt
 
 
 # ---------------------------------------------------------------- output integrity
@@ -212,7 +212,7 @@ def test_table_cell_name_split_across_three_runs_is_redacted(tmp_path):
     joined = "".join(cells)
     assert "Lucie" not in joined
     assert "Molnárovej" not in joined
-    assert any("[MENO]" in t for t in cells)
+    assert any("[MENO_1]" in t for t in cells)
 
 
 # ---------------------------------------------------------- (t2) merged cell processed once
@@ -228,7 +228,7 @@ def test_merged_table_cell_is_processed_exactly_once(tmp_path):
     cdoc.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0].add_run("Ján Novák")
     cdoc.save(str(control_src))
     redact_docx_body(str(control_src), str(control_out), known_entities=["Ján Novák"])
-    expected_labels = "".join(_table_cell_texts(control_out)).count("[MENO]")
+    expected_labels = "".join(_table_cell_texts(control_out)).count("[MENO_1]")
 
     src, out = tmp_path / "t2_in.docx", tmp_path / "t2_out.docx"
     doc = Document()
@@ -247,7 +247,7 @@ def test_merged_table_cell_is_processed_exactly_once(tmp_path):
     joined = "".join(_table_cell_texts(out))
     assert "Ján Novák" not in joined
     # processed exactly once: same label count as the single-cell control, not doubled.
-    assert joined.count("[MENO]") == expected_labels
+    assert joined.count("[MENO_1]") == expected_labels
     # and the output re-opens without corruption.
     reopened = Document(str(out))
     assert reopened.tables, "output lost its table"
@@ -272,8 +272,8 @@ def test_header_paragraph_redacts_email_and_ico(tmp_path):
     joined = "".join(hf)
     assert "a@b.sk" not in joined
     assert "12345679" not in joined
-    assert "[EMAIL]" in joined
-    assert "[ICO]" in joined
+    assert "[EMAIL_1]" in joined
+    assert "[ICO_1]" in joined
 
 
 # --------------------------------------------------------------- (t4) footer: name redacted
@@ -292,7 +292,7 @@ def test_footer_paragraph_name_is_redacted(tmp_path):
     hf = _header_footer_texts(out)
     joined = "".join(hf)
     assert "Ján Novák" not in joined
-    assert "[MENO]" in joined
+    assert "[MENO_1]" in joined
 
 
 # ------------------------------------------------------ (t5) VML textbox: detectable id gone
@@ -315,4 +315,4 @@ def test_vml_textbox_detectable_identifier_is_redacted(tmp_path):
     tb = _textbox_texts(out)
     joined = "".join(tb)
     assert "2020123456" not in joined
-    assert "[DIC]" in joined
+    assert "[DIC_1]" in joined
