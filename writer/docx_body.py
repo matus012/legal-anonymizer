@@ -42,6 +42,7 @@ from lxml import etree
 
 from detect.core import detect
 from writer.labelmap import LabelMap
+from writer.report import write_report
 
 # xml:space lives in the reserved XML namespace, which is not in python-docx's nsmap, so it
 # cannot go through qn(); set it by its literal Clark-notation name.
@@ -376,3 +377,9 @@ def redact_docx_body(
     _scrub_metadata(doc)
 
     doc.save(out_path)
+
+    # 7) W5b-2: emit the per-document report NEXT TO out_path (<stem>_report.txt), built from the
+    #    LabelMap's capture side-channels (occurrences + low_confidence) the passes above filled.
+    #    Purely additive — a separate .txt file that does not touch the redacted .docx bytes; the
+    #    path is derived from out_path so the report can never desync from the document it records.
+    write_report(out_path, labelmap.occurrences, labelmap.low_confidence)
