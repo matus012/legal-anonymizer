@@ -119,13 +119,11 @@ def _rebuild_run(run, fragments: list[tuple[str, str]]) -> None:
     parent.remove(r_elem)
 
 
-def _redact_paragraph(paragraph, known_entities, labelmap, location: str = "table_cell") -> None:
+def _redact_paragraph(paragraph, known_entities, labelmap, location: str = "body") -> None:
     """Redact auto PII in one paragraph and record report-capture side-effects tagged with
-    ``location`` (one of the fixed vocabulary strings, matching GT surface_part). ``location``
-    defaults to ``"table_cell"`` for ONE reason: ``_redact_cells`` reuses this core for body
-    table cells and must invoke it with THREE positional args so a 3-arg monkeypatch of
-    ``_redact_paragraph`` (tests/test_writer_docx_cells_dedup.py) stays valid — so the body-cell
-    tag has to ride on this default. EVERY other caller passes ``location`` explicitly."""
+    ``location`` (one of the fixed vocabulary strings, matching GT surface_part). The default is
+    ``"body"``, the safe fallback for an un-tagged call — every real caller now passes
+    ``location`` explicitly, including ``_redact_cells`` for body table cells."""
     runs = list(paragraph.runs)
     if not runs:
         return
@@ -221,14 +219,7 @@ def _redact_cells(table, known_entities, labelmap, location: str = "table_cell")
                 continue
             seen.add(cell._tc)
             for paragraph in cell.paragraphs:
-                # Body tables (the default location) call with THREE positional args so a 3-arg
-                # monkeypatch of _redact_paragraph (test_writer_docx_cells_dedup fixture 2) stays
-                # valid; the tag then rides on _redact_paragraph's "table_cell" default. Header/
-                # footer tables pass their location explicitly (that path is never monkeypatched).
-                if location == "table_cell":
-                    _redact_paragraph(paragraph, known_entities, labelmap)
-                else:
-                    _redact_paragraph(paragraph, known_entities, labelmap, location)
+                _redact_paragraph(paragraph, known_entities, labelmap, location)
 
 
 def _redact_textboxes(element, parent, known_entities, labelmap, location: str = "textbox") -> None:
@@ -347,8 +338,8 @@ def redact_docx_body(
         if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
             _strip_notes_tracked_changes(rel.target_part)
 
-    # 1) top-level body paragraphs (W1). Pass "body" explicitly — _redact_paragraph's default
-    #    is "table_cell" (see its docstring), so body paragraphs must name their location.
+    # 1) top-level body paragraphs (W1). Pass "body" explicitly — _redact_paragraph's default is
+    #    now "body" too (see its docstring), but every caller names its location regardless.
     for paragraph in doc.paragraphs:
         _redact_paragraph(paragraph, known_entities, labelmap, "body")
 

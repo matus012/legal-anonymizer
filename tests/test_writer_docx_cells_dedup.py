@@ -91,9 +91,9 @@ def test_merged_cell_redacted_exactly_once(tmp_path, monkeypatch):
     visited: list = []
     orig = docx_body._redact_paragraph
 
-    def spy(paragraph, known_entities, labelmap):
+    def spy(paragraph, known_entities, labelmap, location):
         visited.append(paragraph._p)
-        return orig(paragraph, known_entities, labelmap)
+        return orig(paragraph, known_entities, labelmap, location)
 
     monkeypatch.setattr(docx_body, "_redact_paragraph", spy)
 
@@ -110,6 +110,21 @@ def test_merged_cell_redacted_exactly_once(tmp_path, monkeypatch):
     # double-count its text); the merged cell holds exactly one label after a single redaction.
     merged_out = reopened.tables[0].cell(0, 0)
     assert merged_out.text == "[EMAIL_1]", f"expected one label, got: {merged_out.text!r}"
+
+
+def test_redact_paragraph_default_location_is_body():
+    """A no-location _redact_paragraph call must tag occurrences 'body', not the old
+    'table_cell' fallback. RED on the pre-flip default, GREEN after."""
+    from docx import Document
+    import writer.docx_body as docx_body
+    from writer.labelmap import LabelMap
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("kontakt@example.com")
+    lm = LabelMap(None)
+    docx_body._redact_paragraph(p, None, lm)   # NO location arg -> exercises the default
+    locs = [loc for entries in lm.occurrences.values() for (loc, _surface) in entries]
+    assert locs == ["body"], locs
 
 
 # --------------------------------------------------------------------------- Fixture 3
