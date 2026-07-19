@@ -119,7 +119,13 @@ def _rebuild_run(run, fragments: list[tuple[str, str]]) -> None:
     parent.remove(r_elem)
 
 
-def _redact_paragraph(paragraph, known_entities, labelmap) -> None:
+def _redact_paragraph(paragraph, known_entities, labelmap, location: str = "table_cell") -> None:
+    """Redact auto PII in one paragraph and record report-capture side-effects tagged with
+    ``location`` (one of the fixed vocabulary strings, matching GT surface_part). ``location``
+    defaults to ``"table_cell"`` for ONE reason: ``_redact_cells`` reuses this core for body
+    table cells and must invoke it with THREE positional args so a 3-arg monkeypatch of
+    ``_redact_paragraph`` (tests/test_writer_docx_cells_dedup.py) stays valid — so the body-cell
+    tag has to ride on this default. EVERY other caller passes ``location`` explicitly."""
     runs = list(paragraph.runs)
     if not runs:
         return
@@ -137,7 +143,18 @@ def _redact_paragraph(paragraph, known_entities, labelmap) -> None:
         pos += len(text)
     recon = "".join(pieces)
 
-    cands = [c for c in detect(recon, known_entities) if c.auto]
+    # ONE detect() over the post-strip reconstructed text; both captures below read this same
+    # result the redaction path uses — never a second detect() over a different tree state.
+    detected = detect(recon, known_entities)
+
+    # Low-confidence capture: every auto=False span is recorded for review and left ALONE
+    # (not covered, no label). This must happen even when no auto span exists (early-return
+    # below), so it precedes the `if not cands` guard.
+    for c in detected:
+        if not c.auto:
+            labelmap.record_low_confidence(location, c.type, c.surface)
+
+    cands = [c for c in detected if c.auto]
     if not cands:
         return
 
@@ -153,6 +170,10 @@ def _redact_paragraph(paragraph, known_entities, labelmap) -> None:
         # would spuriously bump the per-type counter. Guarding keeps numbering exact.
         if c.start not in label_at:
             label_at[c.start] = labelmap.label_for(c)
+        # Redaction capture: record EVERY kept occurrence (all spans, incl. repeats of an
+        # already-numbered label). Non-overlapping distinct starts mean label_at[c.start] is
+        # this candidate's own label; recording here does not touch counters or the cache.
+        labelmap.record_occurrence(label_at[c.start], location, c.surface)
 
     # Build, per touched run, the ordered surviving-text / label fragments, then rewrite it.
     for ri, r in enumerate(runs):
@@ -178,7 +199,7 @@ def _redact_paragraph(paragraph, known_entities, labelmap) -> None:
         _rebuild_run(r, fragments)
 
 
-def _redact_cells(table, known_entities, labelmap) -> None:
+def _redact_cells(table, known_entities, labelmap, location: str = "table_cell") -> None:
     """Redact every cell paragraph in ``table``. A merged cell makes several (row, col)
     positions return the SAME <w:tc> element; dedup by tc identity so a shared paragraph is
     processed exactly once (reprocessing is otherwise wasted work and re-runs detect on
@@ -200,10 +221,17 @@ def _redact_cells(table, known_entities, labelmap) -> None:
                 continue
             seen.add(cell._tc)
             for paragraph in cell.paragraphs:
-                _redact_paragraph(paragraph, known_entities, labelmap)
+                # Body tables (the default location) call with THREE positional args so a 3-arg
+                # monkeypatch of _redact_paragraph (test_writer_docx_cells_dedup fixture 2) stays
+                # valid; the tag then rides on _redact_paragraph's "table_cell" default. Header/
+                # footer tables pass their location explicitly (that path is never monkeypatched).
+                if location == "table_cell":
+                    _redact_paragraph(paragraph, known_entities, labelmap)
+                else:
+                    _redact_paragraph(paragraph, known_entities, labelmap, location)
 
 
-def _redact_textboxes(element, parent, known_entities, labelmap) -> None:
+def _redact_textboxes(element, parent, known_entities, labelmap, location: str = "textbox") -> None:
     """Redact every <w:p> nested in any <w:txbxContent> under ``element`` (a document body
     or a header/footer part element). VML textboxes are unreachable through python-docx's
     paragraph APIs, so each inner <w:p> is wrapped as a Paragraph — whose .runs then expose
@@ -211,10 +239,10 @@ def _redact_textboxes(element, parent, known_entities, labelmap) -> None:
     the remap operates on the run elements directly, so its exact value is not load-bearing."""
     for txbx in element.findall(".//" + qn("w:txbxContent")):
         for p_elem in txbx.findall(qn("w:p")):
-            _redact_paragraph(Paragraph(p_elem, parent), known_entities, labelmap)
+            _redact_paragraph(Paragraph(p_elem, parent), known_entities, labelmap, location)
 
 
-def _redact_notes_part(part, known_entities, labelmap) -> None:
+def _redact_notes_part(part, known_entities, labelmap, location: str = "footnote") -> None:
     """Redact every <w:p> in a footnotes/endnotes/comments OPC part, honouring the part-type
     asymmetry python-docx exposes on reopen (verified by probe):
 
@@ -233,12 +261,12 @@ def _redact_notes_part(part, known_entities, labelmap) -> None:
     if hasattr(part, "element") and part.element is not None:
         tree = part.element  # live tree; mutate in place
         for p_elem in tree.findall(".//" + qn("w:p")):
-            _redact_paragraph(Paragraph(p_elem, part), known_entities, labelmap)
+            _redact_paragraph(Paragraph(p_elem, part), known_entities, labelmap, location)
         return
 
     tree = parse_xml(part._blob)
     for p_elem in tree.findall(".//" + qn("w:p")):
-        _redact_paragraph(Paragraph(p_elem, part), known_entities, labelmap)
+        _redact_paragraph(Paragraph(p_elem, part), known_entities, labelmap, location)
     # Mirror python-docx's own part serialization (UTF-8, standalone declaration).
     part._blob = etree.tostring(tree, encoding="UTF-8", standalone=True)
 
@@ -319,21 +347,23 @@ def redact_docx_body(
         if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
             _strip_notes_tracked_changes(rel.target_part)
 
-    # 1) top-level body paragraphs (W1).
+    # 1) top-level body paragraphs (W1). Pass "body" explicitly — _redact_paragraph's default
+    #    is "table_cell" (see its docstring), so body paragraphs must name their location.
     for paragraph in doc.paragraphs:
-        _redact_paragraph(paragraph, known_entities, labelmap)
+        _redact_paragraph(paragraph, known_entities, labelmap, "body")
 
     # 2) body tables' cells.
     for table in doc.tables:
         _redact_cells(table, known_entities, labelmap)
 
-    # 3) header/footer paragraphs + their tables, across every section.
+    # 3) header/footer paragraphs + their tables, across every section. The location tag
+    #    follows the part (header vs footer), including for tables inside a header/footer.
     for section in doc.sections:
-        for hf in (section.header, section.footer):
+        for hf, loc in ((section.header, "header"), (section.footer, "footer")):
             for paragraph in hf.paragraphs:
-                _redact_paragraph(paragraph, known_entities, labelmap)
+                _redact_paragraph(paragraph, known_entities, labelmap, loc)
             for table in hf.tables:
-                _redact_cells(table, known_entities, labelmap)
+                _redact_cells(table, known_entities, labelmap, loc)
 
     # 4) VML textboxes anywhere: body part, then every header/footer part.
     _redact_textboxes(doc.element.body, doc, known_entities, labelmap)
@@ -342,10 +372,13 @@ def redact_docx_body(
             _redact_textboxes(hf._element, hf, known_entities, labelmap)
 
     # 5) footnotes / endnotes / comments — each a SEPARATE OPC part, not in document.xml (W3).
+    #    The location tag follows the note part type.
+    _NOTE_LOCATIONS = (("footnotes", "footnote"), ("endnotes", "endnote"), ("comments", "comment"))
     for rel in doc.part.rels.values():
         rt = rel.reltype
-        if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
-            _redact_notes_part(rel.target_part, known_entities, labelmap)
+        loc = next((location for suffix, location in _NOTE_LOCATIONS if rt.endswith(suffix)), None)
+        if loc is not None:
+            _redact_notes_part(rel.target_part, known_entities, labelmap, loc)
 
     # 6) W4b: blank PII-bearing metadata (core.xml properties, app.xml Company/Manager, and
     #    the comment w:author/w:initials deferred from W3) LAST, unconditionally by position.

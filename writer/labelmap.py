@@ -52,6 +52,11 @@ class LabelMap:
         self._known: list[str] = list(known_entities) if known_entities else []
         self._counters: dict[str, int] = {}  # type -> highest N minted so far
         self._cache: dict[tuple[str, tuple], str] = {}  # (type, group_key) -> label
+        # Report-capture side-channels, populated by the redaction pass via the explicit
+        # record_* methods below (NOT by label_for, which stays pure/cached). These feed a
+        # later round's <name>_report.txt and never influence numbering or redaction.
+        self.occurrences: dict[str, list[tuple[str, str]]] = {}  # label -> [(location, surface)]
+        self.low_confidence: list[tuple[str, str, str]] = []  # [(location, type, surface)]
 
     def group_key(self, cand) -> tuple:
         """Identity key for ``cand`` WITHIN its type. MENO resolves to its party via declension;
@@ -75,3 +80,13 @@ class LabelMap:
         label = f"[{cand.type}_{n}]"
         self._cache[key] = label
         return label
+
+    def record_occurrence(self, label: str, location: str, surface: str) -> None:
+        """Append ONE redacted-span record. Called for EVERY kept (auto=True) occurrence,
+        including repeats of an already-numbered label — never deduped."""
+        self.occurrences.setdefault(label, []).append((location, surface))
+
+    def record_low_confidence(self, location: str, type: str, surface: str) -> None:
+        """Append ONE low-confidence (auto=False) record: a span detect() flagged for review
+        that the pass leaves UNREDACTED and UNLABELLED."""
+        self.low_confidence.append((location, type, surface))
