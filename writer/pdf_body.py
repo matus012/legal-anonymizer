@@ -32,8 +32,13 @@ locate is NOT silently dropped. Those surfaces are accumulated across all pages 
 output has been written, raise RedactionIncompleteError -- the caller must never receive a
 partially-redacted file believing it complete.
 
-Scope of this round: body text only. Metadata/XMP/annotations/form fields/attachments are NOT
-scrubbed here (P3), and no per-document report is written (P4).
+Scope of this round: body text, plus the doc-level surfaces. The Info dictionary, the XMP
+packet and embedded file attachments ARE now scrubbed (P3), immediately before the save.
+Form-field widget text and annotations are not scrubbed by a separate step -- bake() flattens
+them into page content, where the same collect/apply/draw loop destroys them. One Info key is
+NOT cleared: doc.metadata['format'], which MuPDF derives from the PDF header version rather
+than the Info dictionary; it is a format constant ('PDF 1.7'), never PII. No per-document
+report is written here (P4).
 """
 from __future__ import annotations
 
@@ -124,6 +129,28 @@ def _draw_label(page, rect, label: str) -> None:
     )
 
 
+def _scrub_document_surfaces(doc: "fitz.Document") -> None:
+    """Clear the three DOC-LEVEL surfaces the leak harness reads: Info dictionary, XMP packet,
+    and embedded file attachments.
+
+    None of these are reachable by the per-page loop -- apply_redactions() only touches page
+    content -- so a document whose body is perfectly redacted still leaks a name sitting in
+    /Author. Must run BEFORE doc.save, since that is what writes these surfaces out.
+
+    set_metadata({}) empties every SETTABLE key at once. A partial dict is NOT a merge and is
+    not a safe substitute: set_metadata({"format": ""}) was verified to leave an existing
+    /Author value fully intact. The one key that survives is doc.metadata['format'], which
+    MuPDF derives from the PDF header version rather than the Info dictionary and no API here
+    can clear -- it is a format constant ('PDF 1.7'), never PII.
+
+    Attachment names are materialized into a list before deleting: embfile_del() mutates the
+    document's embedded-file table, so deleting while iterating it live would skip entries."""
+    doc.set_metadata({})
+    doc.del_xml_metadata()
+    for name in list(doc.embfile_names()):
+        doc.embfile_del(name)
+
+
 def redact_pdf(in_path: str, out_path: str, known_entities: list[str] | None = None) -> str:
     doc = fitz.open(in_path)
     if not has_text_layer(doc):
@@ -149,6 +176,8 @@ def redact_pdf(in_path: str, out_path: str, known_entities: list[str] | None = N
         page.apply_redactions()
         for rect, label in pairs:
             _draw_label(page, rect, label)
+
+    _scrub_document_surfaces(doc)
 
     doc.save(out_path, garbage=4, deflate=True)
     doc.close()
