@@ -18,7 +18,7 @@ import re
 from .core import Candidate
 
 # --------------------------------------------------------------------------- RODNE_CISLO
-_RC_RE = re.compile(r"\b(\d{6})(/?)(\d{4})\b")
+_RC_RE = re.compile(r"\b(\d{6})/(\d{4})\b")
 
 
 def _rc_shape_ok(digits: str) -> bool:
@@ -39,7 +39,7 @@ def _rc_checksum_ok(digits: str) -> bool:
 def _detect_rc(text: str) -> list[Candidate]:
     out = []
     for m in _RC_RE.finditer(text):
-        digits = m.group(1) + m.group(3)
+        digits = m.group(1) + m.group(2)
         if not _rc_shape_ok(digits):
             continue
         out.append(

@@ -38,13 +38,16 @@ from .identifiers import (  # noqa: E402
 
 
 # --------------------------------------------------------------- FLAG-SURVIVAL PRECEDENCE RULE
-# A shape-valid span can be claimed by more than one detector (e.g. a slashless RČ is
-# also a bare 10-digit DIC). If any detector on that exact span calls it a checksum
-# failure (auto=False), that verdict wins outright: every auto=True candidate on the
-# same (start, end) is dropped. A span some detector believes fails its checksum must
-# reach the review bucket — losing an auto-redaction there costs the reviewer one tick;
-# auto-redacting it is the §4.1 flag-survival bug the checksum requirement exists to
-# prevent. Partial overlaps (different spans) are untouched by this rule.
+# A shape-valid span can be claimed by more than one detector. When that happens and any
+# detector on that EXACT span calls it a checksum failure (auto=False), that verdict wins
+# outright: every auto=True candidate on the same (start, end) is dropped. A span some
+# detector believes fails its checksum must reach the review bucket — losing an
+# auto-redaction there costs the reviewer one tick; auto-redacting it is the §4.1
+# flag-survival bug the checksum requirement exists to prevent. The rule is stated for
+# any such pairing rather than for one worked example: the shape-only types (DIC, IC_DPH)
+# never produce auto=False, so a disagreement can only come from a checksum-bearing
+# detector, and its auto=False must survive. Partial overlaps (different spans) are
+# untouched by this rule — those are handled by containment suppression below.
 def _resolve_flag_survival(candidates: list[Candidate]) -> list[Candidate]:
     by_span: dict[tuple[int, int], list[Candidate]] = {}
     for c in candidates:
@@ -62,9 +65,10 @@ def _resolve_flag_survival(candidates: list[Candidate]) -> list[Candidate]:
 # If flag-survival resolution still leaves more than one candidate on the same exact
 # span (both agreed auto=True, or both agreed auto=False), pick one by type: most
 # specific shape/checksum first. DIC is last because it is pure shape (\b\d{10}\b)
-# with no checksum -- the weakest claim on a span, so it always yields. A genuine DIC
-# that coincidentally looks like an RC gets labelled RODNE_CISLO; it is still redacted,
-# only the report label differs. Recall over precision (context.md §6).
+# with no checksum -- the weakest claim on a span, so it always yields. RC no longer
+# competes for a bare 10-digit run at all: a rodné číslo is always written with a slash
+# (6/4), so _RC_RE requires one and a slashless run is owned by DIC directly, with no
+# RODNE_CISLO candidate on that span. Recall over precision (context.md §6).
 _TYPE_PRECEDENCE = ("RODNE_CISLO", "IBAN", "BANKOVY_UCET", "IC_DPH", "ICO", "DIC", "MENO")
 _TYPE_RANK = {t: i for i, t in enumerate(_TYPE_PRECEDENCE)}
 

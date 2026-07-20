@@ -211,28 +211,29 @@ def test_bare_eight_digit_run_on_is_not_detected_as_ico():
     assert not any(c.type == "ICO" for c in detect(text))
 
 
-# ------------------------------------------------------ FLAG-SURVIVAL PRECEDENCE RULE
-# A slashless, checksum-invalid RČ is a bare 10-digit run and is therefore ALSO shaped
-# like a DIC. The RC detector correctly flags it auto=False (review); the DIC detector,
-# blind to RC semantics, would flag the identical span auto=True (auto-redact) — an
-# auto=True verdict must never survive when another detector calls the same span a
-# checksum failure, or the review-bucket routing is silently defeated.
-def test_slashless_checksum_invalid_rc_wins_over_dic_auto_true():
-    # 8503150019: RC-shaped (month 03, day 15), fails mod11 (verified independently)
+# ------------------------------------------------------ SLASH IS MANDATORY FOR RODNE_CISLO
+# A rodné číslo is ALWAYS written with a slash (6 digits / 4 digits). A bare 10-digit run
+# is therefore never an RČ — it is a DIČ, and DIČ is shape-only, so it auto-redacts. RC
+# must not claim a slashless run at all, regardless of what the mod-11 test would say
+# about those digits: claiming it would route a DIČ to the review bucket and leak it.
+def test_slashless_10digit_mod11_invalid_is_dic_not_rc():
+    # 8503150019: would be RC-shaped if slashless RČs existed; mod11 != 0. Still a DIC.
     text = "Rodné číslo 8503150019 uvedené v žiadosti."
-    cands = [c for c in detect(text) if (c.start, c.end) == (text.index("8503150019"), text.index("8503150019") + 10)]
+    start = text.index("8503150019")
+    cands = [c for c in detect(text) if (c.start, c.end) == (start, start + 10)]
     assert len(cands) == 1
-    assert cands[0].type == "RODNE_CISLO"
-    assert cands[0].auto is False
-    assert not any(c.auto is True for c in cands)
+    assert cands[0].type == "DIC"
+    assert cands[0].auto is True
+    assert not any(c.type == "RODNE_CISLO" for c in detect(text))
 
 
-def test_slashless_checksum_valid_rc_not_regressed():
-    # 8503150018: RC-shaped, divisible by 11 (verified independently)
+def test_slashless_10digit_mod11_valid_is_dic_not_rc():
+    # 8503150018: divisible by 11, but slashless — the checksum is irrelevant, it is a DIC.
     text = "Rodné číslo 8503150018 uvedené v žiadosti."
-    hits = _find(detect(text), "RODNE_CISLO", "8503150018")
+    hits = _find(detect(text), "DIC", "8503150018")
     assert len(hits) == 1
     assert hits[0].auto is True
+    assert _find(detect(text), "RODNE_CISLO", "8503150018") == []
 
 
 def test_genuine_dic_not_rc_shaped_still_auto_true():
@@ -245,18 +246,42 @@ def test_genuine_dic_not_rc_shaped_still_auto_true():
 
 
 # ------------------------------------------------------ TYPE PRECEDENCE (exact-span collision)
-# A slashless, checksum-VALID RC is a bare 10-digit run, so both RC and DIC detectors
-# agree auto=True on the identical span. Flag-survival precedence does not fire here
-# (no disagreement) -- type precedence must still collapse the span to one candidate.
-def test_slashless_checksum_valid_rc_single_candidate_no_dic_duplicate():
+# Since RC requires a slash, a bare 10-digit run is claimed by the DIC detector alone:
+# there is no second candidate on that exact span for type precedence to collapse, and
+# the single surviving candidate must be the auto-redacting DIC.
+def test_slashless_10digit_single_dic_candidate_no_rc_duplicate():
     text = "Rodné číslo 8503150018 uvedené v žiadosti."
     start = text.index("8503150018")
     end = start + len("8503150018")
     cands = [c for c in detect(text) if (c.start, c.end) == (start, end)]
     assert len(cands) == 1
-    assert cands[0].type == "RODNE_CISLO"
+    assert cands[0].type == "DIC"
     assert cands[0].auto is True
-    assert _find(detect(text), "DIC", "8503150018") == []
+    assert _find(detect(text), "RODNE_CISLO", "8503150018") == []
+
+
+# ------------------------------------------------------ NEW CONTRACT: slash is mandatory for RC
+def test_slashless_10digit_is_dic_auto():
+    text = "Ďalšie údaje: 2805200615"
+    start = text.index("2805200615")
+    end = start + len("2805200615")
+    cands = [c for c in detect(text) if (c.start, c.end) == (start, end)]
+    assert len(cands) == 1
+    assert cands[0].type == "DIC"
+    assert cands[0].auto is True
+
+
+def test_slashed_rc_checksum_gated():
+    valid = _find(detect("850315/0018"), "RODNE_CISLO", "850315/0018")
+    assert len(valid) == 1
+    assert valid[0].auto is True
+    broken = _find(detect("850315/0019"), "RODNE_CISLO", "850315/0019")
+    assert len(broken) == 1
+    assert broken[0].auto is False
+
+
+def test_slashless_run_not_claimed_as_rc():
+    assert not any(c.type == "RODNE_CISLO" for c in detect("2805200615"))
 
 
 def test_detect_never_returns_two_candidates_on_identical_span():
