@@ -1,6 +1,6 @@
-"""Phase 5 P1 (spec): detect PDF text-layer presence and refuse to redact scanned/image-only
-PDFs. Detection + refuse ONLY in this round -- no redaction, no output file is ever written by
-redact_pdf() in P1 (a text-layer PDF raises NotImplementedError instead of proceeding).
+"""Phase 5 P1 (spec): detect PDF text-layer presence and gate redaction on it. A no-text-layer
+(scanned/image-only) PDF is REFUSED -- redact_pdf() raises NoTextLayerError and writes no output
+-- while a text-layer PDF PROCEEDS to redaction (P2) and produces a valid, non-empty output file.
 
 Fixtures are hand-built in-test with fitz (NO corpus import): a one-page doc with an inserted
 text run, and a blank page with no text at all.
@@ -57,15 +57,20 @@ def test_redact_pdf_raises_no_text_layer_error_and_writes_nothing(tmp_path):
     assert not out.exists()
 
 
-def test_redact_pdf_raises_not_implemented_for_text_layer_and_writes_nothing(tmp_path):
+def test_text_layer_pdf_is_redacted_not_refused(tmp_path):
+    """P2 superseded P1's stub: a text-layer PDF is redacted, not refused. NotImplementedError
+    exists nowhere in writer/ anymore -- this only guards that redaction proceeds and produces
+    a valid, non-empty output file. Label/PII-removal specifics are covered in
+    tests/test_writer_pdf_redact.py."""
     src = tmp_path / "text.pdf"
     out = tmp_path / "text_out.pdf"
     _text_pdf(src)
 
-    try:
-        redact_pdf(str(src), str(out))
-        assert False, "expected NotImplementedError"
-    except NotImplementedError:
-        pass
+    redact_pdf(str(src), str(out))
 
-    assert not out.exists()
+    assert out.exists()
+
+    doc = fitz.open(str(out))
+    text = "".join(page.get_text("text") for page in doc)
+    doc.close()
+    assert text.strip() != ""
