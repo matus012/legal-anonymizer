@@ -37,14 +37,24 @@ packet and embedded file attachments ARE now scrubbed (P3), immediately before t
 Form-field widget text and annotations are not scrubbed by a separate step -- bake() flattens
 them into page content, where the same collect/apply/draw loop destroys them. One Info key is
 NOT cleared: doc.metadata['format'], which MuPDF derives from the PDF header version rather
-than the Info dictionary; it is a format constant ('PDF 1.7'), never PII. No per-document
-report is written here (P4).
+than the Info dictionary; it is a format constant ('PDF 1.7'), never PII.
+
+P4 -- labels and the report. ONE writer.labelmap.LabelMap is built per document and threaded
+through every page, so a party numbered [MENO_1] on page 1 is [MENO_1] on page 9 too and a
+second party gets [MENO_2] rather than restarting the counter (the DOCX writer does the same
+with the same unit). Each page tags its captures with location "page_<n>". After the save,
+writer.report.write_report emits <out stem>_report.txt next to the output -- including on the
+RedactionIncompleteError path, since a partial output is exactly the case a reviewer needs the
+record for. Occurrences are counted PER CANDIDATE, not per rect: one name located by
+search_for at three rects is one redacted occurrence, three destroyed boxes.
 """
 from __future__ import annotations
 
 import fitz
 
 from detect.core import detect
+from writer.labelmap import LabelMap
+from writer.report import write_report
 
 
 class NoTextLayerError(Exception):
@@ -66,22 +76,18 @@ class RedactionIncompleteError(Exception):
         )
 
 
-def _placeholder_label(cand) -> str:
-    """TEMP labeller -- type-only, no per-entity numbering.
-
-    P4 replaces this with writer.labelmap.LabelMap.label_for, which mints document-global
-    ``[TYPE_N]`` labels. LabelMap is deliberately NOT wired in this round: numbering is a
-    cross-page, cross-location concern and threading it belongs with the report work."""
-    return f"[{cand.type}]"
-
-
 def has_text_layer(doc: "fitz.Document") -> bool:
     return any(page.get_text("text").strip() for page in doc)
 
 
-def _collect_page_redactions(page, known_entities: list[str] | None):
+def _collect_page_redactions(page, known_entities: list[str] | None, labelmap, location: str):
     """Stage 1 of the per-page pass: run detect() on the page text and turn every auto=True
     candidate into (rect, label) pairs via search_for.
+
+    ``labelmap`` is the ONE document-global LabelMap (never per-page: a fresh map per page would
+    restart the counter and re-mint two different parties as [MENO_1]) and ``location`` is this
+    page's report tag; both are required, so no caller can silently fall back to an unnumbered
+    label or an untagged capture.
 
     Some corpus PDFs render deterministic identifiers (dates, spisove znacky) with U+00AD SOFT
     HYPHEN as the separator instead of '-'; detect()'s regexes require '-' and emit nothing on
@@ -99,13 +105,20 @@ def _collect_page_redactions(page, known_entities: list[str] | None):
     norm = raw.replace(chr(0xAD), "-")  # soft hyphen -> hyphen-minus; offset-preserving (1:1)
     for cand in detect(norm, known_entities):
         if not cand.auto:
-            continue  # low-confidence -> reviewer's bucket, left intact by design
+            # Low-confidence -> reviewer's bucket: left intact by design, but RECORDED, so the
+            # report tells the reviewer where to look instead of dropping it silently.
+            labelmap.record_low_confidence(location, cand.type, cand.surface)
+            continue
         needle = raw[cand.start : cand.end]  # on-page glyphs; cand.surface is normalized
         rects = page.search_for(needle)
         if not rects:
             skipped.append(needle)
             continue
-        label = _placeholder_label(cand)
+        label = labelmap.label_for(cand)
+        # ONE occurrence per CANDIDATE, recorded before the rect loop: search_for can return
+        # several rects for a single span (a wrapped line, a repeated glyph run), and counting
+        # per rect would inflate the report's count past the number of spans actually detected.
+        labelmap.record_occurrence(label, location, cand.surface)
         for rect in rects:
             pairs.append((rect, label))
 
@@ -165,9 +178,15 @@ def redact_pdf(in_path: str, out_path: str, known_entities: list[str] | None = N
     # content BEFORE the collect/apply/draw loop -- that is what makes them reachable at all.
     doc.bake()
 
+    # ONE LabelMap for the whole document, built AFTER the refusal check (a refused PDF writes
+    # no output, so it must get no report either) and threaded through every page below -- that
+    # threading is what makes the [TYPE_N] numbering document-global rather than per-page.
+    labelmap = LabelMap(known_entities)
+
     skipped: list[str] = []
-    for page in doc:
-        pairs, page_skipped = _collect_page_redactions(page, known_entities)
+    for i, page in enumerate(doc, start=1):
+        location = f"page_{i}"
+        pairs, page_skipped = _collect_page_redactions(page, known_entities, labelmap, location)
         skipped.extend(page_skipped)
 
         for rect, _label in pairs:
@@ -181,6 +200,11 @@ def redact_pdf(in_path: str, out_path: str, known_entities: list[str] | None = N
 
     doc.save(out_path, garbage=4, deflate=True)
     doc.close()
+
+    # P4: the report is written BEFORE the incomplete-redaction raise, deliberately. A partial
+    # output is precisely the file whose record a reviewer needs; writing the report after the
+    # raise would leave the worst case as the one case with no record at all.
+    write_report(out_path, labelmap.occurrences, labelmap.low_confidence)
 
     # Every page was attempted and the (partial) output written -- but the caller must be told,
     # loudly, that this file is not fully redacted.

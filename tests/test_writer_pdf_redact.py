@@ -12,17 +12,26 @@ from __future__ import annotations
 
 import fitz
 
+from writer.labelmap import LabelMap
 from writer.pdf_body import (
     NoTextLayerError,
     RedactionIncompleteError,
     _collect_page_redactions,
     redact_pdf,
 )
+from writer.report import report_path_for
 
 # A syntactically valid Slovak rodné číslo (divisible-by-11 checksum) so detect() marks it
 # auto=True rather than routing it to the review bucket.
 RC = "835112/0008"
+# SHAPE-valid but CHECKSUM-invalid (one digit off RC): detect() still returns it as a
+# RODNE_CISLO Candidate, but with auto=False -- the low-confidence / reviewer bucket.
+# Probed, not assumed: detect("Rodne cislo: 835112/0009", None) -> auto False.
+RC_LOWCONF = "835112/0009"
 NAME = "Novák"
+# Second party for the cross-page numbering fixture. Both surnames are Latin-1 encodable, so
+# the Base-14 "helv" font renders them as distinct glyphs that search_for can re-locate.
+NAME_B = "Horák"
 
 
 def _body_pdf(path) -> None:
@@ -61,6 +70,40 @@ def _widget_pdf(path) -> None:
     doc.close()
 
 
+def _two_party_pdf(path) -> None:
+    """TWO pages, party A on page 1, party B AND party A again on page 2.
+
+    This is the fixture that can tell a per-page labeller from a document-global one: a
+    LabelMap rebuilt per page would restart its counter and re-mint A as [MENO_1] on page 1
+    and B as [MENO_1] on page 2, collapsing two distinct parties into one label."""
+    doc = fitz.open()
+    p1 = doc.new_page()
+    p1.insert_text((72, 100), f"Predavajuci: {NAME}", fontname="helv", fontsize=11)
+    p2 = doc.new_page()
+    p2.insert_text((72, 100), f"Kupujuci: {NAME_B}", fontname="helv", fontsize=11)
+    p2.insert_text((72, 130), f"Svedok: {NAME}", fontname="helv", fontsize=11)
+    doc.save(str(path))
+    doc.close()
+
+
+def _low_conf_pdf(path) -> None:
+    """A page whose only PII-shaped surface is the CHECKSUM-INVALID rodne cislo (auto=False).
+
+    Also carries an auto=True name so the page is not a degenerate no-redaction case."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), f"Predavajuci: {NAME}", fontname="helv", fontsize=11)
+    page.insert_text((72, 130), f"Rodne cislo: {RC_LOWCONF}", fontname="helv", fontsize=11)
+    doc.save(str(path))
+    doc.close()
+
+
+def _report_text(out) -> str:
+    """Read the report the pass wrote NEXT TO ``out`` -- path derived, never passed."""
+    with open(report_path_for(str(out)), encoding="utf-8") as fh:
+        return fh.read()
+
+
 def _out_text(path) -> str:
     doc = fitz.open(str(path))
     text = "".join(page.get_text("text") for page in doc)
@@ -89,8 +132,8 @@ def test_labels_are_drawn_over_the_redacted_spans(tmp_path):
     redact_pdf(str(src), str(out), known_entities=[NAME])
 
     text = _out_text(out)
-    assert "[MENO]" in text
-    assert "[RODNE_CISLO]" in text
+    assert "[MENO_1]" in text
+    assert "[RODNE_CISLO_1]" in text
 
 
 def test_input_file_is_not_modified(tmp_path):
@@ -225,11 +268,11 @@ def test_collect_normalizes_soft_hyphen_for_detect_and_locates_raw_glyphs():
     that mixes the two."""
     page = _StubPage(_SOFT_HYPHEN_TEXT)
 
-    pairs, skipped = _collect_page_redactions(page, None)
+    pairs, skipped = _collect_page_redactions(page, None, LabelMap(None), "page_1")
 
     labels = [lbl for _rect, lbl in pairs]
-    assert "[DATUM]" in labels
-    assert "[SPISOVA_ZNACKA]" in labels
+    assert "[DATUM_1]" in labels
+    assert "[SPISOVA_ZNACKA_1]" in labels
     assert skipped == []
 
 
@@ -244,6 +287,86 @@ def test_collect_pre_fix_would_skip_soft_hyphen_surfaces():
     """
     page = _StubPage(_SOFT_HYPHEN_TEXT)
 
-    pairs, skipped = _collect_page_redactions(page, None)
+    pairs, skipped = _collect_page_redactions(page, None, LabelMap(None), "page_1")
 
     assert len(pairs) >= 2 and skipped == []
+
+
+# --- P4: LabelMap numbering + the per-document report -------------------------------------
+
+
+def test_report_file_is_written_next_to_the_output(tmp_path):
+    """The pass must emit <out stem>_report.txt beside the redacted PDF, with the REDACTED row
+    for the name: TYPE, label, count and the page location the occurrence was captured at."""
+    src = tmp_path / "in.pdf"
+    out = tmp_path / "out.pdf"
+    _body_pdf(src)
+
+    redact_pdf(str(src), str(out), known_entities=[NAME])
+
+    assert (tmp_path / "out_report.txt").exists()
+    report = _report_text(out)
+    assert "MENO | [MENO_1] | 1 | page_1" in report
+
+
+def test_label_numbering_is_document_global_across_pages(tmp_path):
+    """Numbering is a DOCUMENT-global property, not a per-page one.
+
+    Party A appears on both pages and must carry the SAME number on both; party B, first seen
+    on page 2, must get the NEXT number rather than reusing A's. The report then shows A once
+    with count 2 spanning both pages, and B with count 1 -- counts are PER CANDIDATE, so a
+    name that search_for located via several rects still contributes exactly one occurrence."""
+    src = tmp_path / "in.pdf"
+    out = tmp_path / "out.pdf"
+    _two_party_pdf(src)
+
+    redact_pdf(str(src), str(out), known_entities=[NAME, NAME_B])
+
+    doc = fitz.open(str(out))
+    page_texts = [page.get_text("text") for page in doc]
+    doc.close()
+
+    assert NAME not in page_texts[0] and NAME not in page_texts[1]
+    assert NAME_B not in page_texts[1]
+    # Party A: same label on BOTH pages. Party B: a distinct, later number.
+    assert "[MENO_1]" in page_texts[0]
+    assert "[MENO_1]" in page_texts[1]
+    assert "[MENO_2]" in page_texts[1]
+    assert "[MENO_2]" not in page_texts[0]
+
+    report = _report_text(out)
+    assert "MENO | [MENO_1] | 2 | page_1, page_2" in report
+    assert "MENO | [MENO_2] | 1 | page_2" in report
+
+
+def test_low_confidence_surface_is_left_intact_and_reported(tmp_path):
+    """auto=False spans are the reviewer's bucket: NOT redacted (still in the text layer),
+    but recorded in the report's LOW CONFIDENCE section so the reviewer knows to look."""
+    src = tmp_path / "in.pdf"
+    out = tmp_path / "out.pdf"
+    _low_conf_pdf(src)
+
+    redact_pdf(str(src), str(out), known_entities=[NAME])
+
+    text = _out_text(out)
+    assert RC_LOWCONF in text  # left intact BY DESIGN -- never silently redacted
+    assert NAME not in text    # ...while the auto span on the same page still went
+
+    report = _report_text(out)
+    lowconf_section = report.split("[LOW CONFIDENCE / NOT REDACTED]", 1)[1]
+    assert f"RODNE_CISLO | {RC_LOWCONF} | page_1" in lowconf_section
+
+
+def test_report_does_not_leak_the_redacted_surface(tmp_path):
+    """The report is a record of WHAT was removed and WHERE -- label, count, locations. If it
+    echoed the surface it would be a plaintext copy of the PII sitting next to the redacted
+    file, undoing the redaction for anyone who reads the directory."""
+    src = tmp_path / "in.pdf"
+    out = tmp_path / "out.pdf"
+    _body_pdf(src)
+
+    redact_pdf(str(src), str(out), known_entities=[NAME])
+
+    report = _report_text(out)
+    assert NAME not in report
+    assert RC not in report

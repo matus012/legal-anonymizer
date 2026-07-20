@@ -159,5 +159,5 @@ def test_body_redaction_still_works_alongside_the_scrub(tmp_path):
     doc.close()
 
     assert name not in text       # glyphs still destroyed
-    assert "[MENO]" in text       # label still drawn
+    assert "[MENO_1]" in text     # label still drawn (now numbered per entity)
     assert LEAKNAME.encode() not in out.read_bytes()
