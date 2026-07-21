@@ -91,9 +91,9 @@ def test_merged_cell_redacted_exactly_once(tmp_path, monkeypatch):
     visited: list = []
     orig = docx_body._redact_paragraph
 
-    def spy(paragraph, known_entities, labelmap, location):
+    def spy(paragraph, known_entities, labelmap, location, decisions=None):
         visited.append(paragraph._p)
-        return orig(paragraph, known_entities, labelmap, location)
+        return orig(paragraph, known_entities, labelmap, location, decisions=decisions)
 
     monkeypatch.setattr(docx_body, "_redact_paragraph", spy)
 

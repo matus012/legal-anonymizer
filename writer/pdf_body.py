@@ -53,7 +53,8 @@ from __future__ import annotations
 import fitz
 
 from detect.core import detect
-from writer.labelmap import LabelMap
+from writer.decisions import RedactionDecisions
+from writer.labelmap import LabelMap, make_snippet
 from writer.report import write_report
 
 
@@ -80,7 +81,13 @@ def has_text_layer(doc: "fitz.Document") -> bool:
     return any(page.get_text("text").strip() for page in doc)
 
 
-def _collect_page_redactions(page, known_entities: list[str] | None, labelmap, location: str):
+def _collect_page_redactions(
+    page,
+    known_entities: list[str] | None,
+    labelmap,
+    location: str,
+    decisions: RedactionDecisions | None = None,
+):
     """Stage 1 of the per-page pass: run detect() on the page text and turn every auto=True
     candidate into (rect, label) pairs via search_for.
 
@@ -104,10 +111,20 @@ def _collect_page_redactions(page, known_entities: list[str] | None, labelmap, l
     raw = page.get_text("text")
     norm = raw.replace(chr(0xAD), "-")  # soft hyphen -> hyphen-minus; offset-preserving (1:1)
     for cand in detect(norm, known_entities):
-        if not cand.auto:
-            # Low-confidence -> reviewer's bucket: left intact by design, but RECORDED, so the
-            # report tells the reviewer where to look instead of dropping it silently.
-            labelmap.record_low_confidence(location, cand.type, cand.surface)
+        redact = cand.auto
+        if decisions is not None:
+            key = (cand.type, labelmap.group_key(cand))
+            if cand.auto and key in decisions.suppress_groups:
+                redact = False
+            elif not cand.auto and key in decisions.force_groups:
+                redact = True
+        if not redact:
+            # Left intact by design (low-confidence, or human-suppressed) but RECORDED, so
+            # the report tells the reviewer where to look instead of dropping it silently.
+            labelmap.record_low_confidence(
+                location, cand.type, cand.surface,
+                snippet=make_snippet(norm, cand.start, cand.end),
+            )
             continue
         needle = raw[cand.start : cand.end]  # on-page glyphs; cand.surface is normalized
         rects = page.search_for(needle)
@@ -118,7 +135,10 @@ def _collect_page_redactions(page, known_entities: list[str] | None, labelmap, l
         # ONE occurrence per CANDIDATE, recorded before the rect loop: search_for can return
         # several rects for a single span (a wrapped line, a repeated glyph run), and counting
         # per rect would inflate the report's count past the number of spans actually detected.
-        labelmap.record_occurrence(label, location, cand.surface)
+        labelmap.record_occurrence(
+            label, location, cand.surface,
+            snippet=make_snippet(norm, cand.start, cand.end),
+        )
         for rect in rects:
             pairs.append((rect, label))
 
@@ -164,7 +184,18 @@ def _scrub_document_surfaces(doc: "fitz.Document") -> None:
         doc.embfile_del(name)
 
 
-def redact_pdf(in_path: str, out_path: str, known_entities: list[str] | None = None) -> str:
+def _redact_pdf(
+    in_path: str,
+    out_path: str,
+    known_entities: list[str] | None,
+    decisions: RedactionDecisions | None,
+) -> LabelMap:
+    # Reviewer's free-text "redact this too" terms join known_entities BEFORE the LabelMap is
+    # built, so extras get real declension-grouped [MENO_N] labels like any GT name.
+    if decisions is not None and decisions.extra_terms:
+        extras = [t.strip() for t in decisions.extra_terms if t.strip()]
+        known_entities = list(known_entities or []) + extras
+
     doc = fitz.open(in_path)
     if not has_text_layer(doc):
         doc.close()
@@ -186,7 +217,9 @@ def redact_pdf(in_path: str, out_path: str, known_entities: list[str] | None = N
     skipped: list[str] = []
     for i, page in enumerate(doc, start=1):
         location = f"page_{i}"
-        pairs, page_skipped = _collect_page_redactions(page, known_entities, labelmap, location)
+        pairs, page_skipped = _collect_page_redactions(
+            page, known_entities, labelmap, location, decisions=decisions
+        )
         skipped.extend(page_skipped)
 
         for rect, _label in pairs:
@@ -211,4 +244,28 @@ def redact_pdf(in_path: str, out_path: str, known_entities: list[str] | None = N
     if skipped:
         raise RedactionIncompleteError(skipped)
 
+    return labelmap
+
+
+def redact_pdf(
+    in_path: str,
+    out_path: str,
+    known_entities: list[str] | None = None,
+    *,
+    decisions: RedactionDecisions | None = None,
+) -> str:
+    """Public writer entry — unchanged contract (returns out_path; raises on incomplete)."""
+    _redact_pdf(in_path, out_path, known_entities, decisions)
     return out_path
+
+
+def redact_pdf_collect(
+    in_path: str,
+    out_path: str,
+    known_entities: list[str] | None = None,
+    *,
+    decisions: RedactionDecisions | None = None,
+) -> "LabelMap":
+    """Same redaction, returns the LabelMap (GUI scan harvest). Still raises
+    RedactionIncompleteError after writing output+report, exactly like redact_pdf."""
+    return _redact_pdf(in_path, out_path, known_entities, decisions)
