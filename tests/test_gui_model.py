@@ -96,3 +96,28 @@ def test_export_writes_anon_and_report(tmp_path):
     assert out.endswith("in_anon.docx") and report.endswith("in_anon_report.txt")
     txt = "\n".join(p.text for p in _docx.Document(out).paragraphs)
     assert "Novak" not in txt and "2023456789" not in txt
+
+
+def test_export_cleans_up_partial_output_on_incomplete(tmp_path, monkeypatch):
+    """RedactionIncompleteError fires AFTER the PDF writer saved output+report; export_file
+    must delete both so no partially redacted file survives next to the source."""
+    import gui.model as model
+    from writer.pdf_body import RedactionIncompleteError
+
+    src = str(tmp_path / "doc.pdf")
+    open(src, "w").close()  # placeholder; _collect is stubbed below
+
+    def fake_collect(src_, out, known, decisions):
+        open(out, "w").close()
+        root = out.rsplit(".", 1)[0]
+        open(root + "_report.txt", "w").close()
+        raise RedactionIncompleteError(["needle"])
+
+    monkeypatch.setattr(model, "_collect", fake_collect)
+    try:
+        model.export_file(src, None, model.RedactionDecisions())
+        assert False, "must re-raise"
+    except RedactionIncompleteError:
+        pass
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "doc.pdf"]
+    assert leftovers == [], f"partial files left behind: {leftovers}"

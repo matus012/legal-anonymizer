@@ -106,8 +106,20 @@ def build_decisions(rows, checked: dict[tuple, bool], extra_terms) -> RedactionD
 
 def export_file(src: str, known_entities, decisions: RedactionDecisions) -> tuple[str, str]:
     """Redact ``src`` next to itself as <stem>_anon.<ext>; returns (out_path, report_path).
-    Raises the writer's own errors — the caller (worker) turns them into per-file messages."""
+    Raises the writer's own errors — the caller (worker) turns them into per-file messages.
+
+    On RedactionIncompleteError the PDF writer has ALREADY saved a partially redacted
+    output (+ report) before raising — a file a non-technical user must never find lying
+    next to the source (context.md §3: never silently produce an unredacted file). Delete
+    both, then re-raise so the UI shows the per-file failure."""
     out = out_path_for(src)
-    _collect(src, out, known_entities, decisions)
     root, _ = os.path.splitext(out)
-    return out, f"{root}_report.txt"
+    report = f"{root}_report.txt"
+    try:
+        _collect(src, out, known_entities, decisions)
+    except RedactionIncompleteError:
+        for p in (out, report):
+            if os.path.exists(p):
+                os.remove(p)
+        raise
+    return out, report
