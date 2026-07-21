@@ -1,11 +1,17 @@
 STATUS — legal-anonymizer
-Updated: 2026-07-21
+Updated: 2026-07-21 (late session — Phase 6 GUI built)
 
-Last feature commit: be9887d "P4: PDF report wiring + document-global LabelMap labels"
-Suite: 335 passed + 8 skipped, 0 failed (verified 2026-07-21 at be9887d)
-Dual leak gate: PASS (verified 2026-07-21 at be9887d) — 60 docx + 60 pdf,
+Last feature commit: 6204e92 "P6-T5: Qt layer (3-page wizard) + reviewer fixes"
+Suite: 358 passed + 8 skipped, 0 failed (verified 2026-07-21 at 6204e92)
+Dual leak gate: PASS (re-verified 2026-07-21 at 6204e92) — 60 docx + 60 pdf,
   text_layer=0 scrub=0 other=0, Class A (OBEC/KATASTER/ORG, gazetteer->v2) excluded.
   Committed runner: python -m eval.leak_gate
+Decision-path probe: PASS (suppress keeps surface, nothing else leaks, report records it).
+
+OPERATING MODEL (changed this session, owner decision): single-CCLI loop.
+  Main session = reviewer/orchestrator (reads diffs, runs gates, commits scoped).
+  Coder subagents implement only — never review, never commit, never push.
+  Owner pushes. Review gate invariants from handoff.md all retained.
 
 PHASES
   1-2 corpus generator + eval harness ............ DONE
@@ -13,17 +19,28 @@ PHASES
       4.3 known entities) ........................ DONE for v1
       gazetteer (4.2) ............................ DEFERRED to v2 (owner decision)
   4   DOCX writer ................................ DONE (leak gate green)
-  5   PDF writer (P1 refuse-no-text-layer, P2 body,
-      P3 metadata/XMP/attachment scrub, P4 report
-      wiring + LabelMap) ......................... DONE (leak gate green)
-  6   GUI ........................................ NOT STARTED  <- next
-  7   PyInstaller + clean-machine install test ... NOT STARTED
+  5   PDF writer ................................. DONE (leak gate green)
+  6   GUI (PySide6 3-page wizard; scan-via-writer
+      harvest; RedactionDecisions through both
+      writers; per-file review; busy guard;
+      partial-output cleanup) .................... DONE (built + gated this session)
+      spec: docs/superpowers/specs/2026-07-21-gui-design.md
+      plan: docs/superpowers/plans/2026-07-21-phase6-gui.md
+      run:  .\.venv\Scripts\python.exe -m gui
+  7   PyInstaller + clean-machine install test ... IN PROGRESS (build tonight;
+      clean-machine test UNCERTIFIED until run on a no-Python Windows box)
   8   field acceptance (office, ~10 real docs) ... NOT STARTED
+
+KNOWN QUIRKS / OPEN ITEMS
+  - Same-stem .docx + .pdf exported in one batch collide on <stem>_anon_report.txt
+    (second overwrites first). Pre-existing report naming; decide fix in v1.1.
+  - PySide6 6.11.1 added to the venv (GUI dependency; add to requirements pin).
+  - context.md §12 owner items unchanged (office confirmations).
 
 BLOCKERS: none.
 
-NEXT STEP: Phase 6 GUI (context.md section 9 flow: input -> known entities ->
-scan -> grouped review screen -> export + report + final warning screen).
+NEXT STEP: Phase 7 — PyInstaller --noconsole single exe, then clean-machine
+install test on a no-Python Windows machine (context.md §10: mandatory).
 
 Corpus is gitignored + seed-deterministic; regenerate with:
   python -m corpus.generate --n 60 --out data/synthetic --seed 42 --formats docx,pdf
