@@ -1,0 +1,31 @@
+STATUS — legal-anonymizer
+Updated: 2026-07-21
+
+Last feature commit: be9887d "P4: PDF report wiring + document-global LabelMap labels"
+Suite: 335 passed + 8 skipped, 0 failed (verified 2026-07-21 at be9887d)
+Dual leak gate: PASS (verified 2026-07-21 at be9887d) — 60 docx + 60 pdf,
+  text_layer=0 scrub=0 other=0, Class A (OBEC/KATASTER/ORG, gazetteer->v2) excluded.
+  Committed runner: python -m eval.leak_gate
+
+PHASES
+  1-2 corpus generator + eval harness ............ DONE
+  3   detection (4.1 deterministic, 5 declension,
+      4.3 known entities) ........................ DONE for v1
+      gazetteer (4.2) ............................ DEFERRED to v2 (owner decision)
+  4   DOCX writer ................................ DONE (leak gate green)
+  5   PDF writer (P1 refuse-no-text-layer, P2 body,
+      P3 metadata/XMP/attachment scrub, P4 report
+      wiring + LabelMap) ......................... DONE (leak gate green)
+  6   GUI ........................................ NOT STARTED  <- next
+  7   PyInstaller + clean-machine install test ... NOT STARTED
+  8   field acceptance (office, ~10 real docs) ... NOT STARTED
+
+BLOCKERS: none.
+
+NEXT STEP: Phase 6 GUI (context.md section 9 flow: input -> known entities ->
+scan -> grouped review screen -> export + report + final warning screen).
+
+Corpus is gitignored + seed-deterministic; regenerate with:
+  python -m corpus.generate --n 60 --out data/synthetic --seed 42 --formats docx,pdf
+
+Detailed round protocol + lesson history: handoff.md (untracked, single copy).
