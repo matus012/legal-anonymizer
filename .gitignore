@@ -5,6 +5,8 @@
 # environment / build artifacts
 .venv/
 __pycache__/
+build/
+dist/
 
 # data
 data/real/
