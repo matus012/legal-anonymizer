@@ -33,6 +33,7 @@ exe = EXE(
     debug=False,
     upx=False,
     console=False,  # context.md §10: no console window
+    version="version_info.txt",  # metadata lowers AV heuristic score of the unsigned exe
 )
 coll = COLLECT(
     exe,
