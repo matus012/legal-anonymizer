@@ -1,17 +1,18 @@
 STATUS — legal-anonymizer
-Updated: 2026-07-21 (late session — Phase 6 GUI built)
+Updated: 2026-07-21 (session end — Phases 6 + 7 closed)
 
-Last feature commit: 6204e92 "P6-T5: Qt layer (3-page wizard) + reviewer fixes"
-Suite: 358 passed + 8 skipped, 0 failed (verified 2026-07-21 at 6204e92)
+Last feature commit: 9acf906 "P7-T2: locally-compiled bootloader + version resource"
+Suite: 358 passed + 8 skipped, 0 failed (verified 2026-07-21 at 6204e92; gui/writer
+  code unchanged since).
 Dual leak gate: PASS (re-verified 2026-07-21 at 6204e92) — 60 docx + 60 pdf,
   text_layer=0 scrub=0 other=0, Class A (OBEC/KATASTER/ORG, gazetteer->v2) excluded.
   Committed runner: python -m eval.leak_gate
 Decision-path probe: PASS (suppress keeps surface, nothing else leaks, report records it).
 
-OPERATING MODEL (changed this session, owner decision): single-CCLI loop.
+OPERATING MODEL (owner decision this session): single-CCLI loop.
   Main session = reviewer/orchestrator (reads diffs, runs gates, commits scoped).
   Coder subagents implement only — never review, never commit, never push.
-  Owner pushes. Review gate invariants from handoff.md all retained.
+  Owner authorizes pushes. Review gate invariants from handoff.md all retained.
 
 PHASES
   1-2 corpus generator + eval harness ............ DONE
@@ -20,27 +21,35 @@ PHASES
       gazetteer (4.2) ............................ DEFERRED to v2 (owner decision)
   4   DOCX writer ................................ DONE (leak gate green)
   5   PDF writer ................................. DONE (leak gate green)
-  6   GUI (PySide6 3-page wizard; scan-via-writer
-      harvest; RedactionDecisions through both
-      writers; per-file review; busy guard;
-      partial-output cleanup) .................... DONE (built + gated this session)
+  6   GUI (PySide6 3-page wizard) ................ DONE (gated + owner-verified live)
       spec: docs/superpowers/specs/2026-07-21-gui-design.md
-      plan: docs/superpowers/plans/2026-07-21-phase6-gui.md
       run:  .\.venv\Scripts\python.exe -m gui
-  7   PyInstaller + clean-machine install test ... IN PROGRESS (build tonight;
-      clean-machine test UNCERTIFIED until run on a no-Python Windows box)
-  8   field acceptance (office, ~10 real docs) ... NOT STARTED
+  7   PyInstaller + clean-machine install test ... DONE
+      Build: python -m PyInstaller anonymizer.spec --noconfirm
+      Output: dist\Anonymizer\ (one-folder, windowed, ~165 MB; copy WHOLE folder).
+      First build was Defender-flagged on the test PC (stock-bootloader false
+      positive). Fixed: PyInstaller reinstalled from sdist (gcc-compiled unique
+      bootloader) + version resource. Owner re-tested on a no-Python Windows PC:
+      RUNS CLEAN — Phase 7 CERTIFIED 2026-07-21.
+  8   field acceptance (office, ~10 real docs) ... NOT STARTED  <- the only phase left
 
 KNOWN QUIRKS / OPEN ITEMS
   - Same-stem .docx + .pdf exported in one batch collide on <stem>_anon_report.txt
     (second overwrites first). Pre-existing report naming; decide fix in v1.1.
-  - PySide6 6.11.1 added to the venv (GUI dependency; add to requirements pin).
-  - context.md §12 owner items unchanged (office confirmations).
+  - Exe is unsigned: SmartScreen "Run anyway" is expected on first launch per
+    machine. If Defender flags again on some office machine: submit false positive
+    at microsoft.com/wdsi/filesubmission (fixes all machines via cloud protection),
+    or office IT whitelists the install folder, or buy a code-signing cert.
+  - context.md §12 owner items: confirm to office (a) scans NOT supported v1,
+    (b) signatures/stamps NOT removed v1, (c) ask doc volume/week, (d) ask if
+    office owns Acrobat Pro.
 
 BLOCKERS: none.
 
-NEXT STEP: Phase 7 — PyInstaller --noconsole single exe, then clean-machine
-install test on a no-Python Windows machine (context.md §10: mandatory).
+NEXT STEP: Phase 8 — hand office the dist\Anonymizer folder (whole folder, USB or
+share), lawyers run ~10 real documents on THEIR machines, review the _report.txt
+files + outputs, collect misses -> that list drives v1.1/v2 (gazetteer, NER layer).
+Developer never receives the real documents (context.md hard constraint).
 
 Corpus is gitignored + seed-deterministic; regenerate with:
   python -m corpus.generate --n 60 --out data/synthetic --seed 42 --formats docx,pdf
