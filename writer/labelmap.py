@@ -42,6 +42,13 @@ def normalize(s: str) -> str:
     return _WS_RE.sub("", s).casefold()
 
 
+def make_snippet(text: str, start: int, end: int, radius: int = 40) -> str:
+    """±radius chars of context around [start:end), whitespace collapsed to single spaces —
+    feeds the GUI review table only; never the report."""
+    lo, hi = max(0, start - radius), min(len(text), end + radius)
+    return re.sub(r"\s+", " ", text[lo:hi]).strip()
+
+
 class LabelMap:
     """Mints and remembers ``[TYPE_N]`` labels, consistent per entity, document-global.
 
@@ -57,16 +64,25 @@ class LabelMap:
         # later round's <name>_report.txt and never influence numbering or redaction.
         self.occurrences: dict[str, list[tuple[str, str]]] = {}  # label -> [(location, surface)]
         self.low_confidence: list[tuple[str, str, str]] = []  # [(location, type, surface)]
+        # Phase 6 GUI side-channels: review-table context snippets. Kept SEPARATE from
+        # occurrences/low_confidence so build_report's tuple unpacking stays byte-stable.
+        self.contexts: dict[str, str] = {}  # label -> first-seen snippet
+        self.lc_contexts: list[str] = []    # index-aligned with low_confidence
 
     def group_key(self, cand) -> tuple:
         """Identity key for ``cand`` WITHIN its type. MENO resolves to its party via declension;
         everything else keys on the normalized surface."""
-        if cand.type == "MENO":
+        return self.group_key_for(cand.type, cand.surface)
+
+    def group_key_for(self, type: str, surface: str) -> tuple:
+        """Same identity, computable without a Candidate (GUI resolves decision keys from
+        harvested (type, surface) pairs)."""
+        if type == "MENO":
             for i, entity in enumerate(self._known):
-                if match_entity(cand.surface, entity):
+                if match_entity(surface, entity):
                     return ("entity", i)
-            return ("surface", normalize(cand.surface))  # defensive fallback
-        return ("surface", normalize(cand.surface))
+            return ("surface", normalize(surface))  # defensive fallback
+        return ("surface", normalize(surface))
 
     def label_for(self, cand) -> str:
         """Return the ``[TYPE_N]`` label for ``cand``: the cached number for a group already seen,
@@ -81,12 +97,20 @@ class LabelMap:
         self._cache[key] = label
         return label
 
-    def record_occurrence(self, label: str, location: str, surface: str) -> None:
+    def record_occurrence(self, label: str, location: str, surface: str, snippet: str = "") -> None:
         """Append ONE redacted-span record. Called for EVERY kept (auto=True) occurrence,
         including repeats of an already-numbered label — never deduped."""
         self.occurrences.setdefault(label, []).append((location, surface))
+        if snippet and label not in self.contexts:
+            self.contexts[label] = snippet
 
-    def record_low_confidence(self, location: str, type: str, surface: str) -> None:
+    def record_low_confidence(self, location: str, type: str, surface: str, snippet: str = "") -> None:
         """Append ONE low-confidence (auto=False) record: a span detect() flagged for review
         that the pass leaves UNREDACTED and UNLABELLED."""
         self.low_confidence.append((location, type, surface))
+        self.lc_contexts.append(snippet)
+
+    def groups(self) -> dict[str, tuple[str, tuple]]:
+        """label -> (type, group_key) for every label minted so far — the GUI's bridge from
+        harvested labels back to decision keys."""
+        return {label: key for key, label in self._cache.items()}
