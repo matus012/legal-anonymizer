@@ -101,6 +101,33 @@ class RedactionIncompleteError(Exception):
         )
 
 
+# A page is SHREDDED when most of its tokens are single characters: the glyph advances did not
+# match the text, so every letter became its own word. Thresholds are on the PAGE and require a
+# substantial amount of text, because Slovak notarial practice letter-spaces HEADINGS and party
+# designations on purpose (razvetrené písmo) and a spaced heading must not cost the document its
+# redaction.
+_SHRED_MIN_TOKENS = 20
+_SHRED_MAX_SINGLE_RATIO = 0.50
+
+
+def page_is_shredded(text: str) -> bool:
+    """Is this page's text layer broken into single characters?
+
+    Measured against the whole corpus before shipping: 0 of 71 PDFs trip it, and the
+    letter-spaced attack at every tracking value the red team used does.
+    """
+    tokens = text.split()
+    if len(tokens) < _SHRED_MIN_TOKENS:
+        return False
+    singles = sum(1 for t in tokens if len(t) == 1 and t.isalnum())
+    return singles / len(tokens) > _SHRED_MAX_SINGLE_RATIO
+
+
+def shredded_pages(doc: "fitz.Document") -> list[int]:
+    """1-based page numbers whose text layer is shredded into single characters."""
+    return [i for i, page in enumerate(doc, 1) if page_is_shredded(page.get_text("text"))]
+
+
 # A character is UNDECODABLE when it is a CONTROL character (Cc), a private-use codepoint (Co)
 # or unassigned (Cn) -- what a font with no /ToUnicode map yields, since the extractor falls
 # back to the raw glyph index.
@@ -167,6 +194,24 @@ def page_has_unreadable_text(text: str) -> bool:
     """
     undecodable = sum(1 for ch in text if not ch.isspace() and _is_undecodable(ch))
     return undecodable >= _UNDECODABLE_MAX
+
+
+class ShreddedTextLayerError(NoTextLayerError):
+    """A page's text layer is broken into single characters (see page_is_shredded).
+
+    A NoTextLayerError subclass for the same reason as UnreadableTextLayerError: every caller
+    that already refuses an unreadable PDF refuses this one unchanged, and the distinct type
+    exists only so the GUI can explain which of the two it is, because the remedy differs.
+
+    Carries ``pages`` (1-based)."""
+
+    def __init__(self, path: str, pages: list[int]) -> None:
+        self.pages = list(pages)
+        super().__init__(
+            f"PDF text layer is broken into single characters on page(s) "
+            f"{', '.join(str(p) for p in self.pages)}; refusing rather than writing a file "
+            f"whose text was never readable: {path}"
+        )
 
 
 def has_text_layer(doc: "fitz.Document") -> bool:
@@ -375,6 +420,14 @@ def _redact_pdf(
     # glyphs are drawn and a human reads them; detect() sees control characters and removes
     # nothing; and eval/extract.py reads the same control characters, so the leak gate agrees
     # the output is clean. Refuse instead.
+    # R3-C1: a shredded text layer is the same danger as an undecodable one, arriving by a
+    # different route -- detect() reads "P re d a v a ju ci" and finds nothing, and so does
+    # eval/extract.py, so the leak gate calls the unredacted result clean.
+    shredded = shredded_pages(doc)
+    if shredded:
+        doc.close()
+        raise ShreddedTextLayerError(in_path, shredded)
+
     bad_pages = unreadable_pages(doc)
     if bad_pages:
         doc.close()

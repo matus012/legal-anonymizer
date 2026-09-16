@@ -20,6 +20,7 @@ from writer.labelmap import LabelMap
 from writer.pdf_body import (
     NoTextLayerError,
     RedactionIncompleteError,
+    ShreddedTextLayerError,
     UnreadableTextLayerError,
     redact_pdf_collect,
 )
@@ -39,6 +40,16 @@ MSG_UNREADABLE_TEXT = (
     "Tento PDF obsahuje text, ktorý sa nedá strojovo prečítať (chýba mapovanie znakov "
     "písma) — na stranách: {pages}. NIE JE to sken. Text je na strane viditeľný, ale "
     "nástroj ho nevie prečítať, a teda ani spoľahlivo odstrániť. Súbor bol odmietnutý; "
+    "vyexportujte ho znova (napr. Tlač → Uložiť ako PDF) a skúste znova."
+)
+# R3-C1. Again a DIFFERENT message: this file is not a scan and its font is fine -- the text
+# is drawn one character at a time, so every extractor reads "P re d a v a ju ci" instead of a
+# name. Typical of a document-management export, a PDF/A converter or an OCR text layer. The
+# remedy is a re-export, and saying "this is a scan" would send the lawyer nowhere useful.
+MSG_SHREDDED_TEXT = (
+    "Tento PDF má textovú vrstvu rozbitú na jednotlivé znaky (strany: {pages}) — nástroj "
+    "z nej nevie prečítať mená ani čísla. NIE JE to sken. Býva to výsledok exportu z "
+    "dokumentového systému, konverzie do PDF/A alebo OCR. Súbor bol odmietnutý; "
     "vyexportujte ho znova (napr. Tlač → Uložiť ako PDF) a skúste znova."
 )
 MSG_INCOMPLETE = (
@@ -184,6 +195,9 @@ def scan_file(src: str, known_entities, extra_terms: tuple[str, ...] = (),
         out = os.path.join(tmp, "scan" + os.path.splitext(src)[1])
         try:
             lm = _collect(src, out, known_entities, decisions, config)
+        except ShreddedTextLayerError as e:
+            return FileScan(src, [], MSG_SHREDDED_TEXT.format(
+                pages=", ".join(str(p) for p in e.pages)))
         except UnreadableTextLayerError as e:
             # BEFORE NoTextLayerError: it is a subclass, so the order of these two clauses is
             # what decides whether the lawyer is told to rescan a file that needs re-exporting.
