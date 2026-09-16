@@ -62,3 +62,69 @@ pattern that relies on a literal `\n` to mean "end of line" depends on how `page
 happens to group lines, and it survived this time only because the normalization layer was
 changed to preserve line breaks. Left as a known sharp edge, now documented rather than
 discovered twice.
+
+---
+
+## 2026-09-17 · red-team round 3 · `tests/test_mutations.py` forbids `corpus/mutations.py` from growing
+
+**Task blocked:** adding the four round-3 mutations (`nb_hyphen`, `narrow_nbsp`,
+`surname_caps`, `letterspaced`) to `corpus/mutations.py` — the explicit deliverable of the
+round-3 brief, which says "ADD new mutations; do not modify or delete existing ones".
+
+**What is blocked:** the mutations are added, registered, homomorphism-checked and measured
+(`python -m eval.mutation_gate` runs them, instrument self-check OK, four new columns), but
+`python -m pytest tests/test_mutations.py` now reports **5 failures**:
+
+```
+FAILED tests/test_mutations.py::test_registry_holds_every_required_mutation
+FAILED tests/test_mutations.py::test_every_mutation_is_registered_under_its_own_function[letterspaced]
+FAILED tests/test_mutations.py::test_every_mutation_is_registered_under_its_own_function[narrow_nbsp]
+FAILED tests/test_mutations.py::test_every_mutation_is_registered_under_its_own_function[nb_hyphen]
+FAILED tests/test_mutations.py::test_every_mutation_is_registered_under_its_own_function[surname_caps]
+```
+
+Both have the same root cause: the test pins the registry to round 2's exact eleven.
+
+```python
+assert set(MUTATIONS) == {          # tests/test_mutations.py:65 — EQUALITY, not superset
+    "nbsp", "zero_width", "soft_hyphen", "tabs", "double_spaces", "line_break_mid",
+    "all_caps", "lowercase", "no_diacritics", "cyrillic_homoglyph", "nfd",
+}
+
+@pytest.mark.parametrize("name", sorted(MUTATIONS))
+def test_every_mutation_is_registered_under_its_own_function(name):
+    assert MUTATIONS[name] is globals()[f"mutate_{name}"]   # line 74 — globals() of the TEST
+                                                            # module, fed by an EXPLICIT
+                                                            # eleven-name import list at :27
+```
+
+The second one is the subtler of the two: it looks like a general invariant ("every registered
+mutation is bound to its own function") but it is actually a check that the test module's own
+explicit import list matches the registry, so it fails with `KeyError` for any mutation the test
+file does not already import by name.
+
+**What was tried:** nothing was changed in `tests/`. The round-3 brief forbids touching any
+existing file in `tests/`, and the standing rule forbids editing an existing test to make
+something pass. Reverting the mutations was rejected — they are the deliverable, and three of
+the four are the corpus-scale measurement behind findings R3-A5, R3-A6 and R3-C1
+(`surname_caps` 0.649, `nb_hyphen` 0.941, `letterspaced` 0.113, all below the 0.95 gate).
+
+**What is needed (one decision, not mine to take):** a two-line change to
+`tests/test_mutations.py` by whoever owns it.
+
+1. line 65: `==` → `<=` on the brief's eleven — i.e. assert *the required set is PRESENT*, not
+   that nothing was ever added. The invariant the test names ("a mutation silently missing from
+   MUTATIONS is a column the gate never prints and an attack nobody ran") is a SUPERSET
+   invariant; the equality is stricter than the thing it documents.
+2. line 74: resolve through the module rather than the test's globals —
+   `getattr(corpus.mutations, f"mutate_{name}")` — so the invariant holds for every mutation
+   instead of for the eleven the test happens to import.
+
+**State: OPEN.** Everything else in the round is unaffected and was completed:
+`tests/test_redteam_round3.py` is green (6 passed / 21 xfailed / 0 xpassed), the mutation gate
+runs all fifteen mutations with its instrument self-check passing, and the rest of the suite is
+1361 passed / 8 skipped, with these five the only red in the tree.
+
+**This is itself a round-3 finding** (recorded as R3-F1 in `redteam/FINDINGS_ROUND3.md`): a test
+whose stated purpose is "make sure nobody drops an attack" is implemented as an equality that
+makes the module append-only in name and frozen in fact. Every future red-team round hits it.

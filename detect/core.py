@@ -393,6 +393,18 @@ def detect_with_failures(
 ) -> tuple[list[Candidate], list[DetectorFailure]]:
     if known_entities is None:
         known_entities = []
+    # THE KNOWN-ENTITY LIST IS NORMALIZED THE SAME WAY THE DOCUMENT IS (red-team round 3, A11).
+    # detect() used to normalize only the TEXT, so the two sides of the comparison could be
+    # spelled differently and never meet. This list is USER INPUT -- typed into the GUI, or
+    # pasted out of some other document -- so it arrives with whatever its source had in it: a
+    # zero-width space from a web page, NFD from a Mac, a non-breaking space between the given
+    # name and the surname. context.md 4.3 calls this list "the single highest-value input in
+    # the whole system", and a silent spelling mismatch is the worst way for it to fail,
+    # because the lawyer can SEE the name they typed sitting unredacted in the output.
+    #
+    # Only the surface spelling is folded. Nothing is matched here and no offset is taken from
+    # these strings -- they are needles, not haystacks -- so this cannot move a span.
+    known_entities = [n for n in (normalize(e).text for e in known_entities) if n]
     if config is None:
         config = DEFAULT
 

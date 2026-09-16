@@ -224,3 +224,40 @@ from one seed, then render that same plan to each requested format, giving `Docx
 own separate RNG for layout decisions so its draws cannot perturb the content stream. Then
 regenerate, re-baseline every gate deliberately, and point `eval/cross_format_gate.py` at
 `data/synthetic` instead of its own fixtures.
+
+---
+
+## Q15 (red-team round 3, 2026-09-16) — is `surname_caps` a CASE_DESTROYING mutation?
+
+**Question.** `corpus/mutations.py` carries a `CASE_DESTROYING` frozenset that ANNOTATES (never
+exempts) a flagged cell. Round 3 adds `surname_caps`, which uppercases some tokens. Should it
+join that set?
+
+**Default chosen: NO, it is deliberately left out.** `CASE_DESTROYING` exists for
+`all_caps`/`lowercase`, whose damage to a CAPITALISATION-DEPENDENT heuristic is inherent because
+the document has no capitalisation signal left anywhere. `surname_caps` keeps the document
+mixed-case on purpose — the surrounding prose still carries every bit of the evidence the
+bare-name heuristic and the ORG detector rely on. Its loss is therefore NOT inherent, and
+annotating it as if it were would invite exactly the "excuse the failure" reading the set's own
+comment forbids. The brief for this round also forbids modifying existing entries in that module.
+
+**Reversal.** One line: add `"surname_caps"` to `CASE_DESTROYING`. It changes no number and no
+verdict — the set only prints `[case-destroying mutation]` next to a flagged cell.
+
+## Q16 (red-team round 3, 2026-09-16) — is SPISOVA_ZNACKA's agenda list meant to be closed?
+
+**Question.** `detect/registry_refs.py::_SPISOVA_ZNACKA_RE` accepts the fused agendas
+`Cb|Ro|Er|C|T|D` only. Real Slovak references include three-letter agendas (`Cdo`, `Obdo`,
+`Tdo`, `Sžk`, `CbPv`), the Constitutional Court's Roman-numeral form `II. ÚS 45/2024`, and the
+space-separated district form `2 C 45/2019`. Round 3 measured all four as undetected (A7).
+Is the current list the intended scope, or is it the corpus generator's repertoire mistaken for
+the type's definition?
+
+**Default chosen: it is the corpus's repertoire, i.e. a DEFECT, and it is filed as one.** The
+type is listed in context.md §4.1 without qualification ("Court/admin refs"), and nothing in
+CONTRACTS_v11.md restricts it. Recorded as R3-A7.
+
+**Reversal.** If the office decides a court file mark is not PII in their workflow, the type
+should be removed from §4.1 and from `_TYPE_PRECEDENCE` rather than left half-implemented —
+a type that matches one spelling of four is worse than no type, because the report claims the
+category is covered.

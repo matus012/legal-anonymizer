@@ -99,6 +99,18 @@ def _strip_notes_tracked_changes(part) -> None:
     part._blob = etree.tostring(tree, encoding="UTF-8", standalone=True)
 
 
+# The <w:r> children that CONTRIBUTE CHARACTERS to run.text, and therefore to the offsets
+# detect() is given. python-docx renders w:t as its text, w:tab as "\t", and w:br / w:cr as
+# "\n"; w:noBreakHyphen and w:softHyphen render as their characters. All of them must be
+# dropped when a run is rebuilt, or their text is duplicated into every fragment.
+_TEXT_BEARING = frozenset({
+    qn("w:t"), qn("w:tab"), qn("w:br"), qn("w:cr"),
+    qn("w:noBreakHyphen"), qn("w:softHyphen"), qn("w:delText"),
+})
+# Split a fragment so tabs and line breaks can be re-emitted as the elements they were.
+_TEXT_SPLIT_RE = re.compile(r"([\t\n])")
+
+
 def _rebuild_run(run, fragments: list[tuple[str, str]]) -> None:
     """Replace a single <w:r> with one new <w:r> per fragment, cloning the original run's
     formatting onto each. ``fragments`` is an ordered list of ('t', text) surviving-text and
@@ -110,14 +122,31 @@ def _rebuild_run(run, fragments: list[tuple[str, str]]) -> None:
 
     for offset, (_kind, value) in enumerate(fragments):
         clone = deepcopy(r_elem)  # carries a copy of <w:rPr> so formatting is preserved
-        t = clone.find(qn("w:t"))
-        if t is None:
-            t = clone.makeelement(qn("w:t"), {})
-            clone.append(t)
-        t.text = value
-        # Preserve any leading/trailing whitespace in the fragment (labels have none, but a
-        # surviving boundary fragment like ' súhlasí' does).
-        t.set(_XML_SPACE, "preserve")
+        # EVERY text-bearing child is removed, not just the first <w:t> rewritten. See
+        # _TEXT_BEARING: a run can hold several, python-docx never emits one that does, and
+        # the old code copied the extras into every fragment with their ORIGINAL TEXT.
+        for child in list(clone):
+            if child.tag in _TEXT_BEARING:
+                clone.remove(child)
+        # The fragment's own text is then re-emitted STRUCTURALLY: run.text renders <w:tab/>
+        # as "\t" and <w:br/> as "\n", and those characters are inside the offsets detect()
+        # was given, so writing them back as literal characters inside a <w:t> would silently
+        # turn a line break into a space. Splitting them back out keeps the document looking
+        # like itself.
+        for piece in _TEXT_SPLIT_RE.split(value):
+            if piece == "":
+                continue
+            if piece == "\t":
+                clone.append(clone.makeelement(qn("w:tab"), {}))
+            elif piece == "\n":
+                clone.append(clone.makeelement(qn("w:br"), {}))
+            else:
+                t = clone.makeelement(qn("w:t"), {})
+                t.text = piece
+                # Preserve leading/trailing whitespace in the fragment (labels have none, but
+                # a surviving boundary fragment like ' súhlasí' does).
+                t.set(_XML_SPACE, "preserve")
+                clone.append(t)
         parent.insert(idx + offset, clone)
 
     parent.remove(r_elem)

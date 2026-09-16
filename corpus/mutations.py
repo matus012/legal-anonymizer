@@ -273,6 +273,147 @@ def mutate_nfd(text: str) -> str:
     return unicodedata.normalize("NFD", text)
 
 
+# =========================================================================================
+# RED-TEAM ROUND 3 ADDITIONS (redteam/FINDINGS_ROUND3.md)
+# -----------------------------------------------------------------------------------------
+# Round 2's eleven mutations are all either INVISIBLE characters (nbsp, zero_width,
+# soft_hyphen, nfd, cyrillic_homoglyph) or WHITESPACE/CASE rewrites applied to the WHOLE
+# document (tabs, double_spaces, line_break_mid, all_caps, lowercase, no_diacritics). The four
+# below attack three shapes none of those can reach, and every one of them satisfies the
+# HOMOMORPHISM REQUIREMENT documented at the top of this module:
+#
+#   * mutate_nb_hyphen / mutate_narrow_nbsp are CHARACTER-LOCAL 1:1 rewrites, the same class
+#     as mutate_nbsp, so the property holds unconditionally.
+#   * mutate_surname_caps / mutate_letterspaced are TOKEN-LOCAL and START-ANCHORED: each
+#     maximal alphanumeric run is rewritten by a function of that run alone, measured from its
+#     first character, exactly as mutate_zero_width and mutate_soft_hyphen are. They inherit
+#     the same documented caveat (a GT surface that is a strict suffix of a longer document
+#     token) and the same remedy: eval/mutation_gate.py re-checks containment per pair and
+#     EXCLUDES the pairs it cannot ask about, counting them.
+# =========================================================================================
+
+NBHY = "‑"     # NON-BREAKING HYPHEN
+NNBSP = " "    # NARROW NO-BREAK SPACE
+
+
+# --------------------------------------------------------------------------- 12. nb_hyphen
+def mutate_nb_hyphen(text: str) -> str:
+    """Every ASCII hyphen-minus becomes U+2011 NON-BREAKING HYPHEN.
+
+    Real-world source: Ctrl+Shift+hyphen in Word, which exists for precisely one purpose —
+    stopping a reference from breaking at a line end. A Slovak filing is full of tokens nobody
+    wants broken: a spisová značka ``V-1234/2025``, an EČV ``BA-123AB``, a client number
+    ``KL-99321``, a legacy account ``123456-1234567890/1100``, a double surname
+    ``Kováč-Nagy``. Slovak house styles and the ministry's own templates call for the
+    non-breaking form in exactly those places, and LibreOffice/Word autocorrect will also
+    insert one. It renders IDENTICALLY to a hyphen — no reviewer can see the difference.
+
+    This is NOT covered by the existing normalization layer, and that is the point of adding
+    it: ``detect/normalize.py`` runs per-character NFKC, and NFKC(U+2011) is U+2010 HYPHEN,
+    which is still not the ASCII ``-`` every pattern in ``detect/`` spells. The fold fires,
+    changes the character, and lands one codepoint short.
+
+    Character-local, 1:1, offset-preserving — the same shape as ``mutate_nbsp``.
+    """
+    return text.replace("-", NBHY)
+
+
+# ------------------------------------------------------------------------ 13. narrow_nbsp
+def mutate_narrow_nbsp(text: str) -> str:
+    """Every ASCII space becomes U+202F NARROW NO-BREAK SPACE.
+
+    Real-world source: continental typography. U+202F is the correct space between a number
+    and its unit and inside grouped digits ("1 234,56 €"), and Word/LibreOffice autocorrect
+    inserts it; it also arrives from any document that passed through a French or Swiss
+    locale, and from several PDF text extractors that map a thin justification space onto it.
+
+    This one is included as a POSITIVE CONTROL, in the sense round 2 used ``nbsp``: U+202F is
+    Unicode category Zs and ``str.isspace()`` is True for it, so ``detect/normalize.py``'s
+    whitespace-run collapse should absorb it exactly as it absorbs U+00A0. A number below
+    1.000 here would mean the whitespace collapse is narrower than it claims to be; 1.000
+    means the harness is measuring the layer and not something else. A mutation whose answer
+    is predictable is worth its runtime precisely because it can falsify the instrument.
+
+    Character-local, 1:1.
+    """
+    return text.replace(" ", NNBSP)
+
+
+# ----------------------------------------------------------------------- 14. surname_caps
+def mutate_surname_caps(text: str) -> str:
+    """Every Capitalized alphabetic run of 4+ characters is UPPERCASED. The document as a
+    whole stays MIXED-CASE.
+
+    Real-world source: the continental legal convention of setting the surname in capitals to
+    mark which of two names is the family name — "Ján NOVÁK", "JUDr. Mária KOVÁČOVÁ". It is
+    used throughout ORSR extracts, notarial deeds, court headers and identity documents, and
+    a Slovak law office meets it daily.
+
+    WHY THIS IS NOT A DUPLICATE OF ``all_caps``, and this is the whole reason it exists:
+    ``all_caps`` uppercases the ENTIRE unit, which makes ``detect/identifiers.py``'s
+    ``document_is_single_case`` return True and switches ``detect/name_anchors.py`` to its
+    RELAXED (case-insensitive) regex set. A document that is mixed-case overall but writes
+    SOME tokens in capitals keeps the STRICT set, whose ``_CAP`` token class is literally
+    ``[A-ZÁÄČ…][a-záäč…]+`` — an uppercase letter followed by LOWERCASE ones. So the very
+    population ``all_caps`` rescues by relaxing, this mutation leaves unrescued. Round 2's
+    all-caps arm could not have found this shape; it is structurally invisible to it.
+
+    HONEST LIMIT OF THE AGGREGATE NUMBER. The predicate is a function of one token, because
+    it has to be (see the homomorphism note above), so it uppercases ordinary Capitalized
+    words too — "Zmluva", "Košice", "Predávajúci". The aggregate robustness therefore measures
+    the deformation CLASS "some tokens are in capitals in a mixed-case document", not the
+    narrow "only the surname is". The attributable evidence for the narrow claim is the hand
+    discriminator in redteam/FINDINGS_ROUND3.md A5, not this number.
+
+    Token-local and start-anchored: the rewrite of a run depends only on that run.
+    """
+
+    def edit(run: str) -> str:
+        if len(run) < 4 or not run[0].isupper():
+            return run
+        return run.upper() if run[1:].islower() else run
+
+    return _edit_runs(text, edit)
+
+
+# ----------------------------------------------------------------------- 15. letterspaced
+def mutate_letterspaced(text: str) -> str:
+    """A single space is inserted BETWEEN every pair of characters of each 4+ character run:
+    ``Novák`` -> ``N o v á k``.
+
+    Real-world source: two of them, and the second is the one that matters.
+
+    1. Letter-spacing (``razvetrené písmo``) is a live Slovak typographic convention for
+       headings and for party designations in notarial deeds, and Word implements it as
+       CHARACTER SPACING, which several PDF text extractors then render as real spaces.
+    2. More importantly, it is what a PDF text layer ACTUALLY HANDS THIS PIPELINE when the
+       producer positions text per glyph and the advances do not match the font's own metrics
+       — a legal DMS export, a PDF/A converter, an OCR-to-PDF pipeline, or any document with
+       tracking applied. Measured in redteam/FINDINGS_ROUND3.md C1: at 1.3x tracking PyMuPDF's
+       ``get_text()`` returns ``P re d a v a ju ci: Ja n N o va k``, ``detect()`` finds
+       nothing, the writer redacts nothing, and — because ``eval/extract.py`` reads the same
+       mangled string — the leak gate greps CLEAN on a completely unredacted document.
+
+    This mutation is the corpus-wide measurement of that damage. Round 2 explicitly recorded
+    "DOCX only; no PDF arm" as judgement call 1, with the cost stated as "a PDF-only
+    normalization defect is invisible to this gate". This is that defect, expressed as a text
+    mutation so the existing DOCX-unit harness can put a number on it.
+
+    NOTE ON THE SEPARATOR: a plain space, not a zero-width or invisible character. The round-2
+    invisible-character classes are all Unicode category Cf and are DELETED outright by
+    ``detect/normalize.py``; a real space is not, and must not be — deleting spaces would
+    weld every pair of words in every document. So this is a genuinely different question from
+    ``zero_width``, not a restatement of it.
+
+    Token-local and start-anchored.
+    """
+
+    def edit(run: str) -> str:
+        return run if len(run) < 4 else " ".join(run)
+
+    return _edit_runs(text, edit)
+
+
 # --------------------------------------------------------------------------- registry
 MUTATIONS: dict[str, Callable[[str], str]] = {
     "nbsp": mutate_nbsp,
@@ -286,6 +427,11 @@ MUTATIONS: dict[str, Callable[[str], str]] = {
     "no_diacritics": mutate_no_diacritics,
     "cyrillic_homoglyph": mutate_cyrillic_homoglyph,
     "nfd": mutate_nfd,
+    # red-team round 3
+    "nb_hyphen": mutate_nb_hyphen,
+    "narrow_nbsp": mutate_narrow_nbsp,
+    "surname_caps": mutate_surname_caps,
+    "letterspaced": mutate_letterspaced,
 }
 
 # Mutations whose loss on a CAPITALISATION-dependent population is inherent rather than a

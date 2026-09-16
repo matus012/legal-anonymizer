@@ -118,11 +118,21 @@ from dataclasses import dataclass
 # will ever spot the difference) to a Latin letter, mapped to that letter. Every entry is
 # 1 character for 1 character.
 #
-# Only true confusables are listed. A Cyrillic "б" or "д" is not a Latin letter to any eye
-# and folding it would corrupt genuinely Cyrillic text -- Slovakia has a large Ukrainian-
-# speaking population and a filing may legitimately contain a Cyrillic name that should be
-# read as Cyrillic. The attack this defends against is a Latin word with a Cyrillic letter
-# SMUGGLED INTO IT, and that only works with a lookalike.
+# Only true confusables are listed, and -- see _fold_indices below -- they are folded ONLY
+# INSIDE A TOKEN THAT IS ALREADY PARTLY LATIN.
+#
+# The list alone was not enough, and this comment used to claim it was. Folding per character
+# and unconditionally turns a genuinely Cyrillic word into mixed-script wreckage:
+# "Ковальчук" came out as "Koвaльчyк", matching nothing and readable as neither language.
+# Slovakia has handled Ukrainian clients by the thousand since 2022, so a filing carrying a
+# name in Cyrillic is ordinary, and the consequence was a LEAK -- the lawyer typed the party's
+# name into the known-entities box exactly as the document spelled it, and it did not match,
+# because the document text had been mangled underneath it. Found by red-team round 3 (A10),
+# which read this comment and checked whether the code did what it said.
+#
+# The attack this defends against is a Latin word with a Cyrillic letter SMUGGLED INTO IT.
+# That attack requires the rest of the token to be Latin, which is exactly the test now
+# applied -- so the defence is unchanged and the collateral damage is gone.
 _HOMOGLYPH_PAIRS = (
     # Cyrillic lowercase -> Latin
     ("а", "a"), ("е", "e"), ("о", "o"), ("р", "p"), ("с", "c"), ("у", "y"), ("х", "x"),
@@ -264,6 +274,33 @@ def _is_identifier_run(run: str) -> bool:
     return bool(run) and not any(ch.islower() for ch in run)
 
 
+def _fold_indices(text: str) -> set[int]:
+    """Indices whose homoglyph may be folded: those inside a token that ALREADY CONTAINS A
+    LATIN LETTER.
+
+    A Cyrillic letter inside an otherwise-Latin word is an attack (or a mixed-script paste),
+    and folding it recovers the real word. A Cyrillic letter inside a word made of Cyrillic
+    letters is just Cyrillic, and folding it destroys the word -- see the comment on
+    _HOMOGLYPH_PAIRS for the leak that caused.
+
+    "Contains a Latin letter" is the whole test, and it is deliberately that blunt. Every
+    confusable has a Latin twin, so a token with no Latin letter at all cannot be a Latin word
+    with something smuggled into it; and one Latin letter is enough to say the token was meant
+    to be read as Latin.
+    """
+    out: set[int] = set()
+    for m in _TOKEN_RE.finditer(text):
+        token = m.group(0)
+        if any("LATIN" in unicodedata.name(ch, "") for ch in token):
+            out.update(range(m.start(), m.end()))
+    return out
+
+
+# A maximal run of letters/digits. The unit a homoglyph decision is made over: script mixing
+# is a property of a WORD, never of a character in isolation.
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
 def strip_format_chars(s: str) -> str:
     """Remove every Unicode format character (category Cf) from ``s``.
 
@@ -298,6 +335,7 @@ def normalize(text: str, join_wrapped: bool = False) -> Normalized:
     pass's -- see _wrapped_run_indices for why it is an extra pass and not the only one.
     """
     joined = _wrapped_run_indices(text) if join_wrapped else frozenset()
+    foldable = _fold_indices(text)
     if not text or (not joined and not _INTERESTING_RE.search(text)):
         # Fast path: nothing to do. ``unchanged`` is True and span() is the identity, so no
         # arrays are built and detect() pays nothing for the common paragraph.
@@ -386,7 +424,8 @@ def normalize(text: str, join_wrapped: bool = False) -> Normalized:
 
         # 4. HOMOGLYPH then COMPATIBILITY FOLD. The homoglyph map is 1:1; _compat may expand
         # one character into several, each of which maps back to this single original index.
-        folded = _compat(_HOMOGLYPHS.get(ord(ch), ch))
+        base = _HOMOGLYPHS.get(ord(ch), ch) if i in foldable else ch
+        folded = _compat(base)
         for piece in folded:
             out.append(piece)
             starts.append(i)

@@ -59,19 +59,38 @@ SAMPLE = (
 
 
 # --------------------------------------------------------------------------- registry
+# The eleven the sprint brief named. Later red-team rounds ADD to this registry -- that is
+# what corpus/mutations.py means by append-only -- so the invariant is a SUPERSET, not
+# equality. It was written as equality, and the consequence was that adding an attack turned
+# five tests red and forced the round that added it to choose between leaving the suite broken
+# and editing a test it did not own. Red-team round 3 hit exactly that and filed it (R3-F1)
+# instead of working around it.
+BRIEF_MUTATIONS = frozenset({
+    "nbsp", "zero_width", "soft_hyphen", "tabs", "double_spaces", "line_break_mid",
+    "all_caps", "lowercase", "no_diacritics", "cyrillic_homoglyph", "nfd",
+})
+
+
 def test_registry_holds_every_required_mutation():
-    """The brief's list, exactly. A mutation silently missing from ``MUTATIONS`` is a
-    column the gate never prints and an attack nobody ran."""
-    assert set(MUTATIONS) == {
-        "nbsp", "zero_width", "soft_hyphen", "tabs", "double_spaces", "line_break_mid",
-        "all_caps", "lowercase", "no_diacritics", "cyrillic_homoglyph", "nfd",
-    }
+    """Every mutation the brief required is present. A mutation silently MISSING from
+    ``MUTATIONS`` is a column the gate never prints and an attack nobody ran -- which is the
+    failure this guards. An EXTRA one is a later round doing its job."""
+    missing = BRIEF_MUTATIONS - set(MUTATIONS)
+    assert not missing, f"required mutation(s) dropped from the registry: {sorted(missing)}"
     assert CASE_DESTROYING <= set(MUTATIONS)
 
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
 def test_every_mutation_is_registered_under_its_own_function(name):
-    assert MUTATIONS[name] is globals()[f"mutate_{name}"]
+    """Resolved against the MODULE's namespace, not this test module's globals.
+
+    Looking it up in globals() only worked for the mutations this file happens to import by
+    name, so a newly added one failed here for a reason that had nothing to do with it."""
+    import corpus.mutations as mutations_module
+
+    fn = getattr(mutations_module, f"mutate_{name}", None)
+    assert fn is not None, f"MUTATIONS[{name!r}] has no matching mutate_{name} function"
+    assert MUTATIONS[name] is fn
 
 
 # ------------------------------------------------------------------ instrument properties
