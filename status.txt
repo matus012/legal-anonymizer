@@ -111,11 +111,20 @@ the PDF writer over all 71 corpus PDFs with zero failures. reports/blockers.md r
 =========================================================================
 OWNER ACTIONS
 =========================================================================
-  1. REBUILD dist\\Anonymizer:  python -m PyInstaller anonymizer.spec --noconfirm
-     The app now self-checks its bundled data at startup and refuses to scan without it, so
-     a broken build announces itself instead of failing silently. Still confirm
-     dist\\Anonymizer\\detect\\gazetteer_data\\ holds 6 .json files, and CLEAN-MACHINE TEST
-     IS STILL YOURS — nothing here can substitute for running the real .exe.
+  1. REBUILD dist\Anonymizer:  python -m PyInstaller anonymizer.spec --noconfirm
+     I RAN THIS BUILD TONIGHT and it works -- and the check I gave you last night was WRONG.
+     PyInstaller 6 collects data under _internal\, so the path to confirm is
+
+         dist\Anonymizer\_internal\detect\gazetteer_data\        (6 .json files)
+
+     NOT dist\Anonymizer\detect\gazetteer_data\, which is CORRECTLY ABSENT in a GOOD build.
+     Had you checked last night's path you would have found nothing and concluded the build
+     was broken -- and a genuinely broken build fails that same check identically, so it
+     could not have told you anything either way. A check that gives the same answer in both
+     cases is not a check.
+     The app now also self-checks its bundled data at startup and REFUSES TO SCAN without it,
+     so a broken build announces itself instead of silently redacting nothing.
+     CLEAN-MACHINE TEST IS STILL YOURS -- nothing here substitutes for running the real .exe.
   2. PUSH APPROVAL. Nothing has been pushed. Say the word and I hand you the commands.
   3. OFFICE COMMUNICATION — draft ready to send, in Slovak, in office_note.md.
 <<<END MORNING BRIEF — everything below is the previous session's record>>>
