@@ -371,13 +371,6 @@ def normalize(text: str, join_wrapped: bool = False) -> Normalized:
             starts.append(i)
             ends.append(i + 1)
             continue
-            if out and out[-1] == " ":
-                ends[-1] = i + 1  # extend the run's single space over this character
-            else:
-                out.append(" ")
-                starts.append(i)
-                ends.append(i + 1)
-            continue
 
         # 3. COMBINING MARK -- try to compose it into the character already emitted (NFD -> NFC).
         # This is the only many-to-one rewrite in the module: two original characters become

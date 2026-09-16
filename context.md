@@ -72,17 +72,24 @@ High precision. Auto-redacted without review.
 | Telefónne číslo | Not on their list — **add it**, it is obviously PII |
 
 | **v1.1 additions** | below |
-| PSČ, adresa, súpisné/orientačné č., č. bytu, vchod, poschodie | address block; ADRESA swallows a trailing PSČ + obec |
+| PSČ, adresa, súpisné/orientačné č., č. bytu, vchod, poschodie, ulica, štátna príslušnosť | address / identity block; ADRESA swallows a trailing PSČ + obec |
 | Číslo OP / cestovného pasu / vodičského preukazu | 2 letters + 6 / 7 digits; VP is anchor-required |
 | EČV, VIN | VIN excludes I/O/Q per ISO 3779 |
 | BIC/SWIFT | anchor-required, or country code literally `SK` |
-| Názov účtu, číslo klienta, kód banky, fax | Vyhláška 482/2011 clause (f) and (e) |
+| Názov účtu, číslo klienta, kód banky, fax, názov banky, org, ulica | Vyhláška 482/2011 clause (f), (e), (c), (j) |
+
+v1.1 added, beyond what this table lists explicitly: `PSC`, `ADRESA`, `SUPISNE_CISLO`,
+`CISLO_BYTU`, `VCHOD`, `POSCHODIE`, `CISLO_OP`, `CISLO_PASU`, `VODICSKY_PREUKAZ`, `ECV`, `VIN`,
+`BIC`, `NAZOV_UCTU`, `CISLO_KLIENTA`, `KOD_BANKY`, `FAX`, `ORG`, `NAZOV_BANKY`, `ULICA`,
+`STATNA_PRISLUSNOST`.
 
 **The authoritative type list is Vyhláška MS SR 482/2011 + Inštrukcia 24/2011** (v1.1), not
-the office's own list. The clause-by-clause mapping lives in CONTRACTS_v11.md §12. Clause (i)
-— utajované informácie / obchodné tajomstvo — is **declared out of scope in writing**: it is
-defined by meaning, not by any surface pattern, and a tool that silently skipped it while
-claiming to implement "the vyhláška list" would misrepresent its own coverage.
+the office's own list. The clause-by-clause mapping lives in CONTRACTS_v11.md §12 — it is not
+duplicated here. Clause (i) — utajované informácie / obchodné tajomstvo — is **declared out of
+scope in writing, and permanently**: it is defined by MEANING, not by any surface pattern, so
+no regex, checksum, or gazetteer can decide that a sentence discloses a trade secret. A tool
+that silently skipped clause (i) while claiming to implement "the vyhláška list" would
+misrepresent its own coverage — which is precisely the liability posture §9 forbids.
 
 **Checksum validation is mandatory** — but in v1.1 it is a **TAG, not a FILTER**. v1 routed a
 shape-valid, checksum-INVALID identifier to the review bucket. v1.1 auto-redacts it and
@@ -159,6 +166,70 @@ secondary gain. Layers 1–3 are smaller, faster, fully explainable, and ship so
 **v2:** add NER as a *suggestion layer only*. Its hits go into the review bucket, never
 auto-redacted. Decide on it after seeing which entities the office actually misses in
 real use.
+
+### v1.1 normalization layer (`detect/normalize.py`)
+`detect()` no longer runs its detector battery directly over the document text. It runs over a
+**normalized view** built by `detect/normalize.py`, and maps every candidate's span back onto
+the ORIGINAL text through an index map before returning it. Both writers are unchanged: they
+still cut the document at the original offsets `detect()` returns.
+
+What is folded, and why: Unicode format characters (category Cf — zero-width spaces, the soft
+hyphen, bidi marks) are deleted outright; Cyrillic and Greek homoglyphs fold to their Latin
+lookalike, one-for-one; every run of whitespace collapses to a single character; every
+character passes through per-character NFKC (fullwidth digits, ligatures); NFD combining marks
+recompose onto the preceding base so "č" arrives as one codepoint regardless of which form the
+source file used.
+
+Two things are deliberately **not** folded. **Case** is left alone because several detectors —
+the ORG legal-form detector, the bare-name heuristic — use capitalisation as their only
+evidence; folding it would not make them case-insensitive, it would turn every
+capitalized-token rule into a match-everything rule. **Diacritics** are left alone because
+folding "č" to "c" here would silently widen every Slovak-word pattern in `detect/` at once;
+diacritic tolerance is handled per anchor site instead; where the difference between "an anchor
+word" and "the evidence" is actually visible.
+
+The **line boundary** survives normalization on purpose: a whitespace run that contains a line
+break collapses to `\n`, and every other run collapses to a space, instead of everything
+collapsing to a space. This was tried the other way first and broke two detectors in opposite
+directions: with wraps turned into spaces, the bare-name heuristic began pairing the last word
+of one line with the first word of the next (it emitted an auto-redact name spanning a party's
+surname and the label that started the following line), and the field-label pattern's
+value-terminator regex uses `[\n\r\t]` to know where a label's value ends — with no line breaks
+left in the text, a label value ran on to the end of the page.
+
+`detect()` runs the battery over **two** normalized views and merges their candidates. The
+second view additionally deletes a line break that falls between two runs of CAPITALS AND
+DIGITS ONLY, reassembling an identifier a renderer broke across a line (a wrapped PDF text
+layer cutting an IBAN or a BIC mid-token). The restriction to capitals-and-digits is
+load-bearing: an earlier version joined any alphanumeric pair across a break, and since a
+wrapped line always ends one word and begins another, it welded ordinary words together.
+
+None of this could be done the way the v1.1 NBSP fix was done — a one-line `str.replace`. That
+fix is safe only because it is one character for one character: every offset stays valid, and
+both writers slice the document at those offsets. Deleting a character (a zero-width space, a
+format character) shifts every later offset; applying the same one-line trick to those
+characters would not mislabel the document, it would corrupt it — cut the wrong bytes out of
+the file. That is why an offset MAP, not a substitution, was needed.
+
+Measured effect on mutation-gate robustness (blind arm, threshold 0.95, before → after this
+layer landed): `zero_width` 0.070→1.000, `soft_hyphen` 0.070→1.000, `cyrillic_homoglyph`
+0.356→1.000, `nfd` 0.675→1.000, `tabs` 0.887→1.000, `double_spaces` 0.813→1.000,
+`line_break_mid` 0.119→0.376 (still failing — see redteam/FINDINGS_ROUND2.md R2-1; the
+remaining gap is the anchor→value separator, not normalization).
+
+### Detector isolation (CONTRACTS_v11.md Amendment 11)
+Every detector module in `detect/core.py`'s battery runs inside its own guard, and its output
+is validated at its own source (span inside the text, a registered type, a valid checksum tag).
+A detector that raises, or returns something malformed, loses only its own candidates for that
+unit; the failure is recorded as a `DetectorFailure` and carried through to the report and the
+GUI review screen instead of being swallowed. `detect()`'s five post-conditions — the assertions
+that the resolved candidate set is sorted, non-overlapping, and fully typed — are deliberately
+**not** guarded the same way. They run after resolution has already combined every detector's
+output into the single span set both writers cut the document at; continuing past a violated
+post-condition would write a corrupted file, so stopping there is the one safe outcome. Guarding
+each detector separately exists so a malformed candidate never reaches that assertion in the
+first place — a failure there is attributed to the detector that caused it, not surfaced as an
+assertion with no visible origin.
 
 ### Recall over precision
 This is the governing principle. Every ambiguous design decision resolves toward
@@ -308,6 +379,40 @@ phrase, and any whitespace variation inside that phrase breaks it. An NBSP betwe
 and a line break between them, each caused a real leak in a PDF while the DOCX of the same
 document was clean. `detect()` now normalizes NBSP (1:1, so offsets survive) and anchor phrases
 separate their words with `\s+`. **Missing diacritics remain an open gap** — see QUESTIONS.md Q7.
+
+### Leak vectors closed since this section was first written
+
+- **`docProps/thumbnail.jpeg`.** python-docx ships a rendered picture of page 1 inside its own
+  default template, and the writer copies unknown OPC parts through byte-for-byte, so every
+  output carried an image of the un-redacted first page. It is PIXELS — no text extractor can
+  read it, so no leak-test gate could ever have caught it, no matter how thorough the extractor
+  became. It is now deleted by the writer rather than graded by anything. See KNOWN BLIND SPOT
+  B-2 in `redteam/FINDINGS.md`.
+- **The eval oracle itself was leaking.** `eval/baselines.py` saved its PDFs with no garbage
+  collection (`doc.save(str(dst))`), so `greedy_redactor` — the baseline every gate is
+  calibrated against — leaked 62 real PII strings through incremental-save revision residue
+  while reporting itself clean. A leaky oracle miscalibrates every gate derived from it; this
+  is worse than a leaky writer. Fixed to `doc.save(str(dst), garbage=4, deflate=True)`.
+- **Invisible characters (Unicode category Cf) and NFD inside identifiers.** A zero-width space
+  a bank portal injects into a long account number, or an NFD-composed diacritic from a
+  Mac-authored `.docx`, defeated every detector that spelled the identifier's shape literally.
+  Closed by the normalization layer above, not by a per-detector patch.
+- **A wrapped PDF text layer breaking a multi-word anchor.** A line break landing between the
+  words of an anchor phrase (e.g. inside "Číslo klienta") leaked a client number from a corpus
+  PDF while the DOCX of the same document stayed clean, because the DOCX writer never wraps a
+  paragraph the way a PDF page does.
+- **The source filename.** `Novak_kupna_zmluva.docx` leaks a client's name in the attachment
+  name no matter how clean its contents are — an email client and every mail server log the
+  filename regardless of what the document body says. The GUI now warns when the filename
+  itself contains a detected surface.
+- **Bundled gazetteer data missing from the frozen build.** `detect/gazetteer_data/*.json` are
+  plain data files; PyInstaller's import analysis cannot see them and bundles them only because
+  `anonymizer.spec` names them explicitly. If that line is ever dropped or the path changes,
+  the frozen app still starts, still scans, still writes a redacted document and a report — and
+  silently stops matching every municipality, street, cadastral area, given name and surname in
+  the country. No crash, no empty output, just a report that looks ordinary and shorter. Closed
+  by `detect/selfcheck.py`, which checks file presence and a floor entry count at startup and
+  refuses to scan rather than scan badly.
 
 ### PDF
 - **PyMuPDF** (`fitz`). Use `add_redact_annot()` + `apply_redactions()`. This genuinely
