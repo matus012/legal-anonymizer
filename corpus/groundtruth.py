@@ -123,6 +123,28 @@ class Recorder:
                 f"surface in the same document: {sorted(collisions)!r}"
             )
 
+        # A ground-truth surface shorter than 3 characters is NOT GRADEABLE. eval.leak greps GT
+        # strings as SUBSTRINGS, so a 2-character surface matches inside ordinary words and the
+        # leak gate reports a leak for text that was redacted correctly. This is not
+        # hypothetical: "SR" was briefly a STATNA_PRISLUSNOST fixture value and matched inside
+        # "ORSR" in the same document ("zapísanej v ORSR"), failing the gate on a false
+        # positive. Rejecting it here makes the corpus author pick a gradeable fixture instead
+        # of leaving a booby trap that only fires once some unrelated document happens to
+        # contain the substring.
+        too_short = sorted(
+            {
+                p["surface"]
+                for p in self._pii
+                if (p["auto_redact"] or p["should_flag"]) and len(p["surface"].strip()) < 3
+            }
+        )
+        if too_short:
+            raise ValueError(
+                f"{self.source_file}: ground-truth surface(s) shorter than 3 characters are "
+                f"not gradeable by substring search and would false-fail the leak gate: "
+                f"{too_short!r}"
+            )
+
     def to_dict(self) -> dict:
         return {
             "source_file": self.source_file,

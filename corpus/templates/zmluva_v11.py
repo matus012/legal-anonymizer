@@ -37,7 +37,7 @@ textbox so the writers' surface coverage is exercised too, not just the detector
 from __future__ import annotations
 
 from ..groundtruth import PiiSpec
-from ..pii import addresses, documents, office_refs
+from ..pii import addresses, documents, names_anchored, office_refs
 from . import _common
 
 # Anchor prefixes for the anchor-required types. The anchor is NOT part of the ground-truth
@@ -126,6 +126,23 @@ def build(b, rng, bank, *, is_docx: bool) -> None:
                 + [". "]
                 + _one(office_refs.make_cislo_klienta, rng)
                 + ["."])
+
+    # ---- v1.1 ANCHORED NAMES (Phase C) ---------------------------------------------------
+    # The title / role / field-label anchors had unit fixtures but NO corpus occurrence, so
+    # neither the leak gate nor per-type recall was asking about them at all. Each generator
+    # already embeds its own anchor text ("zmluvu podpisal ... , PhD.", "Meno:", "Sidlo:"),
+    # so the placed string is used verbatim and only the VALUE is recorded as PII -- the
+    # anchor itself is ordinary document text that must SURVIVE redaction.
+    b.heading("Článok V — Účastníci a zastúpenie")
+    for maker in (
+        names_anchored.make_title_name,
+        names_anchored.make_role_name,
+        names_anchored.make_field_meno,
+        names_anchored.make_field_adresa,
+        names_anchored.make_field_statna_prislusnost,
+        names_anchored.make_field_org,
+    ):
+        b.paragraph(_one(maker, rng) + ["."])
 
     # ---- spread across the OTHER surfaces each format offers ----------------------------
     # The two builders expose DIFFERENT surface sets, and that asymmetry is the point: a

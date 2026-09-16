@@ -69,7 +69,12 @@ _ORGS = ("Alfa Beta s.r.o.", "Stavby Východ a.s.", "Tatra Servis spol. s r.o.")
 _STREETS = ("Hlavná", "Štúrova", "Slovenská", "Nová", "Košická")
 _OBCE = ("Košice", "Žilina", "Prešov", "Poprad", "Bratislava")
 _PSC = ("040 01", "811 09", "917 01", "058 01")
-_STATY = ("slovenská", "SR", "česká", "Slovenská republika")
+# "SR" was in this pool and had to be removed: a TWO-CHARACTER ground-truth surface is not
+# GRADEABLE. eval.leak greps GT strings as substrings, and "SR" occurs inside "ORSR" -- which
+# the same document contains, in "zapísanej v ORSR" -- so the leak gate reported a leak for a
+# surface that had in fact been redacted correctly. The fixture was wrong, not the writer.
+# Every value here is now a whole word that cannot hide inside ordinary legal vocabulary.
+_STATY = ("slovenská", "česká", "maďarská", "rakúska", "Slovenská republika")
 
 # Sentence frames whose lead-in guarantees the bare name is NOT sentence-initial (the
 # heuristic deliberately refuses the first token of a sentence).
