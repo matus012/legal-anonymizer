@@ -44,10 +44,20 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from .extract import S_APP, S_CORE, S_CUSTOM, S_INFO, S_XMP, ExtractResult
+from .extract import S_APP, S_CORE, S_CUSTOM, S_INFO, S_XMP, ExtractResult, S_XML_ATTRS, S_OTHER_XML, S_RELS, S_BINARY_PARTS, S_PDF_OBJECTS, S_RAW_BYTES
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
-_METADATA_SURFACES = {S_CORE, S_APP, S_CUSTOM, S_INFO, S_XMP}
+# v1.1: the red-team round added deep STRUCTURAL surfaces to the extractor (XML attribute
+# values, non-content OPC parts, relationship targets, binary part bytes, PDF object source and
+# the raw-bytes backstop). They are near-IDENTICAL between an input and its redacted output --
+# fonts, part names, xref offsets, glyph tables -- so counting them as "content" dilutes
+# retention toward 1.0 and blinds the gate that exists to tell redaction from DESTRUCTION: the
+# scorch baseline, which destroys everything, measured 0.2589 where the gate requires <= 0.05.
+# They are excluded for exactly the reason this module's docstring already gives for metadata.
+_STRUCTURAL_SURFACES = {
+    S_XML_ATTRS, S_OTHER_XML, S_RELS, S_BINARY_PARTS, S_PDF_OBJECTS, S_RAW_BYTES,
+}
+_METADATA_SURFACES = {S_CORE, S_APP, S_CUSTOM, S_INFO, S_XMP} | _STRUCTURAL_SURFACES
 
 
 def _tokenize(text: str) -> list[str]:

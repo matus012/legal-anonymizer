@@ -37,6 +37,10 @@ _REDACTED_COLS = _SEP.join(["TYPE", "label", "count", "locations"])
 _LOWCONF_HEADER = "[LOW CONFIDENCE / NOT REDACTED]"
 _LOWCONF_COLS = _SEP.join(["type", "surface", "location"])
 _NONE = "(none)"
+# v1.1 checksum column (CONTRACTS_v11.md §10) — appended ONLY when the caller supplies the
+# matching side-channel, so the v1 layout is reproduced byte-for-byte when it is omitted.
+_CHECKSUM_COL = "checksum"
+_NA = "n/a"
 
 
 def _type_and_number(label: str) -> tuple[str, int]:
@@ -51,29 +55,46 @@ def _type_and_number(label: str) -> tuple[str, int]:
 def build_report(
     occurrences: dict[str, list[tuple[str, str]]],
     low_confidence: list[tuple[str, str, str]],
+    checksums: dict[str, str] | None = None,
+    lc_checksums: list[str] | None = None,
 ) -> str:
     """Pure formatter — no I/O. Return the deterministic report string for the two captures.
 
     ``occurrences``: label -> [(location, surface), ...] (repeats included; count = len).
     ``low_confidence``: [(location, type, surface), ...] in capture order.
+
+    v1.1 (CONTRACTS_v11.md §10): ``checksums`` (label -> checksum) and ``lc_checksums``
+    (index-aligned with ``low_confidence``) are the OPTIONAL checksum side-channels. When a
+    side-channel is given, a ``checksum`` column is appended to that table — header included.
+    When BOTH are omitted the output is byte-identical to v1: the column is not emitted at
+    all, so no existing report, test or diff shifts by a single byte. A label/index missing
+    from a supplied side-channel reads ``"n/a"`` rather than raising — a report must never be
+    the thing that crashes a redaction pass.
     """
-    lines: list[str] = [_HEADER, _REDACTED_HEADER, _REDACTED_COLS]
+    lines: list[str] = [_HEADER, _REDACTED_HEADER]
 
     # Section 1 REDACTED: one row per label, sorted by (TYPE, numeric N).
+    lines.append(_REDACTED_COLS if checksums is None else _SEP.join([_REDACTED_COLS, _CHECKSUM_COL]))
     for label in sorted(occurrences, key=_type_and_number):
         type_, _n = _type_and_number(label)
         occ = occurrences[label]
         count = len(occ)  # all locations, repeats counted
         locations = ", ".join(sorted({loc for loc, _surface in occ}))  # sorted set
-        lines.append(_SEP.join([type_, label, str(count), locations]))
+        row = [type_, label, str(count), locations]
+        if checksums is not None:
+            row.append(checksums.get(label, _NA))
+        lines.append(_SEP.join(row))
 
     # Section 2 LOW CONFIDENCE / NOT REDACTED: capture (list) order, "(none)" when empty.
     lines.append("")
     lines.append(_LOWCONF_HEADER)
-    lines.append(_LOWCONF_COLS)
+    lines.append(_LOWCONF_COLS if lc_checksums is None else _SEP.join([_LOWCONF_COLS, _CHECKSUM_COL]))
     if low_confidence:
-        for location, type_, surface in low_confidence:
-            lines.append(_SEP.join([type_, surface, location]))
+        for i, (location, type_, surface) in enumerate(low_confidence):
+            row = [type_, surface, location]
+            if lc_checksums is not None:
+                row.append(lc_checksums[i] if i < len(lc_checksums) else _NA)
+            lines.append(_SEP.join(row))
     else:
         lines.append(_NONE)
 
@@ -82,20 +103,30 @@ def build_report(
 
 def report_path_for(out_path: str) -> str:
     """The report path DERIVED from ``out_path``: same directory, filename = out_path stem +
-    "_report.txt" (foo_anon.docx -> foo_anon_report.txt). One source of truth — never a param."""
+    "_" + the source extension (no dot) + "_report.txt"
+    (foo_anon.docx -> foo_anon_docx_report.txt, foo_anon.pdf -> foo_anon_pdf_report.txt).
+
+    v1.1 Phase F: the extension is IN the report name because a batch exporting zmluva.docx and
+    zmluva.pdf produced two outputs with the same stem, and the v1 rule (stem + "_report.txt")
+    gave both the SAME report path — the second export silently overwrote the first, destroying
+    the record of a document that had just been redacted. An out_path with no extension keeps
+    the v1 name (there is no format to disambiguate). One source of truth — never a param."""
     directory = os.path.dirname(out_path)
-    stem = os.path.splitext(os.path.basename(out_path))[0]
-    return os.path.join(directory, stem + "_report.txt")
+    stem, ext = os.path.splitext(os.path.basename(out_path))
+    suffix = f"_{ext[1:]}_report.txt" if ext[1:] else "_report.txt"
+    return os.path.join(directory, stem + suffix)
 
 
 def write_report(
     out_path: str,
     occurrences: dict[str, list[tuple[str, str]]],
     low_confidence: list[tuple[str, str, str]],
+    checksums: dict[str, str] | None = None,
+    lc_checksums: list[str] | None = None,
 ) -> str:
     """Build the report and write it as UTF-8 next to ``out_path`` (path via ``report_path_for``).
     Returns the written path. This is the only entry point the writer calls."""
     path = report_path_for(out_path)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(build_report(occurrences, low_confidence))
+        fh.write(build_report(occurrences, low_confidence, checksums, lc_checksums))
     return path

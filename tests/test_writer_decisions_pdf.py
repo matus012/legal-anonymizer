@@ -5,6 +5,7 @@ writer, and the (type, group_key) decision keys resolved via LabelMap.group_key_
 """
 import fitz
 
+from detect.config import DetectConfig
 from writer.pdf_body import redact_pdf, redact_pdf_collect
 
 
@@ -41,16 +42,30 @@ def test_pdf_suppress_keeps_surface_in_output(tmp_path):
 
 
 def test_pdf_force_redacts_low_confidence_group(tmp_path):
+    # strict_checksums=True is what puts the checksum-invalid RC in the review bucket in v1.1
+    # (CONTRACTS_v11.md §6) — the precondition this test exercises.
+    strict = DetectConfig(strict_checksums=True)
     src = _mk_pdf(tmp_path, "rodne cislo: 835112/0009")
     out_plain = str(tmp_path / "plain.pdf")
-    lm = redact_pdf_collect(src, out_plain, known_entities=None)
+    lm = redact_pdf_collect(src, out_plain, known_entities=None, config=strict)
     assert "835112/0009" in _pdf_text(out_plain)
     key = ("RODNE_CISLO", lm.group_key_for("RODNE_CISLO", "835112/0009"))
     out = str(tmp_path / "forced.pdf")
     from writer.decisions import RedactionDecisions
-    redact_pdf(src, out, known_entities=None,
+    redact_pdf(src, out, known_entities=None, config=strict,
                decisions=RedactionDecisions(force_groups=frozenset({key})))
     assert "835112/0009" not in _pdf_text(out)
+
+
+def test_pdf_default_config_auto_redacts_the_checksum_invalid_rc(tmp_path):
+    """v1.1 policy A1 sibling: no config, no force decision — the surface is auto-redacted and
+    tagged checksum="invalid"."""
+    src = _mk_pdf(tmp_path, "rodne cislo: 835112/0009")
+    out = str(tmp_path / "default.pdf")
+    lm = redact_pdf_collect(src, out, known_entities=None)
+    assert "835112/0009" not in _pdf_text(out)
+    assert lm.low_confidence == []
+    assert lm.checksums["[RODNE_CISLO_1]"] == "invalid"
 
 
 def test_pdf_decisions_none_is_default_behaviour(tmp_path):

@@ -1,0 +1,202 @@
+"""v1.1 detection engine, round B2 (CONTRACTS_v11.md §8): six identity-document /
+vehicle-document types -- CISLO_OP, CISLO_PASU, VODICSKY_PREUKAZ, ECV, VIN, BIC. Text-in,
+spans-out. Imports only ``re``, ``detect.core.Candidate``, ``detect.config.DetectConfig``.
+Never ``corpus/`` or ``eval/``.
+
+Governing rule (context.md §6): recall over precision. Every ambiguous decision below
+resolves toward over-detection; none of these six types carries a checksum, so every
+emitted Candidate is ``auto=True, checksum="n/a"``.
+
+None of these six types matches a free-running Slovak *word* -- CISLO_OP / CISLO_PASU /
+ECV / VIN / BIC are all official document/vehicle codes whose alphabet is fixed by law
+(a licence plate, a passport number, a VIN, a SWIFT code) to plain Latin A-Z, never
+diacritics. Bare ``[A-Z]`` is therefore correct and deliberate for those character
+classes -- it is not the "capitalized Slovak word" case the sprint brief warns about,
+because none of these six shapes ever captures free text. (VODICSKY_PREUKAZ's captured
+token and, in ``office_refs.py``, the free-text account-name value, are the closest thing
+to that case in this round and are intentionally left as broad character classes rather
+than restricted to bare ASCII.)
+
+One shape-purity rule recurs below and is factored into one helper, ``_standalone``: a
+match is "standalone" (not part of a longer letter or digit run) when the character
+immediately before its start and immediately after its end both fail ``str.isalnum()``
+-- a letter or digit on either side means the real-world token is longer than what we
+matched, so an unanchored claim on it is unsafe. An ANCHORED claim is allowed to ignore
+this (the surrounding anchor already proves intent), per the CISLO_OP / CISLO_PASU spec:
+"emit anchored matches always."
+"""
+from __future__ import annotations
+
+import re
+
+from .config import DetectConfig
+from .core import Candidate
+
+NBSP = " "
+_SP = f"[ {NBSP}]"  # a literal space or NBSP, exactly where Slovak typography allows one
+
+
+def _standalone(text: str, start: int, end: int) -> bool:
+    """True if the char before ``start`` and the char at ``end`` are not alphanumeric --
+    i.e. the match is not a sub-run of a longer letter/digit token."""
+    before_ok = start == 0 or not text[start - 1].isalnum()
+    after_ok = end == len(text) or not text[end].isalnum()
+    return before_ok and after_ok
+
+
+def _anchored(text: str, start: int, anchor_re: re.Pattern[str], window: int = 40) -> bool:
+    return anchor_re.search(text[max(0, start - window) : start]) is not None
+
+
+def _emit(type_: str, m: re.Match[str]) -> Candidate:
+    return Candidate(
+        type=type_, surface=m.group(0), start=m.start(), end=m.end(), auto=True, checksum="n/a"
+    )
+
+
+# --------------------------------------------------------------------------- CISLO_OP
+# 2 uppercase letters + 6 digits, optional space/NBSP between. The (?!\d) after the digit
+# run is load-bearing: on a 2-letter+7-digit string (a passport, not an OP) it stops the
+# 6-digit alternative from claiming the first 6 of the 7 digits, so CISLO_OP and
+# CISLO_PASU never both fire on the same document number (spec's explicit guard).
+_OP_CORE_RE = re.compile(rf"[A-Z]{{2}}{_SP}?\d{{6}}(?!\d)")
+
+_OP_ANCHOR_RE = re.compile(
+    r"\bOP\b"
+    rf"|č\.{_SP}OP\b"
+    rf"|\bOP{_SP}č\."
+    r"|občiansky preukaz"
+    r"|občianskeho preukazu"
+    r"|preukaz totožnosti"
+    r"|doklad totožnosti",
+    re.IGNORECASE,
+)
+
+
+def _detect_cislo_op(text: str) -> list[Candidate]:
+    out = []
+    for m in _OP_CORE_RE.finditer(text):
+        if _anchored(text, m.start(), _OP_ANCHOR_RE) or _standalone(text, m.start(), m.end()):
+            out.append(_emit("CISLO_OP", m))
+    return out
+
+
+# --------------------------------------------------------------------------- CISLO_PASU
+# 2 uppercase letters + 7 digits, optional space/NBSP between. Same anchored-always /
+# unanchored-standalone-only policy as CISLO_OP; same (?!\d) run-purity guard.
+_PASU_CORE_RE = re.compile(rf"[A-Z]{{2}}{_SP}?\d{{7}}(?!\d)")
+
+_PASU_ANCHOR_RE = re.compile(
+    r"\bpas\b"
+    r"|\bpasu\b"
+    r"|cestovný pas"
+    r"|cestovného pasu"
+    rf"|č\.{_SP}pasu",
+    re.IGNORECASE,
+)
+
+
+def _detect_cislo_pasu(text: str) -> list[Candidate]:
+    out = []
+    for m in _PASU_CORE_RE.finditer(text):
+        if _anchored(text, m.start(), _PASU_ANCHOR_RE) or _standalone(
+            text, m.start(), m.end()
+        ):
+            out.append(_emit("CISLO_PASU", m))
+    return out
+
+
+# --------------------------------------------------------------------------- VODICSKY_PREUKAZ
+# Anchor-required -- a bare 6-10 char alphanumeric token is far too generic to match on
+# its own (it would claim ordinary order/invoice numbers). Everything between the anchor
+# and the token (a literal "č.", a colon, spaces) is swallowed by the non-alnum filler;
+# the token itself is captured, and the surface is that TOKEN, not the anchor -- the
+# anchor is match context, never part of the redacted span.
+_VP_RE = re.compile(
+    rf"(?:vodičský preukaz|vodičského preukazu|VP{_SP}č\.|č\.{_SP}VP|vodičák)"
+    r"[^A-Za-z0-9]{0,20}"
+    r"([A-Za-z0-9]{6,10})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _detect_vodicsky_preukaz(text: str) -> list[Candidate]:
+    out = []
+    for m in _VP_RE.finditer(text):
+        out.append(
+            Candidate(
+                type="VODICSKY_PREUKAZ",
+                surface=m.group(1),
+                start=m.start(1),
+                end=m.end(1),
+                auto=True,
+                checksum="n/a",
+            )
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- ECV
+# Slovak licence plate: 2 uppercase letters, optional "-" or space/NBSP, 3 digits,
+# optional space/NBSP, 2 uppercase letters ("KE123AB", "KE-123AB", "BA 123 XY"). No
+# anchor required -- the shape is distinctive enough on its own. The (?!\d) after the
+# digit run and the \b at both ends stop a plate from being read out of a longer digit
+# or letter run (e.g. a 4-digit number or a longer all-caps abbreviation run).
+_ECV_RE = re.compile(rf"\b[A-Z]{{2}}[-{NBSP} ]?\d{{3}}(?!\d){_SP}?[A-Z]{{2}}\b")
+
+
+def _detect_ecv(text: str) -> list[Candidate]:
+    return [_emit("ECV", m) for m in _ECV_RE.finditer(text)]
+
+
+# --------------------------------------------------------------------------- VIN
+# 17 chars from the ISO 3779 VIN alphabet, which excludes I, O and Q (they are visually
+# confusable with 1 and 0) -- that exclusion, plus requiring at least one digit AND one
+# letter, is exactly what stops this from matching an arbitrary 17-character run of caps
+# (a pure-digit or pure-letter 17-run is refused below).
+_VIN_RE = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b")
+
+
+def _detect_vin(text: str) -> list[Candidate]:
+    out = []
+    for m in _VIN_RE.finditer(text):
+        surface = m.group(0)
+        if any(c.isdigit() for c in surface) and any(c.isalpha() for c in surface):
+            out.append(_emit("VIN", m))
+    return out
+
+
+# --------------------------------------------------------------------------- BIC
+# BIC/SWIFT: 4 letters (bank) + 2 letters (country) + 2 alphanumeric (location) +
+# optional 3 alphanumeric (branch) -- 8 or 11 chars total. An 8-letter all-caps run is
+# shape-identical to an ordinary ALL-CAPS Slovak word ("ROZHODNUTIE", "SPLNOMOCNENIE"),
+# so shape alone is deliberately NOT enough: this is the one precision exception in this
+# module. A match is only emitted when EITHER a BIC/SWIFT anchor sits within 30 chars
+# before it, OR positions 5-6 (the ISO 3166 country code) read "SK" -- an all-caps
+# Slovak word essentially never has "SK" sitting at exactly that position, while every
+# real Slovak BIC does. Without one of those two signals, the red-team ALL-CAPS mutation
+# (rewriting any word in caps) would turn every capitalised word in the corpus into a
+# false BIC positive.
+_BIC_RE = re.compile(r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b")
+_BIC_ANCHOR_RE = re.compile(r"\bBIC\b|\bSWIFT\b|BIC/SWIFT|SWIFT kód|BIC kód", re.IGNORECASE)
+
+
+def _detect_bic(text: str) -> list[Candidate]:
+    out = []
+    for m in _BIC_RE.finditer(text):
+        surface = m.group(0)
+        if _anchored(text, m.start(), _BIC_ANCHOR_RE, window=30) or surface[4:6] == "SK":
+            out.append(_emit("BIC", m))
+    return out
+
+
+def detect_documents(text: str, config: DetectConfig) -> list[Candidate]:
+    del config  # no toggle in this round affects these six types
+    out: list[Candidate] = []
+    out.extend(_detect_cislo_op(text))
+    out.extend(_detect_cislo_pasu(text))
+    out.extend(_detect_vodicsky_preukaz(text))
+    out.extend(_detect_ecv(text))
+    out.extend(_detect_vin(text))
+    out.extend(_detect_bic(text))
+    return out

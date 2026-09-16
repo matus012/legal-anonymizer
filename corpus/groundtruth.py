@@ -5,10 +5,20 @@ Ground truth is written **per output file** because failure modes are format-spe
 GT would misreport locations. The recorder is shared by the DOCX and PDF builders; each
 builder stamps the correct ``surface_part`` as it places text.
 
-Three-state decision (context.md revision to §7):
-* valid identifier / real name        → auto_redact=True,  should_flag=False
-* checksum-invalid but PII-shaped      → auto_redact=False, should_flag=True
-* innocuous decoy number              → auto_redact=False, should_flag=False
+Three-state decision (v1.1, CONTRACTS_v11.md §7 — the middle row CHANGED):
+* valid identifier / real name        → auto_redact=True,  should_flag=False, checksum="valid"/"n/a"
+* checksum-invalid but PII-shaped      → auto_redact=True,  should_flag=False, checksum="invalid"
+* innocuous decoy number              → auto_redact=False, should_flag=False, checksum="n/a"
+
+The middle row moved from the review bucket into the auto bucket in v1.1 (policy A1): the
+checksum is now a TAG, not a filter. A mistyped IČO is still an IČO, and leaving it
+un-redacted because one digit is wrong is the exact failure this tool exists to prevent
+(context.md §6, recall over precision). Ground truth has to move with the policy, or
+per-type recall would keep scoring those surfaces as "correctly left alone".
+
+``should_flag`` is NOT retired: it still marks anything that legitimately belongs in the
+review bucket (the Phase C bare-name heuristic, and every identifier when the user turns on
+``strict_checksums``). It is simply empty for identifier types under the default config.
 """
 from __future__ import annotations
 
@@ -27,6 +37,10 @@ class PiiSpec:
     valid_checksum: bool | None = None
     auto_redact: bool = True
     should_flag: bool = False
+    # v1.1 (CONTRACTS_v11.md §7): "valid" | "invalid" | "n/a". Left at the default and
+    # DERIVED from valid_checksum by Recorder.record when the caller set that instead, so
+    # the dozens of existing PiiSpec(..., valid_checksum=True) call sites keep working.
+    checksum: str = "n/a"
 
 
 @dataclass
@@ -81,6 +95,11 @@ class Recorder:
             entry["grammatical_case"] = spec.grammatical_case
         if spec.valid_checksum is not None:
             entry["valid_checksum"] = spec.valid_checksum
+        # Derive the v1.1 tag from valid_checksum when the caller did not set it explicitly.
+        checksum = spec.checksum
+        if checksum == "n/a" and spec.valid_checksum is not None:
+            checksum = "valid" if spec.valid_checksum else "invalid"
+        entry["checksum"] = checksum
         self._pii.append(entry)
         return pid
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from docx import Document
 
+from detect.config import DetectConfig
 from writer.docx_body import _redact_paragraph
 from writer.labelmap import LabelMap
 
@@ -65,7 +66,10 @@ def test_low_confidence_captured_without_redacting_or_labelling() -> None:
     lm = LabelMap([])
     p = _para("Rodne cislo 900101/0000 tu.")
 
-    _redact_paragraph(p, [], lm, location="footnote")
+    # strict_checksums=True is what makes a checksum-invalid RC auto=False in v1.1
+    # (CONTRACTS_v11.md §6); the capture behaviour under test is unchanged.
+    _redact_paragraph(p, [], lm, location="footnote",
+                      config=DetectConfig(strict_checksums=True))
 
     assert lm.low_confidence == [("footnote", "RODNE_CISLO", "900101/0000")]
     # left in the output text, unchanged (NOT redacted)
@@ -74,6 +78,23 @@ def test_low_confidence_captured_without_redacting_or_labelling() -> None:
     # no label was created for it
     assert lm.occurrences == {}
     assert "[RODNE_CISLO_1]" not in p.text
+    # The capture carries the checksum tag in the parallel channel (CONTRACTS_v11.md §10).
+    assert lm.lc_checksums == ["invalid"]
+
+
+def test_default_config_auto_redacts_the_same_surface_and_tags_it_invalid() -> None:
+    """v1.1 policy A1 sibling of test 3: with NO config the checksum-invalid RC is auto=True,
+    so it IS redacted, IS labelled, and its occurrence carries checksum="invalid"."""
+    lm = LabelMap([])
+    p = _para("Rodne cislo 900101/0000 tu.")
+
+    _redact_paragraph(p, [], lm, location="footnote")
+
+    assert lm.low_confidence == []
+    assert "900101/0000" not in p.text
+    assert "[RODNE_CISLO_1]" in p.text
+    assert lm.occurrences["[RODNE_CISLO_1]"] == [("footnote", "900101/0000")]
+    assert lm.checksums["[RODNE_CISLO_1]"] == "invalid"
 
 
 def test_capture_is_deterministic_across_runs() -> None:

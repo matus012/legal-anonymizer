@@ -12,6 +12,7 @@ from . import (
     vypis_lv,
     splnomocnenie,
     vypis_orsr,
+    zmluva_v11,
 )
 
 TEMPLATES = {
@@ -21,6 +22,12 @@ TEMPLATES = {
     "vypis_lv": vypis_lv.build,
     "splnomocnenie": splnomocnenie.build,
     "vypis_orsr": vypis_orsr.build,
+    # v1.1 integration doc type: seeds every type added in the v1.1 sprint (addresses,
+    # identity documents, bank/office references) into real .docx/.pdf so the leak gate and
+    # per-type recall actually cover them. Before it existed those sixteen types had no
+    # ground-truth occurrence anywhere in the corpus, so their recall scored None — which
+    # reads as "fine" rather than as "never tested".
+    "zmluva_v11": zmluva_v11.build,
 }
 
 DOC_TYPES = tuple(TEMPLATES)

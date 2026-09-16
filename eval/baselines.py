@@ -310,7 +310,16 @@ def _redact_pdf(src: Path, dst: Path, targets: list[str], decoys: list[str]) -> 
         if new_xmp != xmp:
             doc.set_xml_metadata(new_xmp)
 
-        doc.save(str(dst))
+        # garbage=4 + deflate REWRITES the file. Without them PyMuPDF appends a NEW revision
+        # and leaves the PRE-redaction objects in the output. The red-team round measured this
+        # exact line leaking 62 real PII strings (20 MENO, 10 ICO, 10 DIC, 10 full IBANs, 10
+        # phone numbers) recoverable from the raw bytes, while every typed PyMuPDF accessor
+        # reported the file clean. That made greedy_redactor -- the harness's own ORACLE, the
+        # baseline every gate is calibrated against -- silently leaky, which is worse than a
+        # leaky writer: it miscalibrates the gates themselves. writer/pdf_body.py always got
+        # this right; only the baseline did not. Do NOT re-pin gate vectors around the old
+        # behaviour -- the discrimination failure it caused was a TRUE POSITIVE.
+        doc.save(str(dst), garbage=4, deflate=True)
     finally:
         doc.close()
 

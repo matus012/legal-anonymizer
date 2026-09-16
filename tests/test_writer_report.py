@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from docx import Document
 
+from detect.config import DetectConfig
 from writer.docx_body import redact_docx_body
 from writer.report import build_report
 
@@ -97,9 +98,13 @@ def test_report_written_next_to_out(tmp_path) -> None:
     doc.add_paragraph("Novak Rodne cislo 900101/0000 koniec.")
     doc.save(str(in_path))
 
-    redact_docx_body(str(in_path), str(out_path), known_entities=["Novak"])
+    # strict_checksums=True keeps the checksum-invalid RC in the review bucket, which is the
+    # precondition this test is ABOUT (CONTRACTS_v11.md §6); the report wiring is unchanged.
+    redact_docx_body(str(in_path), str(out_path), known_entities=["Novak"],
+                     config=DetectConfig(strict_checksums=True))
 
-    report_path = tmp_path / "out_anon_report.txt"
+    # v1.1 Phase F: the report name carries the source format (<stem>_<ext>_report.txt).
+    report_path = tmp_path / "out_anon_docx_report.txt"
     assert report_path.exists(), "report file must be written next to out_path"
     report = report_path.read_text(encoding="utf-8")
 
@@ -124,3 +129,24 @@ def test_report_written_next_to_out(tmp_path) -> None:
     body_text = "\n".join(p.text for p in reopened.paragraphs)
     assert "[MENO_1]" in body_text
     assert "900101/0000" in body_text
+
+
+def test_default_config_redacts_the_checksum_invalid_rc_and_reports_it(tmp_path) -> None:
+    """v1.1 policy A1 sibling: with NO config the same RC is AUTO-redacted, appears in the
+    REDACTED section tagged checksum="invalid", and is gone from the .docx text."""
+    in_path = tmp_path / "in.docx"
+    out_path = tmp_path / "out_anon.docx"
+    doc = Document()
+    doc.add_paragraph("Novak Rodne cislo 900101/0000 koniec.")
+    doc.save(str(in_path))
+
+    redact_docx_body(str(in_path), str(out_path), known_entities=["Novak"])
+
+    report = (tmp_path / "out_anon_docx_report.txt").read_text(encoding="utf-8")
+    redacted_part = report.split(_LOWCONF_MARKER, 1)[0]
+    assert "RODNE_CISLO | [RODNE_CISLO_1] | 1 | body | invalid" in redacted_part
+    assert "(none)" in report.split(_LOWCONF_MARKER, 1)[1]
+
+    body_text = "\n".join(p.text for p in Document(str(out_path)).paragraphs)
+    assert "900101/0000" not in body_text
+    assert "[RODNE_CISLO_1]" in body_text

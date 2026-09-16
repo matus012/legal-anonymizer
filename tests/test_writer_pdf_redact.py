@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fitz
 
+from detect.config import DetectConfig
 from writer.labelmap import LabelMap
 from writer.pdf_body import (
     NoTextLayerError,
@@ -304,7 +305,7 @@ def test_report_file_is_written_next_to_the_output(tmp_path):
 
     redact_pdf(str(src), str(out), known_entities=[NAME])
 
-    assert (tmp_path / "out_report.txt").exists()
+    assert (tmp_path / "out_pdf_report.txt").exists()  # v1.1 Phase F: format in the name
     report = _report_text(out)
     assert "MENO | [MENO_1] | 1 | page_1" in report
 
@@ -346,7 +347,10 @@ def test_low_confidence_surface_is_left_intact_and_reported(tmp_path):
     out = tmp_path / "out.pdf"
     _low_conf_pdf(src)
 
-    redact_pdf(str(src), str(out), known_entities=[NAME])
+    # strict_checksums=True is what makes RC_LOWCONF auto=False in v1.1 (CONTRACTS_v11.md §6);
+    # the reviewer-bucket behaviour under test is unchanged.
+    redact_pdf(str(src), str(out), known_entities=[NAME],
+               config=DetectConfig(strict_checksums=True))
 
     text = _out_text(out)
     assert RC_LOWCONF in text  # left intact BY DESIGN -- never silently redacted
@@ -354,7 +358,25 @@ def test_low_confidence_surface_is_left_intact_and_reported(tmp_path):
 
     report = _report_text(out)
     lowconf_section = report.split("[LOW CONFIDENCE / NOT REDACTED]", 1)[1]
-    assert f"RODNE_CISLO | {RC_LOWCONF} | page_1" in lowconf_section
+    assert f"RODNE_CISLO | {RC_LOWCONF} | page_1 | invalid" in lowconf_section
+
+
+def test_default_config_redacts_the_checksum_invalid_surface(tmp_path):
+    """v1.1 policy A1 sibling: with NO config the checksum-invalid RC is destroyed like any
+    other identifier and reported in the REDACTED section tagged "invalid"."""
+    src = tmp_path / "in.pdf"
+    out = tmp_path / "out.pdf"
+    _low_conf_pdf(src)
+
+    redact_pdf(str(src), str(out), known_entities=[NAME])
+
+    text = _out_text(out)
+    assert RC_LOWCONF not in text
+    assert "[RODNE_CISLO_1]" in text
+
+    report = _report_text(out)
+    redacted_section = report.split("[LOW CONFIDENCE / NOT REDACTED]", 1)[0]
+    assert "RODNE_CISLO | [RODNE_CISLO_1] | 1 | page_1 | invalid" in redacted_section
 
 
 def test_report_does_not_leak_the_redacted_surface(tmp_path):

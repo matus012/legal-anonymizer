@@ -17,7 +17,10 @@ prefix weights (10,5,8,4,2,1) right-to-left, base weights
       "11000000002612345678" + "SK24" -> digits "...282024"; stepwise mod-97
       of 11000000002612345678282024 ends at remainder 1 (valid).
 """
+from detect.config import DetectConfig
 from detect.core import detect
+
+STRICT = DetectConfig(strict_checksums=True)
 
 
 def _by_type(candidates, type_):
@@ -48,15 +51,35 @@ def test_valid_account_in_sentence_one_bankovy_ucet_auto_true_no_inner_double_em
     )
 
 
-def test_checksum_broken_base_bankovy_ucet_auto_false():
+def test_checksum_broken_base_bankovy_ucet_auto_true_tagged_invalid():
+    # v1.1 (CONTRACTS_v11.md §6): checksum is a TAG, not a filter — a mistyped account
+    # number is still an account number, so the default config redacts it.
     account = "013389-1543039118/1100"  # base's last digit broken: 7 -> 8
     text = f"Prosím uhraďte sumu na účet {account} do konca mesiaca."
     candidates = detect(text)
 
     hits = _by_type(candidates, "BANKOVY_UCET")
     assert len(hits) == 1
-    assert hits[0].auto is False
+    assert hits[0].auto is True
+    assert hits[0].checksum == "invalid"
     assert hits[0].surface == account
+
+
+def test_checksum_broken_base_bankovy_ucet_auto_false_under_strict_checksums():
+    # the v1 behaviour, restored exactly. This is also the case that keeps the bespoke
+    # _suppress_identifiers_inside_bankovy_ucet alive: the account's inner 10-digit base
+    # is an auto=True DIC, so if the generalised containment rule saw it, its promotion
+    # rule would flip this account back to auto=True and strict_checksums would be a no-op.
+    account = "013389-1543039118/1100"
+    text = f"Prosím uhraďte sumu na účet {account} do konca mesiaca."
+    candidates = detect(text, None, STRICT)
+
+    hits = _by_type(candidates, "BANKOVY_UCET")
+    assert len(hits) == 1
+    assert hits[0].auto is False
+    assert hits[0].checksum == "invalid"
+    assert hits[0].surface == account
+    assert all(c.type != "DIC" for c in candidates)
 
 
 def test_order_number_decoy_not_matched():

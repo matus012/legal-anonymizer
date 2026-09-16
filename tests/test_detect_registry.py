@@ -254,7 +254,19 @@ def test_decoys_yield_zero_candidates():
     for text in decoys:
         cands = detect(text)
         assert not any(c.type in REGISTRY_TYPES for c in cands), (text, cands)
-        assert cands == [], (text, cands)
+        # v1.1: "no registry candidate" is still absolute, but "no candidate AT ALL" is not.
+        # The gazetteer knows 2 842 municipalities, and a few are ordinary Slovak words --
+        # "Strana" is both a real obec and the word for page/party, so "Strana 3 z 12" (a page
+        # footer) touches the gazetteer. Those words are on the stoplist, so with no address
+        # keyword confirming them they are DEMOTED to the review bucket rather than dropped:
+        # auto=False, unticked, nothing redacted. Demotion rather than deletion is the
+        # recall-over-precision choice (context.md 6) -- a genuine "obec Strana" must still be
+        # reachable -- and the cost is bounded, because it needs a word that is BOTH in a
+        # gazetteer AND on the stoplist.
+        #
+        # So what this test now pins is the thing that actually matters: a decoy is NEVER
+        # auto-redacted. That is the assertion a leak or a mangled document would break.
+        assert not any(c.auto for c in cands), (text, cands)
 
 
 def test_bare_slash_number_yields_no_registry_candidates():

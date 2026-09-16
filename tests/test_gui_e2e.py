@@ -44,6 +44,8 @@ def test_full_flow_scan_review_export(qapp, tmp_path):
     w.start_export(blocking=True)
     assert w.pages.currentIndex() == 2   # done page
     out = tmp_path / "in_anon.docx"
-    assert out.exists() and (tmp_path / "in_anon_report.txt").exists()
+    # v1.1 Phase F: the report name now carries the SOURCE format, so a .docx and a .pdf with
+    # the same stem exported in one batch no longer overwrite each other's report.
+    assert out.exists() and (tmp_path / "in_anon_docx_report.txt").exists()
     txt = "\n".join(p.text for p in _docx.Document(str(out)).paragraphs)
     assert "Novak" not in txt

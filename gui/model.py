@@ -11,10 +11,12 @@ import os
 import tempfile
 from dataclasses import dataclass
 
+from detect.config import DetectConfig
 from writer.decisions import RedactionDecisions
 from writer.docx_body import redact_docx_collect
 from writer.labelmap import LabelMap
 from writer.pdf_body import NoTextLayerError, RedactionIncompleteError, redact_pdf_collect
+from writer.report import report_path_for
 
 SUPPORTED = {".docx", ".pdf"}
 
@@ -36,6 +38,9 @@ class ReviewRow:
     locations: tuple[str, ...]
     count: int
     bucket: str             # "auto" (pre-ticked) | "review" (unticked)
+    # v1.1 (CONTRACTS_v11.md §1/§10): the detector's checksum TAG for this group —
+    # "valid" | "invalid" | "n/a". A review column only; it never decides the bucket.
+    checksum: str = "n/a"
 
 
 @dataclass
@@ -50,10 +55,10 @@ def out_path_for(src: str) -> str:
     return f"{root}_anon{ext}"
 
 
-def _collect(src: str, out: str, known, decisions) -> LabelMap:
+def _collect(src: str, out: str, known, decisions, config: DetectConfig | None = None) -> LabelMap:
     if src.lower().endswith(".docx"):
-        return redact_docx_collect(src, out, known, decisions=decisions)
-    return redact_pdf_collect(src, out, known, decisions=decisions)
+        return redact_docx_collect(src, out, known, decisions=decisions, config=config)
+    return redact_pdf_collect(src, out, known, decisions=decisions, config=config)
 
 
 def _rows_from(lm: LabelMap) -> list[ReviewRow]:
@@ -67,12 +72,16 @@ def _rows_from(lm: LabelMap) -> list[ReviewRow]:
             snippet=lm.contexts.get(label, ""),
             locations=tuple(sorted({loc for loc, _s in occ})),
             count=len(occ), bucket="auto",
+            checksum=lm.checksums.get(label, "n/a"),
         ))
-    # Low-confidence: dedup into groups the same way the writers key decisions.
+    # Low-confidence: dedup into groups the same way the writers key decisions. Snippet AND
+    # checksum both come from the group's FIRST record (setdefault), matching the auto rows'
+    # first-seen-wins rule.
     lc: dict[tuple, dict] = {}
     for i, (location, type_, surface) in enumerate(lm.low_confidence):
         key = (type_, lm.group_key_for(type_, surface))
         e = lc.setdefault(key, {"surface": surface, "snippet": lm.lc_contexts[i],
+                                "checksum": lm.lc_checksums[i] if i < len(lm.lc_checksums) else "n/a",
                                 "locations": set(), "count": 0})
         e["locations"].add(location)
         e["count"] += 1
@@ -80,16 +89,18 @@ def _rows_from(lm: LabelMap) -> list[ReviewRow]:
         rows.append(ReviewRow(
             group=key, type=key[0], text=e["surface"], snippet=e["snippet"],
             locations=tuple(sorted(e["locations"])), count=e["count"], bucket="review",
+            checksum=e["checksum"],
         ))
     return rows
 
 
-def scan_file(src: str, known_entities, extra_terms: tuple[str, ...] = ()) -> FileScan:
+def scan_file(src: str, known_entities, extra_terms: tuple[str, ...] = (),
+              config: DetectConfig | None = None) -> FileScan:
     decisions = RedactionDecisions(extra_terms=extra_terms) if extra_terms else None
     with tempfile.TemporaryDirectory(prefix="anon_scan_") as tmp:
         out = os.path.join(tmp, "scan" + os.path.splitext(src)[1])
         try:
-            lm = _collect(src, out, known_entities, decisions)
+            lm = _collect(src, out, known_entities, decisions, config)
         except NoTextLayerError:
             return FileScan(src, [], MSG_NO_TEXT_LAYER)
         except RedactionIncompleteError as e:
@@ -104,7 +115,8 @@ def build_decisions(rows, checked: dict[tuple, bool], extra_terms) -> RedactionD
     return RedactionDecisions(extra_terms=tuple(extra_terms), suppress_groups=suppress, force_groups=force)
 
 
-def export_file(src: str, known_entities, decisions: RedactionDecisions) -> tuple[str, str]:
+def export_file(src: str, known_entities, decisions: RedactionDecisions,
+                config: DetectConfig | None = None) -> tuple[str, str]:
     """Redact ``src`` next to itself as <stem>_anon.<ext>; returns (out_path, report_path).
     Raises the writer's own errors — the caller (worker) turns them into per-file messages.
 
@@ -113,10 +125,12 @@ def export_file(src: str, known_entities, decisions: RedactionDecisions) -> tupl
     next to the source (context.md §3: never silently produce an unredacted file). Delete
     both, then re-raise so the UI shows the per-file failure."""
     out = out_path_for(src)
-    root, _ = os.path.splitext(out)
-    report = f"{root}_report.txt"
+    # The report path is the writer's OWN rule, called — not re-derived here. Duplicating it is
+    # exactly how the v1.1 Phase F collision fix would have missed this cleanup path and left a
+    # stale report from a failed export lying next to the source.
+    report = report_path_for(out)
     try:
-        _collect(src, out, known_entities, decisions)
+        _collect(src, out, known_entities, decisions, config)
     except RedactionIncompleteError:
         for p in (out, report):
             if os.path.exists(p):

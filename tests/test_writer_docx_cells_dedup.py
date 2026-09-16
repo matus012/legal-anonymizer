@@ -91,9 +91,14 @@ def test_merged_cell_redacted_exactly_once(tmp_path, monkeypatch):
     visited: list = []
     orig = docx_body._redact_paragraph
 
-    def spy(paragraph, known_entities, labelmap, location, decisions=None):
+    # The spy must mirror the REAL signature, config included. A double that quietly drops a
+    # parameter stops testing the thing it stands in for -- here it would have hidden whether
+    # the detection config reaches paragraph-level redaction at all.
+    def spy(paragraph, known_entities, labelmap, location, decisions=None, config=None):
         visited.append(paragraph._p)
-        return orig(paragraph, known_entities, labelmap, location, decisions=decisions)
+        return orig(
+            paragraph, known_entities, labelmap, location, decisions=decisions, config=config
+        )
 
     monkeypatch.setattr(docx_body, "_redact_paragraph", spy)
 

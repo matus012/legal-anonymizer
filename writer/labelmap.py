@@ -68,6 +68,11 @@ class LabelMap:
         # occurrences/low_confidence so build_report's tuple unpacking stays byte-stable.
         self.contexts: dict[str, str] = {}  # label -> first-seen snippet
         self.lc_contexts: list[str] = []    # index-aligned with low_confidence
+        # v1.1 checksum side-channels (CONTRACTS_v11.md §1/§10). Built EXACTLY like
+        # contexts/lc_contexts and for the same reason: occurrences/low_confidence tuple shapes
+        # are unpacked positionally by build_report, so the checksum tag CANNOT widen them.
+        self.checksums: dict[str, str] = {}  # label -> checksum ("valid"|"invalid"|"n/a")
+        self.lc_checksums: list[str] = []    # index-aligned with low_confidence
 
     def group_key(self, cand) -> tuple:
         """Identity key for ``cand`` WITHIN its type. MENO resolves to its party via declension;
@@ -97,18 +102,28 @@ class LabelMap:
         self._cache[key] = label
         return label
 
-    def record_occurrence(self, label: str, location: str, surface: str, snippet: str = "") -> None:
+    def record_occurrence(self, label: str, location: str, surface: str, snippet: str = "",
+                          checksum: str = "n/a") -> None:
         """Append ONE redacted-span record. Called for EVERY kept (auto=True) occurrence,
-        including repeats of an already-numbered label — never deduped."""
+        including repeats of an already-numbered label — never deduped.
+
+        The appended tuple shape is UNCHANGED (``(location, surface)``): build_report unpacks it
+        positionally. ``checksum`` lands in the parallel ``checksums`` map, FIRST-SEEN wins —
+        the same first-occurrence-wins rule ``contexts`` uses, so a label's reported checksum is
+        the one from the occurrence that minted it and cannot flip between repeats."""
         self.occurrences.setdefault(label, []).append((location, surface))
         if snippet and label not in self.contexts:
             self.contexts[label] = snippet
+        self.checksums.setdefault(label, checksum)
 
-    def record_low_confidence(self, location: str, type: str, surface: str, snippet: str = "") -> None:
+    def record_low_confidence(self, location: str, type: str, surface: str, snippet: str = "",
+                              checksum: str = "n/a") -> None:
         """Append ONE low-confidence (auto=False) record: a span detect() flagged for review
-        that the pass leaves UNREDACTED and UNLABELLED."""
+        that the pass leaves UNREDACTED and UNLABELLED. Tuple shape UNCHANGED; the checksum is
+        appended to ``lc_checksums``, index-aligned exactly like ``lc_contexts``."""
         self.low_confidence.append((location, type, surface))
         self.lc_contexts.append(snippet)
+        self.lc_checksums.append(checksum)
 
     def groups(self) -> dict[str, tuple[str, tuple]]:
         """label -> (type, group_key) for every label minted so far — the GUI's bridge from

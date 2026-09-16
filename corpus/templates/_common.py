@@ -42,8 +42,14 @@ def name_spec(person: Person, case: str, entity_id: str, kind: str = "full") -> 
 
 def identifier_specs(rng: random.Random) -> dict:
     """One PiiSpec per §4.1 type, with correct three-state flags."""
-    def flagged(surface, typ):  # checksum-invalid but PII-shaped → review bucket
-        return PiiSpec(surface, typ, valid_checksum=False, auto_redact=False, should_flag=True)
+    def flagged(surface, typ):
+        """Checksum-invalid but PII-shaped.
+
+        v1.1 (CONTRACTS_v11.md §6/§7, policy A1): these are now AUTO-REDACTED and merely
+        TAGGED checksum="invalid" — they are no longer routed to the review bucket. The name
+        ``flagged`` is kept so every call site below reads unchanged, but the three-state
+        decision it encodes moved: auto_redact=True, should_flag=False."""
+        return PiiSpec(surface, typ, valid_checksum=False, auto_redact=True, should_flag=False)
 
     decoy_a, kind_a = decoys.generate(rng)
     decoy_b, kind_b = decoys.generate(rng)

@@ -6,6 +6,7 @@ tests/test_writer_decisions_pdf.py — tests never import corpus/ or eval/.
 import docx as _docx
 import fitz
 
+from detect.config import DetectConfig
 from gui.model import FileScan, ReviewRow, build_decisions, export_file, out_path_for, scan_file
 
 
@@ -45,7 +46,9 @@ def test_out_path_for_appends_anon(tmp_path):
 
 def test_scan_docx_builds_grouped_rows(tmp_path):
     src = _mk_docx(tmp_path, "Jan Novak a Novakovi patri DIC 2023456789. rodne cislo 835112/0009.")
-    scan = scan_file(src, ["Jan Novak"])
+    # strict_checksums=True is what routes the checksum-invalid RC to the review bucket in
+    # v1.1 (CONTRACTS_v11.md §6) — the two-bucket grouping this test is ABOUT.
+    scan = scan_file(src, ["Jan Novak"], config=DetectConfig(strict_checksums=True))
     assert scan.error is None
     auto = [r for r in scan.rows if r.bucket == "auto"]
     review = [r for r in scan.rows if r.bucket == "review"]
@@ -57,6 +60,19 @@ def test_scan_docx_builds_grouped_rows(tmp_path):
     assert any(r.type == "DIC" for r in auto)
     assert any(r.type == "RODNE_CISLO" for r in review)
     assert all(r.snippet for r in scan.rows)    # every row carries context
+    assert next(r for r in review if r.type == "RODNE_CISLO").checksum == "invalid"
+
+
+def test_scan_default_config_puts_the_invalid_rc_in_the_auto_bucket(tmp_path):
+    """v1.1 policy A1 sibling: under the DEFAULT config the same RC is pre-ticked (auto) and
+    the review bucket is empty — the reviewer un-ticks instead of ticking."""
+    src = _mk_docx(tmp_path, "Jan Novak a Novakovi patri DIC 2023456789. rodne cislo 835112/0009.")
+    scan = scan_file(src, ["Jan Novak"])
+    assert scan.error is None
+    rc = next(r for r in scan.rows if r.type == "RODNE_CISLO")
+    assert rc.bucket == "auto"
+    assert rc.checksum == "invalid"
+    assert [r for r in scan.rows if r.bucket == "review"] == []
 
 
 def test_scan_leaves_no_temp_files(tmp_path):
@@ -74,7 +90,8 @@ def test_scan_pdf_without_text_layer_reports_error(tmp_path):
 
 def test_build_decisions_from_checkbox_state(tmp_path):
     src = _mk_docx(tmp_path, "Jan Novak, DIC 2023456789, rodne cislo 835112/0009.")
-    scan = scan_file(src, ["Jan Novak"])
+    # Needs BOTH buckets populated: strict_checksums=True keeps the RC low-confidence.
+    scan = scan_file(src, ["Jan Novak"], config=DetectConfig(strict_checksums=True))
     dic = next(r for r in scan.rows if r.type == "DIC")
     rc = next(r for r in scan.rows if r.type == "RODNE_CISLO")
     checked = {r.group: (r.bucket == "auto") for r in scan.rows}
@@ -93,7 +110,8 @@ def test_export_writes_anon_and_report(tmp_path):
     scan = scan_file(src, ["Jan Novak"])
     checked = {r.group: (r.bucket == "auto") for r in scan.rows}
     out, report = export_file(src, ["Jan Novak"], build_decisions(scan.rows, checked, ()))
-    assert out.endswith("in_anon.docx") and report.endswith("in_anon_report.txt")
+    # v1.1 Phase F: the report name carries the source format.
+    assert out.endswith("in_anon.docx") and report.endswith("in_anon_docx_report.txt")
     txt = "\n".join(p.text for p in _docx.Document(out).paragraphs)
     assert "Novak" not in txt and "2023456789" not in txt
 
@@ -107,10 +125,12 @@ def test_export_cleans_up_partial_output_on_incomplete(tmp_path, monkeypatch):
     src = str(tmp_path / "doc.pdf")
     open(src, "w").close()  # placeholder; _collect is stubbed below
 
-    def fake_collect(src_, out, known, decisions):
+    def fake_collect(src_, out, known, decisions, config=None):
+        # Mirrors the real _collect signature (v1.1 adds the trailing config) and the real
+        # report path rule, so the cleanup path under test is exercised against the paths
+        # export_file actually computes.
         open(out, "w").close()
-        root = out.rsplit(".", 1)[0]
-        open(root + "_report.txt", "w").close()
+        open(model.report_path_for(out), "w").close()
         raise RedactionIncompleteError(["needle"])
 
     monkeypatch.setattr(model, "_collect", fake_collect)

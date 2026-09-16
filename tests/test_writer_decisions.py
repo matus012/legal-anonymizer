@@ -4,6 +4,7 @@ Hand-built candidates only — tests never import corpus/ or eval/.
 """
 from types import SimpleNamespace
 
+from detect.config import DetectConfig
 from writer.decisions import RedactionDecisions
 from writer.labelmap import LabelMap, make_snippet
 
@@ -99,25 +100,41 @@ def test_docx_suppress_keeps_surface_in_output(tmp_path):
     assert "2023456789" in txt            # survived — suppression respected
     assert "Novak" not in txt             # untouched groups still redacted
     # and the report records the human decision as NOT redacted:
-    rep = (tmp_path / "sup_report.txt").read_text(encoding="utf-8")
+    # v1.1 Phase F: the report name carries the source format.
+    rep = (tmp_path / "sup_docx_report.txt").read_text(encoding="utf-8")
     assert "2023456789" in rep
 
 
 def test_docx_force_redacts_low_confidence_group(tmp_path):
-    # 835112/0009 is RC-shaped with an INVALID checksum -> auto=False, normally left intact
+    # 835112/0009 is RC-shaped with an INVALID checksum. Under strict_checksums=True it is
+    # auto=False (CONTRACTS_v11.md §6) — the low-confidence group this test is ABOUT. The
+    # config is threaded into BOTH runs so the scan and the forced export see the same bucket.
+    strict = DetectConfig(strict_checksums=True)
     src = _mk_docx(tmp_path, "rodne cislo: 835112/0009")
     out_plain = str(tmp_path / "plain.docx")
-    lm = redact_docx_collect(src, out_plain, known_entities=None)
+    lm = redact_docx_collect(src, out_plain, known_entities=None, config=strict)
     assert "835112/0009" in _docx_text(out_plain)  # precondition: low-conf survives by default
     key = ("RODNE_CISLO", lm.group_key_for("RODNE_CISLO", "835112/0009"))
     out = str(tmp_path / "forced.docx")
     from writer.decisions import RedactionDecisions
-    lm2 = redact_docx_collect(src, out, known_entities=None,
+    lm2 = redact_docx_collect(src, out, known_entities=None, config=strict,
                               decisions=RedactionDecisions(force_groups=frozenset({key})))
     txt = _docx_text(out)
     assert "835112/0009" not in txt
     assert "[RODNE_CISLO_1]" in txt
     assert lm2.occurrences.get("[RODNE_CISLO_1]")  # recorded as a real redaction
+
+
+def test_docx_default_config_auto_redacts_the_checksum_invalid_rc(tmp_path):
+    """v1.1 policy A1 sibling: with NO config the same surface needs no force decision — it is
+    already in the auto bucket, redacted and tagged checksum="invalid"."""
+    src = _mk_docx(tmp_path, "rodne cislo: 835112/0009")
+    out = str(tmp_path / "default.docx")
+    lm = redact_docx_collect(src, out, known_entities=None)
+    assert "835112/0009" not in _docx_text(out)
+    assert "[RODNE_CISLO_1]" in _docx_text(out)
+    assert lm.low_confidence == []
+    assert lm.checksums["[RODNE_CISLO_1]"] == "invalid"
 
 
 def test_docx_extra_terms_redact_like_known_entities(tmp_path):

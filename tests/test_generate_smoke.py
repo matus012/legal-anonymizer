@@ -118,7 +118,15 @@ def test_image_only_pdf_has_no_text_layer(corpus):
         d.close()
 
 
-def test_all_three_decision_classes_present(corpus):
+def test_decision_classes_present(corpus):
+    """v1.1 (CONTRACTS_v11.md §7): the corpus carries an AUTO class and a DECOY class.
+
+    The middle ``should_flag`` class is now EMPTY for identifier types by design — policy A1
+    moved checksum-invalid identifiers into the auto bucket, because a mistyped IČO is still
+    an IČO. ``should_flag`` itself is not retired (it still marks the Phase C bare-name
+    heuristic and everything under ``strict_checksums``), so this test asserts the two classes
+    the corpus actually populates and pins the third at zero, which is what makes the policy
+    change VISIBLE here rather than silently absorbed."""
     auto, flag, decoy = 0, 0, 0
     for gt_path in corpus.glob("*.gt.json"):
         for pii in json.loads(gt_path.read_text("utf-8"))["pii"]:
@@ -128,7 +136,11 @@ def test_all_three_decision_classes_present(corpus):
                 flag += 1
             else:
                 decoy += 1
-    assert auto > 0 and flag > 0 and decoy > 0
+    assert auto > 0 and decoy > 0
+    assert flag == 0, (
+        "no corpus surface should route to the review bucket under the default v1.1 policy; "
+        f"found {flag}"
+    )
 
 
 def test_checksum_flags_match_reality(corpus):
@@ -140,11 +152,14 @@ def test_checksum_flags_match_reality(corpus):
                 continue
             is_valid = validators[pii["type"]](pii["surface"])
             assert is_valid == pii["valid_checksum"], pii
+            # v1.1 policy A1: BOTH checksum states are auto-redacted. What distinguishes
+            # them is the `checksum` TAG, not the bucket — so that is what is asserted.
+            assert pii["auto_redact"] and not pii["should_flag"], pii
             if pii["valid_checksum"]:
-                assert pii["auto_redact"] and not pii["should_flag"]
+                assert pii["checksum"] == "valid", pii
                 seen_valid += 1
             else:
-                assert pii["should_flag"] and not pii["auto_redact"]
+                assert pii["checksum"] == "invalid", pii
                 seen_invalid += 1
     assert seen_valid > 0 and seen_invalid > 0
 

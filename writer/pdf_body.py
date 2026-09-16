@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import fitz
 
+from detect.config import DetectConfig
 from detect.core import detect
 from writer.decisions import RedactionDecisions
 from writer.labelmap import LabelMap, make_snippet
@@ -87,6 +88,7 @@ def _collect_page_redactions(
     labelmap,
     location: str,
     decisions: RedactionDecisions | None = None,
+    config: DetectConfig | None = None,
 ):
     """Stage 1 of the per-page pass: run detect() on the page text and turn every auto=True
     candidate into (rect, label) pairs via search_for.
@@ -110,7 +112,7 @@ def _collect_page_redactions(
 
     raw = page.get_text("text")
     norm = raw.replace(chr(0xAD), "-")  # soft hyphen -> hyphen-minus; offset-preserving (1:1)
-    for cand in detect(norm, known_entities):
+    for cand in detect(norm, known_entities, config):
         redact = cand.auto
         if decisions is not None:
             key = (cand.type, labelmap.group_key(cand))
@@ -124,6 +126,7 @@ def _collect_page_redactions(
             labelmap.record_low_confidence(
                 location, cand.type, cand.surface,
                 snippet=make_snippet(norm, cand.start, cand.end),
+                checksum=cand.checksum,
             )
             continue
         needle = raw[cand.start : cand.end]  # on-page glyphs; cand.surface is normalized
@@ -138,6 +141,7 @@ def _collect_page_redactions(
         labelmap.record_occurrence(
             label, location, cand.surface,
             snippet=make_snippet(norm, cand.start, cand.end),
+            checksum=cand.checksum,
         )
         for rect in rects:
             pairs.append((rect, label))
@@ -189,6 +193,7 @@ def _redact_pdf(
     out_path: str,
     known_entities: list[str] | None,
     decisions: RedactionDecisions | None,
+    config: DetectConfig | None = None,
 ) -> LabelMap:
     # Reviewer's free-text "redact this too" terms join known_entities BEFORE the LabelMap is
     # built, so extras get real declension-grouped [MENO_N] labels like any GT name.
@@ -218,7 +223,7 @@ def _redact_pdf(
     for i, page in enumerate(doc, start=1):
         location = f"page_{i}"
         pairs, page_skipped = _collect_page_redactions(
-            page, known_entities, labelmap, location, decisions=decisions
+            page, known_entities, labelmap, location, decisions=decisions, config=config
         )
         skipped.extend(page_skipped)
 
@@ -237,7 +242,8 @@ def _redact_pdf(
     # P4: the report is written BEFORE the incomplete-redaction raise, deliberately. A partial
     # output is precisely the file whose record a reviewer needs; writing the report after the
     # raise would leave the worst case as the one case with no record at all.
-    write_report(out_path, labelmap.occurrences, labelmap.low_confidence)
+    write_report(out_path, labelmap.occurrences, labelmap.low_confidence,
+                 labelmap.checksums, labelmap.lc_checksums)
 
     # Every page was attempted and the (partial) output written -- but the caller must be told,
     # loudly, that this file is not fully redacted.
@@ -253,9 +259,11 @@ def redact_pdf(
     known_entities: list[str] | None = None,
     *,
     decisions: RedactionDecisions | None = None,
+    config: DetectConfig | None = None,
 ) -> str:
-    """Public writer entry — unchanged contract (returns out_path; raises on incomplete)."""
-    _redact_pdf(in_path, out_path, known_entities, decisions)
+    """Public writer entry — unchanged contract (returns out_path; raises on incomplete).
+    ``config=None`` means detect()'s DEFAULT DetectConfig — pre-v1.1 call sites unchanged."""
+    _redact_pdf(in_path, out_path, known_entities, decisions, config)
     return out_path
 
 
@@ -265,7 +273,8 @@ def redact_pdf_collect(
     known_entities: list[str] | None = None,
     *,
     decisions: RedactionDecisions | None = None,
+    config: DetectConfig | None = None,
 ) -> "LabelMap":
     """Same redaction, returns the LabelMap (GUI scan harvest). Still raises
     RedactionIncompleteError after writing output+report, exactly like redact_pdf."""
-    return _redact_pdf(in_path, out_path, known_entities, decisions)
+    return _redact_pdf(in_path, out_path, known_entities, decisions, config)
