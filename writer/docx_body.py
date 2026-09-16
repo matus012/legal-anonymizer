@@ -32,6 +32,7 @@ is never preserved (see _scrub_metadata).
 from __future__ import annotations
 
 import re
+import urllib.parse
 import zipfile
 from copy import deepcopy
 
@@ -426,6 +427,103 @@ def _scrub_metadata(doc) -> None:
                 comment.set(qn("w:initials"), "")
 
 
+# A hyperlink target is scrubbed when it CONTAINS personal data -- not merely because it is
+# itself a URL.
+#
+# The distinction is load-bearing and the first version missed it. detect() classifies any
+# http(s) address as type URL, and URL is an auto-redact type in this project, so "scrub the
+# target if detect() finds anything" scrubbed EVERY hyperlink -- including
+# https://www.slov-lex.sk/, the Slovak statute book. A tool that breaks every working link in
+# a contract gets switched off, and the links it breaks are the ones the reviewer never sees,
+# because the visible text is unchanged.
+#
+# A URL in BODY TEXT is different and is still redacted: the reviewer sees [URL_1] on the page
+# and can untick it. A relationship target is invisible, so it gets the narrower rule.
+_TARGET_IGNORED_TYPES = frozenset({"URL"})
+
+
+# URL punctuation, turned into spaces so a name buried in a path becomes a name again.
+_TARGET_PUNCT_RE = re.compile(r"[/\\_+:?=&#]+")
+
+
+def _target_carries_pii(target: str, known_entities: list[str], config) -> bool:
+    """Does this hyperlink destination contain personal data?
+
+    TWO probes, because one cannot see both shapes:
+
+      * the target AS IT IS -- this is what finds the address in "mailto:jan.novak@x.sk",
+        where the e-mail is intact and detect() reads it directly;
+      * the target with its PUNCTUATION OPENED UP -- because in
+        "https://example.com/klienti/Jan-Novak/zmluva.pdf" the name is not visible to
+        detect() at all: the whole string matches as one URL, and overlap resolution then
+        suppresses the MENO inside it. Replacing the slashes and dashes with spaces both
+        dissolves the URL match and turns "Jan-Novak" back into "Jan Novak".
+
+    A candidate of ANY bucket counts, not only auto. Everywhere else in this tool a
+    low-confidence hit goes to a human to decide -- but a relationship target is INVISIBLE on
+    the page, so there is no moment at which a reviewer could catch it. The only two options
+    are scrub it or ship it, and shipping it means a file that reads [MENO_1] while still
+    naming the client in its own package.
+    """
+    for probe in (target, _TARGET_PUNCT_RE.sub(" ", target).replace("-", " ")):
+        for c in detect_with_failures(probe, known_entities, config)[0]:
+            if c.type not in _TARGET_IGNORED_TYPES:
+                return True
+    return False
+
+
+# A relationship target is EXTERNAL when Word stores it as a URL rather than a part name. Only
+# those can carry PII -- an internal target is a path inside the package.
+_EXTERNAL = "External"
+_SCRUBBED_TARGET = "https://removed.invalid/"
+
+
+def _scrub_rel_targets(path: str, known_entities: list[str], config) -> int:
+    """Replace every external relationship target that contains detectable PII. Returns the
+    number replaced.
+
+    Run over the SAVED package, like _drop_thumbnail, because the targets live in .rels parts
+    that the paragraph-level passes never touch.
+
+    The whole target is replaced rather than edited. A URL is not prose: cutting the PII out of
+    https://example.com/klient/Jan-Novak/zmluva leaves a path that still says which client it
+    was, and a mailto: with the local part removed still names the domain. There is nothing in
+    a hyperlink destination worth preserving once it is known to carry a party's identity, and
+    the display text -- which is what the reader sees -- has already been redacted in place.
+    """
+    with zipfile.ZipFile(path) as zin:
+        items = [(n, zin.read(n)) for n in zin.namelist()]
+
+    replaced = 0
+    rewritten = []
+    for name, data in items:
+        if name.endswith(".rels"):
+            root = etree.fromstring(data)
+            changed = False
+            for rel in root:
+                if rel.get("TargetMode") != _EXTERNAL:
+                    continue
+                target = rel.get("Target") or ""
+                if not target:
+                    continue
+                # unquote first: Word percent-encodes a target, and "Jan%20Novak" must be
+                # detectable as "Jan Novak" or the scrub misses exactly the names it is for.
+                probe = urllib.parse.unquote(target)
+                if _target_carries_pii(probe, known_entities, config):
+                    rel.set("Target", _SCRUBBED_TARGET)
+                    changed = True
+                    replaced += 1
+            if changed:
+                data = etree.tostring(root, encoding="UTF-8", standalone=True)
+        rewritten.append((name, data))
+
+    if replaced:
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for name, data in rewritten:
+                zout.writestr(name, data)
+    return replaced
+
+
 def _drop_thumbnail(path: str) -> None:
     """Remove ``docProps/thumbnail.*`` and its relationship from a saved .docx.
 
@@ -544,6 +642,8 @@ def _redact_docx(
     #     an arbitrary package part, and done AFTER doc.save so nothing in the redaction path
     #     depends on it.
     _drop_thumbnail(out_path)
+    # Hyperlink destinations live in .rels, which no paragraph pass can reach.
+    _scrub_rel_targets(out_path, known_entities, config)
 
     # 7) W5b-2: emit the per-document report NEXT TO out_path (<stem>_report.txt), built from the
     #    LabelMap's capture side-channels (occurrences + low_confidence) the passes above filled.
