@@ -418,3 +418,48 @@ matched ONLY when followed by a number or preceded by `ul.` / `ulica` / `nám.` 
   shape scores 1.000, and the declined form scores 0.000 (20/20 missed). The fix belongs in
   the gazetteer as a street-specific adjectival expansion gated on the existing ULICA anchor
   requirement — NOT in `detect/declension.py`.
+* 2026-09-17 — AMENDMENT 13 (§10, writer): `writer/docx_body.py` visits EVERY `<w:p>` under a
+  part via a descendant search, and every `<w:r>` inside a paragraph the same way. The four
+  direct-child walks it used to do (body paragraphs, body tables' cells, header/footer
+  paragraphs and tables, textboxes) are replaced by ONE walk per part; a paragraph tags its own
+  report location from the ancestors it sits under. This closes four whole locations that were
+  never visited — a run inside `<w:hyperlink>`, a paragraph inside a nested table, a paragraph
+  inside `<w:sdt>` (a Word template's fill-in field), and a table inside a textbox. None can
+  occur in the corpus, because the corpus is built BY python-docx, which cannot emit any of
+  them: red-team round 3 measured 0 of 70 documents containing one. The merged-cell identity
+  de-duplication the old per-cell walk needed is gone with it — merged cells share one `<w:tc>`,
+  so the duplication it guarded against was an artefact of `row.cells`, not of the document.
+* 2026-09-17 — AMENDMENT 14 (§10, writer): `_rebuild_run` strips EVERY text-bearing child of a
+  run before writing a fragment, and re-emits `<w:tab/>` / `<w:br/>` as ELEMENTS rather than as
+  literal characters in a `<w:t>`. It previously rewrote only the first `<w:t>` and deep-copied
+  the rest into every fragment with their original text, so PII was not merely left in the
+  document but DUPLICATED beside the label claiming to have removed it. Word emits multi-child
+  runs on every save (`<w:lastRenderedPageBreak/>`).
+* 2026-09-17 — AMENDMENT 15 (§10, writer): hyperlink DESTINATIONS are scrubbed. Word stores
+  them in a `.rels` part, so redacting the display text left `mailto:` addresses and
+  client-named URLs in the package of a document that read `[EMAIL_1]`. A target is scrubbed
+  when it CONTAINS personal data, never merely because it IS a URL — the first version
+  destroyed every working link in the document, including the statute book. Two probes: the
+  target as-is, and the target with its punctuation opened into spaces, because a name inside a
+  path is otherwise hidden under the URL match by overlap resolution. Percent-encoding is
+  undone first. Candidates of ANY bucket count: a relationship target is invisible on the page,
+  so no reviewer can catch it.
+* 2026-09-17 — AMENDMENT 16 (§3, writer): TWO new refusals, both `NoTextLayerError` subclasses
+  so every existing caller refuses them unchanged. `UnreadableTextLayerError` — a page carrying
+  text whose characters cannot be decoded (a subset font with no `/ToUnicode`, which extracts as
+  control characters). `ShreddedTextLayerError` — a page whose text layer is broken into single
+  characters (a DMS export, a PDF/A converter, an OCR layer, Word's character spacing). Both
+  were previously ACCEPTED and silently produced an unredacted output that the leak gate scored
+  CLEAN, because `eval/extract.py` reads the same mangled text the detector does. Each has its
+  own GUI message: neither file is a scan, and telling the lawyer it is would send them to
+  rescan a document that needs re-exporting. Thresholds were tuned against the corpus for ZERO
+  false refusals (0 of 71 PDFs), because a guard that fires on ordinary work is a guard the
+  office turns off. §3's promise of a refusal now covers text the tool cannot INTERPRET, not
+  only text that is absent.
+* 2026-09-17 — AMENDMENT 17 (§8, gazetteer): the common-word stoplist gains the weekday names
+  and the banking words. `Pondelok` (Monday) and `Štvrtok` (Thursday) are real cadastral areas,
+  `Štvrtok` and `Banka` are also municipalities, and `Banka` is the word a contract about a bank
+  account uses on every page. All eight KATASTER candidates in the corpus were `Pondelok`, i.e.
+  the tool was auto-redacting "Monday" out of contracts. Stoplisting demotes to the review
+  bucket; it does not delete the word from the gazetteer, so an anchored "obec Banka" still
+  matches.

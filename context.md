@@ -399,8 +399,41 @@ separate their words with `\s+`. **Missing diacritics remain an open gap** — s
   Closed by the normalization layer above, not by a per-detector patch.
 - **A wrapped PDF text layer breaking a multi-word anchor.** A line break landing between the
   words of an anchor phrase (e.g. inside "Číslo klienta") leaked a client number from a corpus
-  PDF while the DOCX of the same document stayed clean, because the DOCX writer never wraps a
-  paragraph the way a PDF page does.
+  PDF. (The original note added "while the DOCX of the same document stayed clean". That half
+  was **not evidence and has been removed**: `corpus/generate.py` gives each FORMAT its own
+  seed, so the `.docx` and `.pdf` at the same index are DIFFERENT DOCUMENTS — verified, 46 vs
+  40 ground-truth surfaces with 3 in common. The leak was real and independently reproduced;
+  the comparison was not. See QUESTIONS.md Q14.)
+- **Every separator inside a value, and inside an anchor phrase.** The wrap fix above was
+  applied first to the gap between an anchor and its VALUE, and the gaps *between the anchor's
+  own words* stayed narrow — so a wrap one word later leaked the same number again. Then the
+  same thing a third time, one level deeper: several anchors were built by passing the whole
+  phrase through `diacritic_pattern()`, whose `re.escape` turns the internal space into a
+  literal `\ ` that no separator widening can reach. Three rounds of the same bug in three
+  places is the argument for measuring a mutation class rather than reasoning about a fix.
+- **A `<w:r>` holding more than one text-bearing child.** `_rebuild_run` rewrote the FIRST
+  `<w:t>` and deep-copied the rest into every fragment with their original text, so PII was
+  **duplicated** beside the label claiming to have removed it. Word emits multi-child runs on
+  every save (`<w:lastRenderedPageBreak/>`); python-docx never does, so no corpus document
+  could contain the shape and no gate could see it.
+- **Four DOCX locations that were never visited at all**: a run inside `<w:hyperlink>` (Word
+  auto-hyperlinks every address you type), a paragraph in a nested table, a paragraph inside
+  `<w:sdt>` (every Word template with fill-in fields), and a table inside a textbox. All four
+  are direct-child views in python-docx, and all four are shapes python-docx cannot emit —
+  measured, 0 of 70 corpus documents contain one.
+- **A hyperlink's DESTINATION.** Word keeps it in a `.rels` part, so redacting the display text
+  left `mailto:jan.novak@advokat.sk` in the package of a document that read `[EMAIL_1]`.
+- **A PDF whose text cannot be decoded, and one whose text is shredded into single
+  characters.** Both were accepted and silently produced an unredacted output that the leak gate
+  scored **CLEAN** — because `eval/extract.py` reads the same mangled string the detector does,
+  so the ground-truth needle is absent from every surface. This is the one failure mode the
+  §8.1 gate is structurally unable to catch, and the answer is a REFUSAL (§3), not a better
+  grep. Both refusals were tuned against the corpus for zero false refusals.
+- **A genuinely Cyrillic name, broken by the tool's own homoglyph folding.** Folding
+  confusables per character turned "Ковальчук" into mixed-script wreckage, so the Ukrainian
+  client's name the lawyer typed into the known-entities box could not match the document text.
+  The module's own docstring claimed this did not happen. Confusables now fold only inside a
+  token that already contains a Latin letter.
 - **The source filename.** `Novak_kupna_zmluva.docx` leaks a client's name in the attachment
   name no matter how clean its contents are — an email client and every mail server log the
   filename regardless of what the document body says. The GUI now warns when the filename
