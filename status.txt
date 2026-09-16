@@ -102,7 +102,7 @@ WHAT CHANGED (6 commits tonight, none pushed)
    tool exists for), cross-format consistency (gated), perf (report only).
 
 A DEFECT I INTRODUCED AND CAUGHT: an intermediate version of the normalization layer
-collapsed line breaks to spaces. That removed the literal \\n that a NAZOV_UCTU value regex
+collapsed line breaks to spaces. That removed the literal \n that a NAZOV_UCTU value regex
 bounds itself on, so the value ran on and produced a surface the PDF writer could not
 locate — and it made the bare-name heuristic weld the last word of one line to the first
 word of the next. Two detectors, opposite failures, one cause. Fixed; verified by running
