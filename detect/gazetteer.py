@@ -241,7 +241,16 @@ _PLACE_ANCHOR_RE = re.compile(
     r"|so sidlom|sidlo|na adrese|adresa|adrese|pobyt"
 )
 # Street-specific keyword, immediately before the street name (contract §12).
-_STREET_KEYWORD_RE = re.compile(rf"(?:ul\.|ulica|nam\.|namestie|trieda|cesta){_SEP}+$")
+# _SEP_ANCHOR (line_break_mid, break-BETWEEN-words case): widened locally to `\s` for
+# this ONE gap -- the keyword-to-street-name separator -- rather than by touching the
+# module's shared `_SEP`, which also feeds `_NUMBER_AFTER_RE`/`_HOUSENUM_AFTER_RE`/
+# `_PSC_AFTER_RE` (the number/PSC-after-the-name anchors for OBEC/KATASTER/ULICA, out of
+# scope here). A PDF wrap after "ul." or "nám." is routine and killed the whole keyword
+# anchor at the old horizontal-only separator; this gap is bounded by the `$` anchor
+# against a fixed-length trailing window, never a terminator for a free-running value,
+# so widening it cannot let anything swallow past where the street name starts.
+_SEP_ANCHOR = r"\s"
+_STREET_KEYWORD_RE = re.compile(rf"(?:ul\.|ulica|nam\.|namestie|trieda|cesta){_SEP_ANCHOR}+$")
 # A house number (optionally with an orientation suffix) or a PSČ right after the name.
 _NUMBER_AFTER_RE = re.compile(
     rf"^,?{_SEP}*(?:\d{{3}}{_SEP}\d{{2}}|\d{{1,4}}(?:/[A-Za-z0-9]{{1,3}})?)(?!\d)"

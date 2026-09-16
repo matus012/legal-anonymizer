@@ -225,7 +225,20 @@ _LABEL_TYPES: dict[str, str] = {
 # DIACRITICS: the label text itself is anchor vocabulary (folded via diacritic_pattern,
 # technique A); the dict lookup below therefore keys on `ascii_fold`, which folds case AND
 # diacritics together, rather than the exact literal the old `.casefold()` lookup required.
-_LABEL_ALT = "|".join(diacritic_pattern(lbl) for lbl in sorted(_LABEL_TYPES, key=len, reverse=True))
+#
+# STATNA_PRISLUSNOST (line_break_mid, break-BETWEEN-words case) is the one two-word label
+# here ("štátna príslušnosť:") -- every other label is either one word or already has its
+# word-boundary right where the anchor ends. `diacritic_pattern` calls `re.escape` on
+# every character it doesn't fold, which turns the literal space between "štátna" and
+# "príslušnosť:" into an escaped literal space -- a PDF wrap at that exact space (measured
+# at 0.000 robustness) killed the whole anchor. Widened to `\s` for this ONE label only,
+# built by hand instead of through the generic `diacritic_pattern(lbl)` path the other
+# labels keep; every other label's internal spacing is untouched (out of scope here).
+_STATNA_LABEL_RE = rf"{diacritic_pattern('štátna')}\s{diacritic_pattern('príslušnosť:')}"
+_LABEL_ALT = "|".join(
+    _STATNA_LABEL_RE if lbl == "štátna príslušnosť:" else diacritic_pattern(lbl)
+    for lbl in sorted(_LABEL_TYPES, key=len, reverse=True)
+)
 _LABEL_TYPES_ASCII: dict[str, str] = {ascii_fold(k): v for k, v in _LABEL_TYPES.items()}
 _LABEL_RE = re.compile(
     # The gap between label and value may be padding tabs in a table row, so tabs are
@@ -298,7 +311,12 @@ def _anchored(text: str) -> list[Candidate]:
             if end is not None:
                 out.append(_cand("MENO", text, m.start(1), end, auto=True))
     for m in _LABEL_RE.finditer(text):
-        type_ = _LABEL_TYPES_ASCII[ascii_fold(m.group(1))]
+        # The dict key is authored with a single plain space between a label's words, but
+        # the STATNA_PRISLUSNOST anchor above can now match with a line break (or a run of
+        # any whitespace) there instead -- collapse whatever whitespace the match actually
+        # contains down to one space before the lookup, so a wrapped label still resolves
+        # to its type instead of raising a KeyError.
+        type_ = _LABEL_TYPES_ASCII[ascii_fold(re.sub(r"\s+", " ", m.group(1)))]
         value = m.group(2).rstrip(f" {NBSP}")
         if value:
             out.append(_cand(type_, text, m.start(2), m.start(2) + len(value), auto=True))

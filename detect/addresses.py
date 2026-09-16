@@ -46,10 +46,19 @@ NBSP = " "
 # widened the separator BETWEEN THE WORDS OF AN ANCHOR and not the one between an anchor
 # and its VALUE, so a wrap one word later leaked the same number again.
 #
-# The class below is horizontal whitespace only -- space, NBSP, tab -- with line breaks
-# still EXCLUDED, because a separator INSIDE a surface must not join two lines into one
-# phone number. Anchor-to-value separators are widened to full whitespace separately.
-_SEP = '[^\\S\\n\\r]'
+# v1.1 LINE-BREAK TOLERANCE AT ANCHOR SEPARATORS (mutation class line_break_mid,
+# break-BETWEEN-words case). This class used to exclude the line break, on the theory
+# that "a separator INSIDE a surface must not join two lines into one value". Measured
+# on the corpus with a break landing BETWEEN the words of one of these six anchors (or
+# between the anchor and its value), every one of ADRESA/SUPISNE_CISLO/CISLO_BYTU/VCHOD
+# scored 0.000 and PSC scored 0.600 and POSCHODIE 0.300 -- a PDF text layer wraps every
+# page, so the break lands inside a multi-word anchor phrase as a matter of routine, and
+# refusing to join it there is a leak, not caution (context.md 6, recall over precision).
+# Every use of _SEP in this module sits either between the words of a fixed anchor
+# phrase, between an anchor and its shape-bounded value, or between the two halves of the
+# PSC value itself -- never as a terminator that stops a free-running value from
+# swallowing the rest of a line -- so widening it here cannot make any value run away.
+_SEP = r'\s'
 
 # Slovak alphabet, explicit (no bare [A-Z]/[a-z] — those silently drop diacritics).
 _SK_UPPER = "AÁÄBCČDĎEÉFGHIÍJKLĹĽMNŇOÓÔPQRŔSŠTŤUÚVWXYÝZŽ"
@@ -65,6 +74,19 @@ _SK_LOWER = "aáäbcčdďeéfghiíjklĺľmnňoóôpqrŕsštťuúvwxyýzž"
 _CAP = rf"[{_SK_UPPER}][{_SK_LOWER}]+"  # one street/obec token
 _TOKEN_SEQ = rf"{_CAP}(?:{_SEP}{_CAP}){{0,2}}"  # 1-3 Capitalized tokens
 _HOUSENUM = rf"(?<!\d)\d{{1,4}}(?:/[A-Za-z0-9]{{1,3}})?(?!\d)"  # house + optional /orient
+
+
+def _anchor(phrase: str) -> str:
+    """``diacritic_pattern`` per word of a multi-word anchor phrase, joined by the widened
+    ``_SEP`` instead of the literal space ``diacritic_pattern(phrase)`` would ``re.escape``
+    in. Calling ``diacritic_pattern`` on the whole phrase at once (as originally written)
+    folds every accented character correctly but leaves the space BETWEEN the phrase's own
+    words as a plain escaped ``' '`` -- a PDF wrap landing exactly there (the only space in
+    e.g. "súpisné číslo") killed the whole anchor and measured 0.000 robustness for
+    SUPISNE_CISLO / CISLO_BYTU. Splitting on the literal space in the SOURCE phrase and
+    rejoining with ``_SEP`` fixes this without needing a second, space-widening pass over
+    the already-built pattern string."""
+    return _SEP.join(diacritic_pattern(w) for w in phrase.split(" "))
 
 
 def _make(type_: str, text: str, start: int, end: int) -> Candidate:
@@ -96,9 +118,16 @@ def _psc_followed_by_obec(text: str, pos: int, *, allow_comma: bool) -> bool:
     return re.match(pattern, rest) is not None
 
 
+_PSC_COMMA_SEP_RE = re.compile(rf",{_SEP}+$")
+
+
 def _psc_preceded_by_comma_space(text: str, pos: int) -> bool:
-    before = text[max(0, pos - 2) : pos]
-    return before in (", ", "," + NBSP)
+    # Was an exact 2-char slice compared against ", " / ","+NBSP -- both exactly one
+    # separator char. A PDF wrap right after the comma ("," + "\n") is a different length
+    # and silently failed the equality check even after _SEP itself was widened. Rewritten
+    # as a regex over a wider trailing window so any run of {_SEP} (now including \n\r)
+    # after the comma still anchors.
+    return _PSC_COMMA_SEP_RE.search(text[max(0, pos - 10) : pos]) is not None
 
 
 def _detect_psc(text: str) -> list[Candidate]:
@@ -134,9 +163,14 @@ _ADRESA_KEYWORD_RE = re.compile(
 # never a source of an offset -- so it is case- AND diacritic-insensitive in one step,
 # ascii-spelled here to match the folded window.
 _ADRESA_BARE_RE = re.compile(rf"{_TOKEN_SEQ}{_SEP}+{_HOUSENUM}")
+# The multi-word entries below ("trvale bytom", "miesto podnikania", "na adrese") had a
+# literal space between their two words, same bug as the SUPISNE_CISLO/CISLO_BYTU anchors
+# below: this is a WINDOW test against an ascii-folded (never sliced) copy of the text, so
+# there is no diacritic_pattern() call to route through _anchor() -- the space is widened
+# to \s directly instead.
 _ADRESA_ANCHOR_RE = re.compile(
-    r"trvale bytom|trvale bydlisko|bytom|bydlisko|so sidlom|sidlo"
-    r"|miesto podnikania|na adrese|adresa"
+    r"trvale\sbytom|trvale\sbydlisko|bytom|bydlisko|so\ssidlom|sidlo"
+    r"|miesto\spodnikania|na\sadrese|adresa"
 )
 
 # Extension: ", " (or ","+NBSP) + PSC (spaced or contiguous) + SEP + Capitalized obec token
@@ -175,16 +209,16 @@ def _detect_adresa(text: str) -> list[Candidate]:
 # with a different literal ("sú...") than every other alternative, so ordering cannot cause
 # a partial match.
 _SUPISNE_CISLO_RE = re.compile(
-    rf"(?i:{diacritic_pattern('súpisné/orientačné číslo')}|{diacritic_pattern('súpisné číslo')}"
-    rf"|{diacritic_pattern('súp. č.')}|{diacritic_pattern('orientačné číslo')}"
-    rf"|{diacritic_pattern('or. č.')}|{diacritic_pattern('s. č.')})"
+    rf"(?i:{_anchor('súpisné/orientačné číslo')}|{_anchor('súpisné číslo')}"
+    rf"|{_anchor('súp. č.')}|{_anchor('orientačné číslo')}"
+    rf"|{_anchor('or. č.')}|{_anchor('s. č.')})"
     rf"{_SEP}+\d{{1,4}}(?:/\d{{1,4}})?"
 )
 
 # --------------------------------------------------------------------------- CISLO_BYTU
 _CISLO_BYTU_RE = re.compile(
-    rf"(?i:{diacritic_pattern('byt č.')}|{diacritic_pattern('byt číslo')}"
-    rf"|{diacritic_pattern('číslo bytu')}|{diacritic_pattern('b. č.')}){_SEP}+\d{{1,4}}"
+    rf"(?i:{_anchor('byt č.')}|{_anchor('byt číslo')}"
+    rf"|{_anchor('číslo bytu')}|{_anchor('b. č.')}){_SEP}+\d{{1,4}}"
 )
 
 # --------------------------------------------------------------------------- VCHOD
@@ -210,8 +244,12 @@ _VCHOD_RE = re.compile(
 # under the fold.
 _POSCHODIE_RE = re.compile(
     rf"(?i:"
-    rf"na{_SEP}\d{{1,2}}\. poschod{diacritic_pattern('í')}(?!e)"
-    rf"|\d{{1,2}}\. poschod(?:ie|{diacritic_pattern('í')}(?!e))"
+    # "\. poschod" below had a literal space between the period and "poschod" -- the same
+    # anchor-internal-space bug as SUPISNE_CISLO/CISLO_BYTU above, widened to {_SEP} (this
+    # one isn't a diacritic_pattern(phrase) call, so _anchor() doesn't apply -- the ASCII
+    # gap is widened inline instead).
+    rf"na{_SEP}\d{{1,2}}\.{_SEP}poschod{diacritic_pattern('í')}(?!e)"
+    rf"|\d{{1,2}}\.{_SEP}poschod(?:ie|{diacritic_pattern('í')}(?!e))"
     rf"|poschod(?:ie|{diacritic_pattern('í')}(?!e))(?:{_SEP}*:)?{_SEP}+\d{{1,2}}"
     rf"|{diacritic_pattern('prízemie')}"
     rf")"

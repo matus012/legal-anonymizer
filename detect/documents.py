@@ -137,9 +137,22 @@ def _detect_cislo_pasu(text: str) -> list[Candidate]:
 # and the token (a literal "č.", a colon, spaces) is swallowed by the non-alnum filler;
 # the token itself is captured, and the surface is that TOKEN, not the anchor -- the
 # anchor is match context, never part of the redacted span.
+#
+# _SP_ANCHOR (line_break_mid, break-BETWEEN-words case): the two-word anchor spellings
+# "VP č." / "č. VP" used the module's horizontal-only `_SP` between their two words, so a
+# PDF wrap landing exactly there (routine -- it's the only space in a 5-character anchor)
+# killed the whole anchor and left the token unanchored -- VODICSKY_PREUKAZ measured
+# 0.100 under that mutation. Widened locally rather than by touching the shared `_SP`,
+# which also feeds CISLO_OP/CISLO_PASU/ECV's VALUE shapes (out of scope, and those value
+# separators must stay narrow -- widening them would let a line break join two otherwise
+# unrelated document numbers). The `[^A-Za-z0-9]{0,20}` filler between the anchor and the
+# captured token already matches a line break (it excludes only alnum, not whitespace
+# class), so that gap needed no change -- it is not a terminator, just an unbounded-shape
+# any-non-alnum filler capped at 20 chars.
+_SP_ANCHOR = r'\s'
 _VP_RE = re.compile(
     rf"(?:{diacritic_pattern('vodičský preukaz')}|{diacritic_pattern('vodičského preukazu')}"
-    rf"|VP{_SP}{_C}\.|{_C}\.{_SP}VP|{diacritic_pattern('vodičák')})"
+    rf"|VP{_SP_ANCHOR}{_C}\.|{_C}\.{_SP_ANCHOR}VP|{diacritic_pattern('vodičák')})"
     r"[^A-Za-z0-9]{0,20}"
     r"([A-Za-z0-9]{6,10})(?![A-Za-z0-9])",
     re.IGNORECASE,
