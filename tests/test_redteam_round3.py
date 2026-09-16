@@ -166,11 +166,9 @@ def test_r3_b1_inner_content_children_are_not_multiplied(tmp_path: Path) -> None
 
 
 # =========================================================================== B2..B5
-@pytest.mark.xfail(
-    reason="R3-B2: Paragraph.runs is direct <w:r> children only, so a run inside "
-           "<w:hyperlink> is never detected and never redacted",
-    strict=True,
-)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_r3_b2_hyperlink_display_text_must_be_redacted(tmp_path: Path) -> None:
     body = _p(_r(_t("E-mail: ")),
               '<w:hyperlink r:id="rIdH1">' + _r(_t("jan.novak@advokat.sk")) + "</w:hyperlink>")
@@ -178,11 +176,9 @@ def test_r3_b2_hyperlink_display_text_must_be_redacted(tmp_path: Path) -> None:
     _assert_gone(surfaces, "jan.novak@advokat.sk")
 
 
-@pytest.mark.xfail(
-    reason="R3-B3: _redact_cells walks cell.paragraphs (direct children) and doc.tables is "
-           "top-level only, so a table nested in a cell is never visited",
-    strict=True,
-)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_r3_b3_nested_table_must_be_redacted(tmp_path: Path) -> None:
     inner = "<w:tbl><w:tr><w:tc>" + _p(_r(_t("Predávajúci: " + NAME))) + "</w:tc></w:tr></w:tbl>"
     body = ("<w:tbl><w:tr><w:tc>" + _p(_r(_t("Zmluvné strany"))) + inner
@@ -191,11 +187,9 @@ def test_r3_b3_nested_table_must_be_redacted(tmp_path: Path) -> None:
     _assert_gone(surfaces, NAME)
 
 
-@pytest.mark.xfail(
-    reason="R3-B4: doc.paragraphs is direct <w:p> children of <w:body>, so a paragraph "
-           "inside a content control (<w:sdt>) is never visited",
-    strict=True,
-)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_r3_b4_content_control_paragraph_must_be_redacted(tmp_path: Path) -> None:
     body = "<w:sdt><w:sdtPr/><w:sdtContent>" + _p(_r(_t("Predávajúci: " + NAME))) + \
            "</w:sdtContent></w:sdt>"
@@ -203,11 +197,9 @@ def test_r3_b4_content_control_paragraph_must_be_redacted(tmp_path: Path) -> Non
     _assert_gone(surfaces, NAME)
 
 
-@pytest.mark.xfail(
-    reason="R3-B5: _redact_textboxes uses txbx.findall('w:p') — direct children only — so a "
-           "table inside a textbox is never visited",
-    strict=True,
-)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_r3_b5_table_inside_textbox_must_be_redacted(tmp_path: Path) -> None:
     inner = "<w:tbl><w:tr><w:tc>" + _p(_r(_t("Podpis: " + NAME))) + "</w:tc></w:tr></w:tbl>"
     body = _p(_r('<w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox>'

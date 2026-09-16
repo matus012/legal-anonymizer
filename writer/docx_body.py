@@ -39,6 +39,7 @@ from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 from lxml import etree
 
 from detect.config import DetectConfig
@@ -152,6 +153,48 @@ def _rebuild_run(run, fragments: list[tuple[str, str]]) -> None:
     parent.remove(r_elem)
 
 
+# ------------------------------------------------------------------ WHOLE-TREE TRAVERSAL
+# Every <w:p> under a root, in document order, INCLUDING the ones python-docx's direct-child
+# views cannot reach: inside a nested table, inside a content control (<w:sdt>), inside a
+# textbox, inside a table inside a textbox.
+#
+# A <w:p> cannot contain another <w:p> in WordprocessingML (a table is a SIBLING of the
+# paragraphs around it, never a child of one), so a descendant walk visits each exactly once
+# and no paragraph is processed twice. Merged table cells share ONE <w:tc> in the XML, so they
+# also arrive exactly once -- the identity de-duplication the old per-cell walk needed is not
+# needed here, because the duplication it guarded against was an artefact of row.cells minting
+# a proxy per grid position.
+def _all_paragraph_elements(root):
+    return root.findall(".//" + qn("w:p"))
+
+
+# Where a paragraph actually sits, for the report's location tag. Checked innermost-first: a
+# table inside a textbox is a TEXTBOX, because that is the thing a reviewer needs to go and
+# look at.
+_LOCATION_ANCESTORS = ((qn("w:txbxContent"), "textbox"), (qn("w:tbl"), "table_cell"))
+
+
+def _paragraph_location(p_elem, default: str) -> str:
+    node = p_elem.getparent()
+    while node is not None:
+        for tag, location in _LOCATION_ANCESTORS:
+            if node.tag == tag:
+                return location
+        node = node.getparent()
+    return default
+
+
+def _paragraph_runs(p_elem):
+    """Every <w:r> inside this paragraph, in document order, including runs nested inside
+    <w:hyperlink>, <w:sdt>, <w:smartTag> and <w:fldSimple>.
+
+    Paragraph.runs returns only DIRECT children, so a hyperlinked e-mail address was not even
+    part of the text detect() was given -- it could not be found, let alone removed. Word
+    auto-hyperlinks every address and URL as you type.
+    """
+    return p_elem.findall(".//" + qn("w:r"))
+
+
 def _redact_paragraph(
     paragraph, known_entities, labelmap, location: str = "body",
     decisions: RedactionDecisions | None = None,
@@ -161,7 +204,9 @@ def _redact_paragraph(
     ``location`` (one of the fixed vocabulary strings, matching GT surface_part). The default is
     ``"body"``, the safe fallback for an un-tagged call — every real caller now passes
     ``location`` explicitly, including ``_redact_cells`` for body table cells."""
-    runs = list(paragraph.runs)
+    # Every run in the paragraph, nested ones included -- NOT paragraph.runs, which is a
+    # direct-child view and silently omits anything inside a <w:hyperlink> or a <w:sdt>.
+    runs = [Run(r, paragraph) for r in _paragraph_runs(paragraph._p)]
     if not runs:
         return
 
@@ -453,29 +498,26 @@ def _redact_docx(
         if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
             _strip_notes_tracked_changes(rel.target_part)
 
-    # 1) top-level body paragraphs (W1). Pass "body" explicitly — _redact_paragraph's default is
-    #    now "body" too (see its docstring), but every caller names its location regardless.
-    for paragraph in doc.paragraphs:
-        _redact_paragraph(paragraph, known_entities, labelmap, "body", decisions=decisions, config=config)
-
-    # 2) body tables' cells.
-    for table in doc.tables:
-        _redact_cells(table, known_entities, labelmap, decisions=decisions, config=config)
-
-    # 3) header/footer paragraphs + their tables, across every section. The location tag
-    #    follows the part (header vs footer), including for tables inside a header/footer.
+    # ONE descendant walk per part, replacing the four direct-child walks this used to do
+    # (body paragraphs, body tables' cells, header/footer paragraphs and tables, textboxes).
+    # Each <w:p> is visited exactly once and tags itself by where it sits, so a nested table,
+    # a content control and a table inside a textbox are all covered without a special case
+    # for each -- and adding one more container shape needs no new traversal at all.
+    roots = [(doc.element.body, doc, "body")]
     for section in doc.sections:
-        for hf, loc in ((section.header, "header"), (section.footer, "footer")):
-            for paragraph in hf.paragraphs:
-                _redact_paragraph(paragraph, known_entities, labelmap, loc, decisions=decisions, config=config)
-            for table in hf.tables:
-                _redact_cells(table, known_entities, labelmap, loc, decisions=decisions, config=config)
+        roots.append((section.header._element, section.header, "header"))
+        roots.append((section.footer._element, section.footer, "footer"))
 
-    # 4) VML textboxes anywhere: body part, then every header/footer part.
-    _redact_textboxes(doc.element.body, doc, known_entities, labelmap, decisions=decisions, config=config)
-    for section in doc.sections:
-        for hf in (section.header, section.footer):
-            _redact_textboxes(hf._element, hf, known_entities, labelmap, decisions=decisions, config=config)
+    for root, parent, default_location in roots:
+        for p_elem in _all_paragraph_elements(root):
+            _redact_paragraph(
+                Paragraph(p_elem, parent),
+                known_entities,
+                labelmap,
+                _paragraph_location(p_elem, default_location),
+                decisions=decisions,
+                config=config,
+            )
 
     # 5) footnotes / endnotes / comments — each a SEPARATE OPC part, not in document.xml (W3).
     #    The location tag follows the note part type.
