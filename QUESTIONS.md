@@ -191,3 +191,36 @@ trailing house number, split across DOCX runs) scores 70/70 = 1.000.
 adjectival `-ej` ending (off `-á`/`-a`), OR give `detect/gazetteer.py::_street_hits` a second,
 adjective-aware stem pass — either widens recall on this shape but needs re-checking against
 the discriminator `detect/declension.py` protects (`Kováč` vs `Kováčskej` must stay distinct).
+
+
+## Q14 — the corpus's docx/pdf pairs are not the same document, and are NOT being fixed tonight
+**The fact:** `corpus/generate.py` derives a per-format seed (`seed*1000 + i*10 + f_idx`), so
+`kupna_zmluva_000.docx` (seed 42000) and `kupna_zmluva_000.pdf` (seed 42001) are built from
+different RNG streams. Verified: 46 vs 40 ground-truth PII surfaces, 3 in common, and those
+three are coincidental repeats. The corpus is 140 DIFFERENT documents named as though it were
+70 documents in two formats.
+
+**Default chosen:** leave `corpus/generate.py` alone. `eval/cross_format_gate.py` authors its
+own matched fixtures and states in its own output that it is not using `data/synthetic`.
+
+**Why:** making both formats render one shared content plan is a real refactor of `_emit` —
+`DocxBuilder` draws from the same `random.Random` as the content for its split-run decision,
+so the streams diverge the moment a `PiiSpec` is placed and one shared seed would not be
+enough. It would also change every `.gt.json` in the corpus and therefore every gate number in
+the project — recall, the leak gate, the mutation table — in the middle of an unattended
+overnight run, with no owner to confirm the new baselines against. A corpus change is the one
+change that moves every measurement at once, and it should not land unwatched.
+
+**What is NOT affected:** every gate that treats the corpus as 140 independent documents. The
+dual leak gate, per-type recall and the mutation gate are all valid as they stand.
+
+**What IS affected, and should be corrected wherever it is repeated:** any claim of the form
+"the PDF leaked while the DOCX of the same document was clean". Those two files are different
+documents. The defects behind such claims (an NBSP and a line break inside a multi-word anchor)
+were real and independently reproduced — but the DOCX-was-clean half was never evidence.
+
+**To reverse:** refactor `_emit` to build a document CONTENT PLAN once per (doc_type, index)
+from one seed, then render that same plan to each requested format, giving `DocxBuilder` its
+own separate RNG for layout decisions so its draws cannot perturb the content stream. Then
+regenerate, re-baseline every gate deliberately, and point `eval/cross_format_gate.py` at
+`data/synthetic` instead of its own fixtures.
