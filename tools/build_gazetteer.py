@@ -181,6 +181,17 @@ COMMON_WORD_STOPLIST = sorted({
     "Prameň", "Rieka", "Sad", "Sady", "Skala", "Sklené", "Stará", "Staré", "Starý",
     "Stráne", "Stred", "Studená", "Studené", "Vrch", "Vyšné", "Záhrada", "Zálesie",
     "Zemné", "Hviezda", "Dubina", "Brezina", "Breza", "Buk", "Dub", "Lipany",
+    # CALENDAR AND BANKING WORDS that are also real Slovak toponyms. Found by measurement,
+    # not by inspection: KATASTER precision was 0/8 on the corpus and every one of the eight
+    # candidates was "Pondelok" (Monday), a genuine cadastral-area name. "Stvrtok" (Thursday)
+    # is both a municipality and a cadastral area, and "Banka" is both AND is the word a
+    # contract about a bank account uses on every page. None was stoplisted.
+    #
+    # Stoplisting does NOT delete them from the gazetteer: the same word preceded by an
+    # address or cadastral anchor is still matched, because there the context makes it a place.
+    # It only stops the bare word being auto-redacted out of running prose.
+    "Pondelok", "Utorok", "Streda", "Stvrtok", "Stvrtok", "Piatok", "Sobota", "Nedela",
+    "Banka", "Banky",
     # legal-document vocabulary that collides with place or street names
     "Článok", "Príloha", "Strana", "Zmluva", "Predmet", "Cena", "Doba", "Právo", "Súd",
     "Návrh", "Vklad", "List", "Konanie", "Rozhodnutie", "Uznesenie", "Rozsudok",
