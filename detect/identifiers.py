@@ -28,6 +28,27 @@ from .core import Candidate
 
 NBSP = " "
 
+# --------------------------------------------------------------------------- TELEFON
+# Every generated phone carries structure (+421, a leading-0 mobile prefix, or an
+# area/local slash) with a group separator that is a normal space or NBSP (U+00A0),
+# never both collapsed into a bare \s (that would also swallow newlines). A contiguous
+# digit run (RODNE_CISLO, DIC, ICO) is never matched: every alternative below requires
+# a literal separator or slash between digit groups, which a bare digit run lacks.
+# v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
+# a space or an NBSP. That accepted the one spelling the corpus generator writes and
+# rejected every other way the same text reaches us: a TAB (a form-style DOCX table cell is
+# tab-aligned), TWO SPACES (column padding), or a LINE BREAK (a PDF text layer wraps on
+# every page). Measured over 2559 corpus surfaces, a line break in these positions took
+# overall detection robustness to 0.113 and CISLO_KLIENTA to 0.000 -- the very type whose
+# anchor was widened after it leaked a client number out of a wrapped PDF. That earlier fix
+# widened the separator BETWEEN THE WORDS OF AN ANCHOR and not the one between an anchor
+# and its VALUE, so a wrap one word later leaked the same number again.
+#
+# The class below is horizontal whitespace only -- space, NBSP, tab -- with line breaks
+# still EXCLUDED, because a separator INSIDE a surface must not join two lines into one
+# phone number. Anchor-to-value separators are widened to full whitespace separately.
+_SEP = '[^\\S\\n\\r]'
+
 
 def _checksum_verdict(ok: bool, config: DetectConfig) -> tuple[bool, str]:
     """(auto, checksum tag) for a shape-valid surface of a checksum-bearing type."""
@@ -223,7 +244,10 @@ def _detect_dic(text: str) -> list[Candidate]:
 
 
 # --------------------------------------------------------------------------- IBAN
-_IBAN_RE = re.compile(r"(?<![A-Za-z0-9])SK\d{2}(?: ?\d{4}){5}(?!\d)")
+# The group separator was a hardcoded " ?" -- exactly ONE optional space -- so an IBAN
+# pasted from a bank portal with doubled or tabbed grouping was not matched at all.
+# It uses the shared horizontal-whitespace class now, quantified with *.
+_IBAN_RE = re.compile(rf"(?<![A-Za-z0-9])SK\d{{2}}(?:{_SEP}*\d{{4}}){{5}}(?!\d)")
 
 
 def _iban_mod97_ok(compact: str) -> bool:
@@ -235,7 +259,13 @@ def _iban_mod97_ok(compact: str) -> bool:
 def _detect_iban(text: str, config: DetectConfig = DEFAULT) -> list[Candidate]:
     out = []
     for m in _IBAN_RE.finditer(text):
-        compact = m.group(0).replace(" ", "")
+        # Strip ALL whitespace, not just the ASCII space. The group separator widened to any
+        # horizontal whitespace in v1.1, so an IBAN written with TABS reaches here with tabs
+        # still in it -- and _iban_mod97_ok does int(c, 36) over every character, which raises
+        # ValueError on a tab. That is a CRASH in a shipped desktop app, strictly worse than a
+        # missed detection, and it is exactly what the mutation gate caught the moment the
+        # separator was widened.
+        compact = re.sub(r"\s", "", m.group(0))
         auto, checksum = _checksum_verdict(_iban_mod97_ok(compact), config)
         out.append(
             Candidate(
@@ -320,13 +350,6 @@ def _detect_url(text: str) -> list[Candidate]:
     ]
 
 
-# --------------------------------------------------------------------------- TELEFON
-# Every generated phone carries structure (+421, a leading-0 mobile prefix, or an
-# area/local slash) with a group separator that is a normal space or NBSP (U+00A0),
-# never both collapsed into a bare \s (that would also swallow newlines). A contiguous
-# digit run (RODNE_CISLO, DIC, ICO) is never matched: every alternative below requires
-# a literal separator or slash between digit groups, which a bare digit run lacks.
-_SEP = "[  ]"
 _TELEFON_RE = re.compile(
     r"\+421"
     rf"{_SEP}\d{{1,3}}{_SEP}\d{{3,4}}{_SEP}\d{{3,4}}"  # mobile_intl / landline_intl

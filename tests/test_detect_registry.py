@@ -307,9 +307,24 @@ def test_pattern_encoding_parity():
         _SPISOVA_ZNACKA_RE,
     )
 
+    # The NBSP check is now BEHAVIOURAL, not structural. It used to assert that a literal
+    # U+00A0 appeared in the pattern source, which was a proxy for "this pattern handles the
+    # NBSP that Slovak typography puts after 'č.'". v1.1 widened that separator to the class
+    # of horizontal whitespace (space, NBSP, tab; line breaks excluded) after a red-team
+    # round measured a tab-aligned table cell and a wrapped PDF line defeating the old
+    # space-or-NBSP class.
+    # That class MATCHES an NBSP without CONTAINING one, so the structural check would now
+    # fail on a pattern that handles NBSP strictly better than before. Asserting the match is
+    # the thing that was actually meant.
+    #
+    # The diacritic assertions stay structural and stay exactly as they were: they guard
+    # against mojibake in the source, which is a real hazard in this repo's history, and for
+    # that a literal is precisely the right check.
     for pat in (_LV_RE, _PARCELA_RE, _ORSR_VLOZKA_RE):
-        assert NBSP in pat.pattern, pat.pattern
         assert "č" in pat.pattern, pat.pattern
+    assert _LV_RE.search(f"LV č.{NBSP}1234") is not None, "NBSP after 'č.' must still match"
+    assert _LV_RE.search("LV č. 1234") is not None, "a plain space must still match"
+    assert _LV_RE.search("LV č.	1234") is not None, "a tab must now match too (v1.1)"
     assert "„" in _PARCELA_RE.pattern
     assert "“" in _PARCELA_RE.pattern
     assert "ž" in _ORSR_VLOZKA_RE.pattern

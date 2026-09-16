@@ -25,7 +25,20 @@ import unicodedata
 from .config import DEFAULT, DetectConfig
 from .core import Candidate
 
-_SEP = "[  ]"  # NBSP-or-space; every generator separator is one of the two, never \s
+# v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
+# a space or an NBSP. That accepted the one spelling the corpus generator writes and
+# rejected every other way the same text reaches us: a TAB (a form-style DOCX table cell is
+# tab-aligned), TWO SPACES (column padding), or a LINE BREAK (a PDF text layer wraps on
+# every page). Measured over 2559 corpus surfaces, a line break in these positions took
+# overall detection robustness to 0.113 and CISLO_KLIENTA to 0.000 -- the very type whose
+# anchor was widened after it leaked a client number out of a wrapped PDF. That earlier fix
+# widened the separator BETWEEN THE WORDS OF AN ANCHOR and not the one between an anchor
+# and its VALUE, so a wrap one word later leaked the same number again.
+#
+# The class below is horizontal whitespace only -- space, NBSP, tab -- with line breaks
+# still EXCLUDED, because a separator INSIDE a surface must not join two lines into one
+# phone number. Anchor-to-value separators are widened to full whitespace separately.
+_SEP = '[^\\S\\n\\r]'
 
 # --------------------------------------------------------------------------- DATUM
 _MONTH_WORDS = (

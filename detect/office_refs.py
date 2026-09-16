@@ -22,7 +22,20 @@ from .config import DetectConfig
 from .core import Candidate
 
 NBSP = " "
-_SP = f"[ {NBSP}]"  # a literal space or NBSP, exactly where Slovak typography allows one
+# v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
+# a space or an NBSP. That accepted the one spelling the corpus generator writes and
+# rejected every other way the same text reaches us: a TAB (a form-style DOCX table cell is
+# tab-aligned), TWO SPACES (column padding), or a LINE BREAK (a PDF text layer wraps on
+# every page). Measured over 2559 corpus surfaces, a line break in these positions took
+# overall detection robustness to 0.113 and CISLO_KLIENTA to 0.000 -- the very type whose
+# anchor was widened after it leaked a client number out of a wrapped PDF. That earlier fix
+# widened the separator BETWEEN THE WORDS OF AN ANCHOR and not the one between an anchor
+# and its VALUE, so a wrap one word later leaked the same number again.
+#
+# The class below is horizontal whitespace only -- space, NBSP, tab -- with line breaks
+# still EXCLUDED, because a separator INSIDE a surface must not join two lines into one
+# phone number. Anchor-to-value separators are widened to full whitespace separately.
+_SP = '[^\\S\\n\\r]'
 
 
 # --------------------------------------------------------------------------- NAZOV_UCTU
@@ -44,8 +57,22 @@ _SP = f"[ {NBSP}]"  # a literal space or NBSP, exactly where Slovak typography a
 # whitespace, newline included. It is deliberately NOT used in value capture, where a newline
 # is still a terminator -- that is what keeps "value to end of line" meaning end of line.
 _AWS = r"\s+"
+
+# _AVS: the ANCHOR-TO-VALUE separator. _AWS widened the gap BETWEEN THE WORDS OF AN ANCHOR
+# after a wrapped PDF leaked a client number -- but a red-team round then measured that the
+# gap between the ANCHOR and its VALUE was still horizontal-only, so a wrap landing ONE WORD
+# LATER leaked the same number again. CISLO_KLIENTA scored 0.000 under a line-break mutation:
+#     'Cislo klienta: KL-99321'    -> detected
+#     'Cislo klienta:' + newline + 'KL-99321' -> NOTHING
+# A label and its value sitting on two lines is ordinary in every wrapped or tab-aligned
+# document, so this separator is FULL whitespace, line breaks included.
+#
+# This does NOT widen the value TERMINATORS: a newline still ends a value, which is what
+# keeps 'value to end of line' meaning end of line and stops NAZOV_UCTU swallowing the next
+# column. Only the gap BEFORE the value is widened.
+_AVS = r"\s"
 _NAZOV_UCTU_RE = re.compile(
-    rf"(?:názov{_AWS}účtu|majiteľ{_AWS}účtu|vlastník{_AWS}účtu){_SP}*:?{_SP}*"
+    rf"(?:názov{_AWS}účtu|majiteľ{_AWS}účtu|vlastník{_AWS}účtu){_AVS}*:?{_AVS}*"
     rf"([^\n\t]+?)(?={_SP}{{2,}}|\t|\n|$)",
     re.IGNORECASE,
 )
@@ -72,7 +99,7 @@ def _detect_nazov_uctu(text: str) -> list[Candidate]:
 # klienta ...". The value is the single following alphanumeric token, which may itself
 # contain "-" or "/" (client numbers are frequently segmented, e.g. "2024-0091").
 _CISLO_KLIENTA_RE = re.compile(
-    rf"(?:číslo{_AWS}klienta|klientske{_AWS}číslo|zákaznícke{_AWS}číslo|č\.{_AWS}klienta){_SP}*:?{_SP}*"
+    rf"(?:číslo{_AWS}klienta|klientske{_AWS}číslo|zákaznícke{_AWS}číslo|č\.{_AWS}klienta){_AVS}*:?{_AVS}*"
     r"([A-Za-z0-9][A-Za-z0-9\-/]*)",
     re.IGNORECASE,
 )
@@ -105,7 +132,7 @@ def _detect_cislo_klienta(text: str) -> list[Candidate]:
 #       prefix-base in front is not enough).
 # ``bank_codes`` is an OPTIONAL NBS allow-list, wired in by a later round; ``None`` (this
 # round's only caller) means "accept any 4 digits" -- no list is invented or hardcoded here.
-_KOD_BANKY_LABEL_RE = re.compile(rf"kód{_AWS}banky{_SP}*:?{_SP}*(\d{{4}})(?!\d)", re.IGNORECASE)
+_KOD_BANKY_LABEL_RE = re.compile(rf"kód{_AWS}banky{_AVS}*:?{_AVS}*(\d{{4}})(?!\d)", re.IGNORECASE)
 _LEGACY_ACCOUNT_RE = re.compile(r"(?<!\d)\d{1,6}-\d{2,10}/(\d{4})(?!\d)")
 
 
@@ -138,7 +165,7 @@ def _detect_kod_banky(text: str, bank_codes: frozenset[str] | None = None) -> li
 # phrases don't apply.
 _FAX_SEPCHAR = f"[-.{NBSP} ]"
 _FAX_RE = re.compile(
-    rf"(?:faxové číslo|fax č\.|fax){_SP}*:?{_SP}*"
+    rf"(?:faxové číslo|fax č\.|fax){_AVS}*:?{_AVS}*"
     rf"((?:\+421|00421|0)(?:{_FAX_SEPCHAR}?\d){{6,12}})(?!\d)",
     re.IGNORECASE,
 )
