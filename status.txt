@@ -1,23 +1,55 @@
 <<<MORNING BRIEF — overnight run, 2026-09-16 → 2026-09-17>>>
 
-Run still in progress at the time this line was written. Numbers below are the last ones
-actually measured by me, never taken from a subagent's report.
+Run still in progress when this line was written. Every number below was measured by me,
+never taken from a subagent's report.
+
+=========================================================================
+THE ONE THING TO READ IF YOU READ NOTHING ELSE
+=========================================================================
+data/synthetic's kupna_zmluva_000.docx and kupna_zmluva_000.pdf ARE NOT THE SAME DOCUMENT.
+corpus/generate.py gives each FORMAT its own seed, so the two files at the same index come
+from different random streams. I verified it directly: seeds 42000 and 42001, 46 vs 40
+ground-truth surfaces, 3 in common — and those 3 are coincidences, not shared content. The
+corpus is 140 DIFFERENT documents named as though it were 70 documents in two formats.
+
+  WHAT THIS DOES NOT BREAK: every gate that treats the corpus as 140 independent documents.
+  The leak gate, per-type recall and the mutation gate are all still valid.
+
+  WHAT IT DOES BREAK: any sentence of the form "the PDF leaked while the DOCX of the same
+  document was clean". Last night's notes contain two of those. The DEFECTS were real and
+  were reproduced independently (an NBSP and a line break inside a multi-word anchor, both
+  fixed) — but the DOCX-was-clean half of that argument was comparing different documents
+  and was never evidence of anything. I have corrected it wherever it appears.
+
+  NOT FIXED TONIGHT, on purpose. Making both formats render one shared content plan changes
+  every .gt.json and therefore every number in the project. That is the one change that
+  moves all measurements at once, and it should not land at 3am with nobody to confirm the
+  new baselines. QUESTIONS.md Q14 has the exact reversal steps.
 
 =========================================================================
 GATES
 =========================================================================
-  gate                         value                          pass/fail
+  gate                       value                              pass/fail
   ---------------------------------------------------------------------
-  full suite                   1233 passed, 8 skipped         PASS
-  dual leak gate               9 leaks, ALL type=ULICA        FAIL  (see note)
-  mutation gate                8 arms below 0.95              FAIL  (by design)
-  R0 regression (your bug)     20 tests                       PASS
+  full suite                 1272 passed, 8 skipped             PASS *
+  dual leak gate             9 leaks, ALL type=ULICA            FAIL  (see note)
+  mutation gate              8 arms below 0.95                  FAIL  (by design)
+  cross-format consistency   0 unexplained asymmetries          PASS  (see caveat)
+  per-type precision         report only, never gates           n/a
+  perf                       report only                        n/a
+  R0 regression (your bug)   20 tests                           PASS
 
-  LEAK GATE NOTE — READ BEFORE PANICKING. Every one of the 9 is ULICA, and they appeared
-  because ULICA was GIVEN GROUND TRUTH FOR THE FIRST TIME tonight. Last night ULICA had a
-  detector and zero corpus occurrences, so nothing graded it and the gate read zero. The
-  street names were being missed then too; the gate simply had no way to say so. This is
-  the gate starting to work, not the tool getting worse. Every other type is still at zero.
+  * measured before the last round landed; a detector round was still in flight at that
+    moment and its own tests were mid-refactor. Re-run at the end of the run.
+
+  LEAK GATE — READ BEFORE PANICKING. All 9 are ULICA, and they appeared because ULICA was
+  GIVEN GROUND TRUTH FOR THE FIRST TIME tonight. Last night it had a detector and zero
+  corpus occurrences, so nothing graded it and the gate read zero. Those street names were
+  being missed then too; the gate simply had no way to say so. Every other type is at zero.
+
+  CROSS-FORMAT CAVEAT: because of the finding above, this gate authors its own matched
+  docx/pdf fixtures instead of using the corpus, and says so in its own output. It is a
+  real gate on 6 pairs / 90 surfaces, not on 70 documents.
 
 =========================================================================
 MUTATION ROBUSTNESS PER CLASS (blind arm, threshold 0.95)
@@ -31,64 +63,61 @@ MUTATION ROBUSTNESS PER CLASS (blind arm, threshold 0.95)
   cyrillic_homoglyph         0.356     1.000  PASS
   nfd                        0.675     1.000  PASS
   line_break_mid             0.119     0.376  FAIL
-  no_diacritics              0.759     0.757  FAIL  (in progress)
-  all_caps                   0.451     0.444  FAIL  (in progress)
-  lowercase                  0.393     0.386  FAIL  (in progress)
+  no_diacritics              0.759         ?  in flight
+  all_caps                   0.451         ?  in flight
+  lowercase                  0.393         ?  in flight
 
 =========================================================================
-WHAT CHANGED
+WHAT CHANGED (6 commits tonight, none pushed)
 =========================================================================
-ROUND 1 — the architectural fix (commit d063cfe).
-  detect() now runs over a NORMALIZED view of the text and maps every candidate back to
-  ORIGINAL offsets through an index map (new: detect/normalize.py). Invisible characters
-  (category Cf) are deleted, Cyrillic/Greek homoglyphs fold to Latin, whitespace runs
-  collapse, NFD recomposes to NFC.
+1. THE NORMALIZATION LAYER (d063cfe). detect() now runs over a normalized view of the text
+   and maps every candidate back to ORIGINAL offsets through an index map. Invisible
+   characters deleted, homoglyphs folded, whitespace runs collapsed, NFD recomposed.
+   WHY IT COULD NOT BE ONE LINE LIKE THE NBSP FIX: a 1:1 substitution preserves every
+   offset, and both writers CUT THE DOCUMENT at those offsets. Deleting a character shifts
+   every later offset, so the same trick on a zero-width space would not mislabel the
+   output, it would CORRUPT it. Six mutation classes closed at once.
+   Two things are deliberately NOT folded — CASE (some detectors use capitalisation as
+   their only evidence; folding it would turn every capitalized-token rule into a
+   match-everything rule) and DIACRITICS (folding č→c silently widens every Slovak-word
+   pattern at once). Both are being fixed per anchor site instead.
+2. ULICA COVERAGE (ed6fee8). 90 seeded occurrences. Anchored nominative shapes score 1.000;
+   the declined form scores 0.000, and that is a real gap, not a fixture bug — a Slovak
+   street name that is an adjective declines adjectivally (Hlavná → Hlavnej), and the shared
+   stemmer deliberately excludes that ending to keep the surname-vs-adjective discriminator
+   working. The fix belongs in the gazetteer, not the stemmer. Amendment 12.
+3. DETECTOR ISOLATION (26e23d9). Every detector runs in a guard; one that raises loses its
+   own candidates for that unit and nothing else. It is REPORTED, not swallowed — a warning
+   block above the report tables and a red banner in the GUI, because a detector that
+   silently stops producing rows is indistinguishable from a clean document. Fuzzed with
+   control characters, format characters, other-script digits and lone surrogates: zero
+   exceptions. This fired for real within the hour, on a detector another round was
+   mid-refactor on — the app degraded with a warning instead of crashing.
+4. BUNDLED-DATA SELF-CHECK (389bfb3). The .exe now REFUSES TO SCAN if the gazetteer data
+   did not make it into the build, instead of starting normally and silently not redacting
+   any place name or surname. Emptiness is checked, not just existence. Tested by simulating
+   the frozen layout, which is the code path the suite otherwise never runs.
+5. PHASE E GATES (34bfa7c). Per-type precision (report only — the governing rule is recall
+   over precision, and an invented threshold here would start trading away the thing the
+   tool exists for), cross-format consistency (gated), perf (report only).
 
-  WHY THIS WAS NOT DONE LAST NIGHT IN ONE LINE, since the NBSP fix was: a 1:1 substitution
-  preserves every offset, and both writers CUT THE DOCUMENT at those offsets. Deleting a
-  character shifts every later offset, so the same trick applied to a zero-width space
-  would not have mislabelled the output, it would have CORRUPTED it. That needed a map.
-  Six classes closed at once.
-
-  Two things are deliberately NOT normalized, and both refusals are load-bearing:
-    - CASE. detect/orgs.py and the bare-name heuristic use capitalisation as their ONLY
-      evidence. Folding case would not make them case-insensitive; it would turn every
-      capitalized-token rule into a match-everything rule.
-    - DIACRITICS. Folding č→c would silently widen every Slovak-word pattern at once.
-  Both classes are being fixed per anchor site instead, which is where the difference
-  between "an anchor word" and "evidence" is actually visible.
-
-  THE LINE BOUNDARY ALSO SURVIVES, and I found that out by breaking it. Collapsing a wrap
-  to a space broke two detectors in opposite directions: the bare-name heuristic began
-  pairing the last word of one line with the first word of the next (it emitted the
-  auto-redact MENO surface "Novák\nRodne" — a party's surname welded to the label starting
-  the next line, which would have been redacted with it), and the field-label pattern uses
-  [\n\r\t] to terminate a label's VALUE, so with no line breaks left a value ran to the end
-  of the page. Normalization now makes the SPELLING of whitespace uniform and leaves the
-  structure alone.
-
-DEFECTS FOUND WHILE BUILDING IT — both would have scored as IMPROVEMENTS on a recall gate:
- 1. De-duplicating the merged candidates on (type, span) dropped the known-entity MENO in
-    favour of a same-span bare-name guess; flag survival then handed the span to the
-    gazetteer and a PARTY came out labelled [OBEC_1]. The user-supplied name list is called
-    "the single highest-value input in the whole system" in context.md §4.3, and this would
-    have quietly stopped honouring it.
- 2. Extending a character's source range over a deleted neighbour put a trailing INVISIBLE
-    CHARACTER into the reported surface. writer/pdf_body.py relocates every candidate by
-    SEARCHING THE PAGE FOR ITS SURFACE, and the page never drew that character — so the
-    surface could not be found, and an unlocatable auto surface makes the PDF writer refuse
-    to write the file at all.
+A DEFECT I INTRODUCED AND CAUGHT: an intermediate version of the normalization layer
+collapsed line breaks to spaces. That removed the literal \\n that a NAZOV_UCTU value regex
+bounds itself on, so the value ran on and produced a surface the PDF writer could not
+locate — and it made the bare-name heuristic weld the last word of one line to the first
+word of the next. Two detectors, opposite failures, one cause. Fixed; verified by running
+the PDF writer over all 71 corpus PDFs with zero failures. reports/blockers.md records it.
 
 =========================================================================
 OWNER ACTIONS
 =========================================================================
-  1. REBUILD dist\Anonymizer:  python -m PyInstaller anonymizer.spec --noconfirm
-     Then CONFIRM dist\Anonymizer\detect\gazetteer_data\ exists and holds 6 .json files.
-     This fails INVISIBLY: if the data does not land in the frozen app the gazetteer
-     matches nothing, no test notices, and the .exe quietly stops redacting place names.
-     A startup self-check is on tonight's list; until it lands, this check is manual.
+  1. REBUILD dist\\Anonymizer:  python -m PyInstaller anonymizer.spec --noconfirm
+     The app now self-checks its bundled data at startup and refuses to scan without it, so
+     a broken build announces itself instead of failing silently. Still confirm
+     dist\\Anonymizer\\detect\\gazetteer_data\\ holds 6 .json files, and CLEAN-MACHINE TEST
+     IS STILL YOURS — nothing here can substitute for running the real .exe.
   2. PUSH APPROVAL. Nothing has been pushed. Say the word and I hand you the commands.
-  3. OFFICE COMMUNICATION — draft ready to send in office_note.md (Slovak).
+  3. OFFICE COMMUNICATION — draft ready to send, in Slovak, in office_note.md.
 <<<END MORNING BRIEF — everything below is the previous session's record>>>
 
 STATUS — legal-anonymizer
