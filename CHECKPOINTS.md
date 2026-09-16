@@ -59,3 +59,43 @@ exist while the real IBAN leaked. Fixed with `(?<!\d)`/`(?!\d)` guards.
 without diacritics (measured, QUESTIONS.md Q7); ORG, OBEC, KATASTER and ULICA still score 0%
 because their detectors are the next round; and NAZOV_BANKY — a genuine gap the Vyhláška
 482/2011 mapping exposed — is registered but not yet built.
+
+## Phase C + E closed — 2026-09-16
+
+**Gate numbers, all re-run by the orchestrator.** Full suite **889 passed, 8 skipped, 0
+failed**. Dual leak gate **PASS** — 70 docx + 70 pdf, `text_layer=0 scrub=0 other=0` — and
+this time with OBEC and KATASTER *gated* rather than excluded, so the gazetteer, the largest
+single addition of the sprint, is actually measured. Demo: 41 auto + 2 review (docx), 38 + 2
+(pdf), zero leaks in either output against 23 PII needles.
+
+**Phase C** landed the title/role/field-label anchors, the bare-name review heuristic,
+known-entity expansion and the gazetteer (2842 obce, 12000 ulice, 3416 katastrálne územia,
+481 given names, 1169 surnames — all CC0/CC-BY/MIT, provenance in LICENSES.md).
+
+**Phase E was where a gate turned out to have quietly stopped working.** Policy A1 moved
+checksum-invalid identifiers into the auto bucket, which emptied `should_flag` — so
+`FLAG_SURVIVAL_MIN` passed vacuously and, worse, no baseline could trip it any more. A gate
+that cannot fail is not a gate. It now guards the population the shipped detector genuinely
+routes to review: a bare name with no anchor confirming it, 141 across the corpus. Notably,
+**no baseline vector was re-pinned** — all nine matrix tests pass against the existing pins,
+because the pins were always written for the intended behaviour and it was the measurement
+that had drifted. That is stronger evidence than a re-pin would have been.
+
+**Three defects surfaced in this stretch, each invisible to the gates that existed.** Our own
+oracle baseline was leaking 62 real PII strings through PDF revision residue while reporting
+itself clean — a leaky oracle miscalibrates every gate derived from it. Every DOCX output was
+shipping `docProps/thumbnail.jpeg`, a rendered picture of the un-redacted first page, which
+is pixels and therefore something no text extractor could ever have caught. And a corpus
+ground-truth bug of mine had `DocxBuilder.header/footer` overwriting earlier text while still
+recording it, so GT claimed 30 surfaces that were not in the files — inflating recall for
+precisely the types that had vanished.
+
+**Two leaks came from anchor fragility**, and both were found outside the corpus: an NBSP and
+then a line break sitting between the words of a multi-word anchor. In each case the PDF
+leaked while the DOCX of the same document was clean. Both are on the red-team attack list,
+which is the argument for finishing that list rather than trusting the green gate.
+
+**What is NOT closed:** Phase D needs three consecutive clean rounds and has had one; the
+missing-diacritics gap (QUESTIONS.md Q7) is measured and still open; per-type precision,
+mutation robustness, cross-format consistency and perf are not yet gates; ORG and NAZOV_BANKY
+have no detectors.

@@ -71,15 +71,41 @@ High precision. Auto-redacted without review.
 | Suma | Amounts with `€` / `EUR` / `Sk` |
 | Telefónne číslo | Not on their list — **add it**, it is obviously PII |
 
-**Checksum validation is mandatory.** Without it, every 8-digit number in the document
-gets destroyed. With it, precision on these types is effectively 100%.
+| **v1.1 additions** | below |
+| PSČ, adresa, súpisné/orientačné č., č. bytu, vchod, poschodie | address block; ADRESA swallows a trailing PSČ + obec |
+| Číslo OP / cestovného pasu / vodičského preukazu | 2 letters + 6 / 7 digits; VP is anchor-required |
+| EČV, VIN | VIN excludes I/O/Q per ISO 3779 |
+| BIC/SWIFT | anchor-required, or country code literally `SK` |
+| Názov účtu, číslo klienta, kód banky, fax | Vyhláška 482/2011 clause (f) and (e) |
+
+**The authoritative type list is Vyhláška MS SR 482/2011 + Inštrukcia 24/2011** (v1.1), not
+the office's own list. The clause-by-clause mapping lives in CONTRACTS_v11.md §12. Clause (i)
+— utajované informácie / obchodné tajomstvo — is **declared out of scope in writing**: it is
+defined by meaning, not by any surface pattern, and a tool that silently skipped it while
+claiming to implement "the vyhláška list" would misrepresent its own coverage.
+
+**Checksum validation is mandatory** — but in v1.1 it is a **TAG, not a FILTER**. v1 routed a
+shape-valid, checksum-INVALID identifier to the review bucket. v1.1 auto-redacts it and
+records `checksum="invalid"` in the report and the review column. A mistyped IČO is still an
+IČO, and leaving it un-redacted because one digit is wrong is the exact failure this tool
+exists to prevent. `strict_checksums=True` restores the v1 behaviour for an office that would
+rather re-tick a few mistyped numbers. The checksum still earns its keep: it is what stops
+every 8-digit number in the document from being *reported* as a validated IČO.
 
 ### 4.2 Gazetteer — closed public lists
 Finite, downloadable, shipped with the app. Not ML.
 
-- **Obce** (municipalities) — ŠÚ SR / ÚGKK list
-- **Katastrálne územia** — ÚGKK list
-- Street-name patterns (`ul.`, `Ulica`, `nám.`, `trieda`, …)
+- **Obce** (municipalities) — Register adries, MV SR (CC0) — 2 842 entries, SHIPPED in v1.1
+- **Katastrálne územia** — ÚGKK SR codelist CL000026 (CC BY 4.0) — 3 416 entries, SHIPPED
+- **Ulice** — Register adries (CC0) — 12 000 entries, SHIPPED. Matched ONLY when followed by
+  a number or preceded by `ul.` / `ulica` / `nám.` / `trieda` / `cesta`: a bare street name
+  collides with too many ordinary Slovak words.
+- Given names (481) and surnames (1 169) — MIT / CC0. A surname alone is REVIEW, not auto.
+
+Entries that are also ordinary Slovak words (`Hora`, `Lipa`, `Most`, `Strana`) are held in a
+stoplist and demoted to the review bucket unless an address keyword or a PSČ independently
+confirms them. Provenance and licence of every list: **LICENSES.md**. Name lists derived from
+the Facebook data breach were rejected outright.
 
 Matched with declension tolerance (§5).
 
@@ -120,8 +146,10 @@ Three layers, in order. No ML in v1.
 1. **Deterministic** (§4.1) — regex + checksum → **auto**, pre-ticked
 2. **Gazetteer** (§4.2) — declension-tolerant lookup → **auto**, pre-ticked
 3. **Known entities** (§4.3) — declension-tolerant lookup → **auto**, pre-ticked
-4. **Low-confidence candidates** — near-miss patterns (e.g. checksum-failing RČ-shaped
-   strings, capitalised unknown tokens in name-like positions) → **review**, unticked
+4. **Low-confidence candidates** → **review**, unticked. In v1.1 this bucket is the
+   BARE-NAME heuristic (2-3 capitalised tokens mid-sentence, not stoplisted, with no title,
+   role or field-label anchor confirming them) plus a surname-only gazetteer hit. It is NO
+   LONGER the checksum-failing identifiers — those are auto-redacted and tagged (§4.1).
 
 ### Why no ML in v1
 A SlovakBERT NER model adds ~500 MB to the `.exe`, slow CPU inference, and a dependency
@@ -247,6 +275,39 @@ something is missed.
 - Must process: body, tables, headers, footers, footnotes, endnotes, comments, textboxes.
 - **Strip tracked changes** (`w:ins`, `w:del`) — deleted text persists in the XML.
 - **Scrub `docProps/core.xml`** (author, last modified by, company).
+- **Delete `docProps/thumbnail.jpeg`** (v1.1). It is a RENDERED PICTURE of page 1. python-docx
+  ships one in its default template and unknown parts are copied through byte-for-byte, so
+  every output carried an image of the un-redacted first page. It is pixels, so no text
+  extractor can see it and no leak test could ever have caught it — it has to be deleted, not
+  graded.
+
+### Leak vectors the v1.1 red team found (redteam/FINDINGS.md)
+The killer leak test is only as good as the extractor behind it: a surface the extractor
+cannot read is a surface the gate has never been asked about, and a leak hiding there greps
+clean. The pre-v1.1 extractor was blind to **16 of 34 DOCX surfaces and 13 of 23 PDF surfaces**
+probed. The ones worth remembering:
+
+- **XML ATTRIBUTE values** were invisible everywhere — `lxml`'s `itertext()` walks text nodes
+  only. That hid image alt text (`wp:docPr/@descr`), and the `w:author` / `w:initials` on every
+  tracked change and comment, which in a law office is the reviewing lawyer's own name.
+- **Separate OPC parts nobody opened**: SmartArt, charts, `customXml/item*.xml` (present in
+  every file python-docx writes), glossary, `word/people.xml`, `word/embeddings/*`.
+- **Relationship targets**: a `mailto:` hyperlink target leaks a name and an address even when
+  the display text has been redacted.
+- **PDF incremental saves** keep the PRIOR revision's objects in the file. `writer/pdf_body.py`
+  saves with `garbage=4, deflate=True`, which genuinely rewrites — this was PROVEN rather than
+  trusted, against a control saved without the flags. `eval/baselines.py` did NOT have the
+  flags, so the harness's own oracle was leaking 62 real PII strings while reporting clean.
+- **PDF text `get_text()` silently drops**: text outside the CropBox, and text in an
+  optional-content layer whose default state is OFF. Both are trivially visible in any viewer.
+- **PDF bookmarks, link URIs, annotation authors, and form field NAMES** (a field named
+  `rodne_cislo_novak` leaks even when empty).
+
+**Anchor fragility is its own leak class.** Anchor-required types are matched by a Slovak
+phrase, and any whitespace variation inside that phrase breaks it. An NBSP between the words,
+and a line break between them, each caused a real leak in a PDF while the DOCX of the same
+document was clean. `detect()` now normalizes NBSP (1:1, so offsets survive) and anchor phrases
+separate their words with `\s+`. **Missing diacritics remain an open gap** — see QUESTIONS.md Q7.
 
 ### PDF
 - **PyMuPDF** (`fitz`). Use `add_redact_annot()` + `apply_redactions()`. This genuinely

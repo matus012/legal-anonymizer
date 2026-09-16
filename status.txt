@@ -1,171 +1,185 @@
 STATUS — legal-anonymizer
-Updated: 2026-09-16 (v1.1 hardening sprint IN PROGRESS — see bottom for owner actions)
+Updated: 2026-09-16, end of the v1.1 hardening sprint session.
 
 =========================================================================
-V1.1 HARDENING SPRINT — live status
+READ THIS FIRST — what is green, what is not, what is yours
 =========================================================================
 
-BASELINE VERIFIED AT SPRINT START (2026-09-16, HEAD 6b956d8):
-  Suite ................ 358 passed, 8 skipped, 0 failed
-  Dual leak gate ....... PASS — 60 docx + 60 pdf, text_layer=0 scrub=0 other=0
-  Both re-run by the orchestrator, not taken from any report.
+GREEN, and I re-ran every one of these myself (never taken from a subagent report):
 
-OPERATING MODEL (unchanged): main session = orchestrator/reviewer. Coder subagents
-implement only — never review, never commit, never push. Orchestrator commits scoped at
-green gates. NO PUSHES without owner OK in chat.
+  Full suite ............ 889 passed, 8 skipped, 0 FAILED
+  Dual leak gate ........ PASS — 70 docx + 70 pdf, text_layer=0 scrub=0 other=0
+                          (OBEC and KATASTER are now GATED, not excluded)
+  DEMO .................. PASS — zero leaks in both formats, see DEMO READY below
+  R0, your field bug .... CLOSED, with a named regression test, proven RED against v1
 
-GOVERNING RULE (unchanged): recall over precision. Leak test = zero, non-negotiable.
+NOT GREEN / NOT DONE — the honest list is below under "NOT DONE". Nothing there is a
+leak; the leak gate is zero. They are missing FEATURES and missing GATES.
 
-FROZEN INTERFACE CONTRACT: CONTRACTS_v11.md (repo root). Every v1.1 round builds against
-it. A round that needs a contract changed STOPS and reports; only the orchestrator
-amends it, with a dated Change-log line.
-
-ADDENDUM 1 (owner, 2026-09-16) — ACKNOWLEDGED, merging at phase boundaries:
-  R0 RC 3-digit field bug ....... CLOSED. tests/regression/test_rc_3digit.py — 20 tests,
-                                  all 6 required placements (slash / space / no-separator
-                                  near RC context / table cell / split across docx runs /
-                                  pdf), end-to-end through the real writers. GREEN.
-                                  RED PROVEN against the v1 code pulled from git: v1
-                                  missed ALL SIX placements; the 10-digit control still
-                                  matched. So the test really does gate the reported bug.
-  R1 Vyhláška 482/2011 types .... DONE for NAZOV_UCTU, CISLO_KLIENTA, KOD_BANKY, FAX
-                                  (detect/office_refs.py). Full clause-by-clause mapping
-                                  is CONTRACTS_v11.md §12. NAZOV_BANKY = new gap, still
-                                  to build. Clause (i) out of scope, in writing.
-  R2 public-record policy ....... ACCEPTED as the tie-breaker rule: ORSR/company/IČO/
-                                  court refs/LV/parcel ambiguities all resolve to
-                                  REDACT. No precision work spent on those types.
-  R3 gazetteers ................. DONE — fetched, license-checked, bundled, spec'd into
-                                  the PyInstaller build. See LICENSES.md + below.
-  R4 realistic corpus text ...... pending (after B/C land).
-  R5 keep_list .................. explicitly non-gating; only if the demo is safe.
-
-PHASES (this sprint)
-  A  policy + bugs .............. GREEN (detect side), committed pending W1
-     A1 checksum demote to tag ........ DONE — checksum is now a TAG on every Candidate;
-        shape-matched RC/ICO/IBAN/BANKOVY_UCET auto-redact even when the checksum fails.
-        DetectConfig(strict_checksums=True) restores v1 behaviour.
-     A2 RC 9-digit / separators ....... DONE — this is the office's reported field bug R0.
-        Verified: 9-digit with slash / space / NBSP / contiguous-near-anchor all detected,
-        checksum="n/a" (mod-11 is never applied to the 9-digit form). Phone numbers are NOT
-        stolen by the widened pattern (verified: "0905 123 456" stays TELEFON).
-     A3 corpus GT for new policy ...... DONE — corpus regenerated. 363 checksum-invalid
-        surfaces moved from the review bucket into auto; review bucket is now empty by
-        design; every pii entry carries a "checksum" key.
-  B  new deterministic types .... GREEN (detect side)
-     PSC ADRESA SUPISNE_CISLO CISLO_BYTU VCHOD POSCHODIE   (detect/addresses.py)
-     CISLO_OP CISLO_PASU VODICSKY_PREUKAZ ECV VIN BIC      (detect/documents.py)
-     NAZOV_UCTU CISLO_KLIENTA KOD_BANKY FAX                (detect/office_refs.py)
-     All wired into detect(); 273 detect-side tests green; leak gate still PASS.
-  C  name recall without ML ..... IN FLIGHT (title/role/field-label/bare-name anchors,
-     known-entity expansion). Gazetteer DATA is already built and bundled (below).
-  D  red team ................... IN FLIGHT (extractor hardening — finding surfaces the
-     leak test currently cannot read at all)
-  E  metrics + gates ............ NOT STARTED
-  F  GUI + build + docs ......... PARTIAL — anonymizer.spec now bundles the gazetteer;
-     report-collision fix in flight with the writer round.
-
-GAZETTEERS (ADDENDUM 1 R3) — FETCHED, LICENSE-CHECKED, BUNDLED. Full provenance and the
-rejected sources are in LICENSES.md. Summary:
-  obce ................. 2 842   Register adries / MV SR        CC0 1.0
-  ulice ................ 12 000  Register adries / MV SR        CC0 1.0
-  katastralne uzemia ... 3 416   CL000026 / UGKK SR             CC BY 4.0 (attribution given)
-  first names .......... 481     meniny calendar + CC0 corpus   MIT + CC0 1.0
-  surnames ............. 1 169   slovak-names-generator         CC0 1.0
-  stoplist ............. 79      hand-written (common words)    n/a
-  Total bundle ~330 KB. Regenerate: python -m tools.build_gazetteer
-  REJECTED: any Facebook-leak-derived name list (personal data from a breach — never);
-  NBS bank-code list (not reachable at any documented URL, not in the open-data catalogue)
-  -> KOD_BANKY ships accepting any 4 digits after its anchor, the recall-safe default.
-  FIXED WHILE BUILDING: the address register lists Bratislava and Kosice ONLY by borough,
-  so bare "040 01 Kosice" would have missed the town entirely. Head-city names are now
-  derived from every hyphenated entry.
-
-ADDENDUM 1 R1 — the vyhlaska mapping found a REAL GAP: NAZOV_BANKY (name of the bank) is
-required by Vyhlaska 482/2011 f) and was missing from the type list. Registered; detector
-still to build. Clause i) (utajovane informacie / obchodne tajomstvo) is DECLARED OUT OF
-SCOPE in writing (CONTRACTS_v11.md §12) — it is defined by meaning, not by any pattern, and
-a tool that silently skipped it while claiming to implement "the vyhlaska list" would
-misrepresent its own coverage. THE OFFICE MUST BE TOLD THIS.
-
-TWO CONTRACT ERRORS OF MINE WERE CAUGHT AND CORRECTED (CONTRACTS_v11.md Amendments 2, 3):
-  - I had specified deleting the BANKOVY_UCET containment suppressor. That would have made
-    strict_checksums a SILENT NO-OP for every legacy account number. Caught by the Phase A
-    round, re-verified independently, retracted.
-  - FAX and VODICSKY_PREUKAZ were losing their report labels to TELEFON / CISLO_OP on
-    exact-span ties. Anchor-required types now outrank shape-only ones. No leak either way
-    — both were always redacted — but the report is now checkable against the document.
-
-OPEN, HIGH SEVERITY, NOT YET FIXED (QUESTIONS.md Q7): five anchor-required types
-(KOD_BANKY, NAZOV_UCTU, CISLO_KLIENTA, FAX, ADRESA-via-"so sidlom") MISS when a document is
-typed WITHOUT diacritics, which Slovak legal documents frequently are. Measured, not
-assumed. Handed to the red-team phase as one systematic fix (a shared diacritic-folding
-anchor helper), not ten separate regex patches.
+YOUR ACTIONS TOMORROW (nothing is blocked on you tonight):
+  1. dist\Anonymizer was NOT rebuilt this session. Rebuild + clean-machine test are
+     yours, as agreed:
+         python -m PyInstaller anonymizer.spec --noconfirm
+     anonymizer.spec now bundles detect/gazetteer_data/*.json. THIS IS THE THING MOST
+     LIKELY TO BREAK THE BUILD, AND IT FAILS INVISIBLY: if the data files do not land in
+     the frozen app the gazetteer matches nothing, no test notices, and the .exe quietly
+     stops redacting place names. After building, confirm that
+     dist\Anonymizer\detect\gazetteer_data\ exists and holds 6 .json files.
+  2. Nothing has been pushed. Four commits are waiting. Say the word and I hand you the
+     push commands.
+  3. Tell the office two things in writing (liability, not cosmetics):
+     - Clause (i) of Vyhláška 482/2011 — utajované informácie / obchodné tajomstvo — is
+       OUT OF SCOPE. It is defined by MEANING, not by any pattern, so no regex or
+       gazetteer can decide it. A tool claiming to implement "the vyhláška list" while
+       silently skipping it would misrepresent its own coverage.
+     - Scans and signatures/stamps remain out of scope (unchanged from v1).
 
 =========================================================================
 DEMO READY: C:\Users\matus\A_MAIN\ws\013_legal_anonymizer_sk\legal-anonymizer\demo
 =========================================================================
-Rebuild + re-run it any time with:   python -m tools.make_demo
+Rebuild + re-run any time:   python -m tools.make_demo
 
-A synthetic kupna zmluva with EVERY v1.1 type seeded, in .docx AND .pdf, driven through
-the GUI's own functions (scan_file -> build_decisions -> export_file). Files:
-    kupna_zmluva_demo.docx / .pdf                 the inputs
-    kupna_zmluva_demo_anon.docx / .pdf            the redacted outputs
-    kupna_zmluva_demo_anon_docx_report.txt        \ the Phase F collision fix: the two
-    kupna_zmluva_demo_anon_pdf_report.txt         / reports no longer overwrite each other
+A synthetic kúpna zmluva with EVERY v1.1 type seeded, in .docx AND .pdf, driven through
+the GUI's own functions (scan_file -> build_decisions -> export_file).
+    kupna_zmluva_demo.docx / .pdf              the inputs
+    kupna_zmluva_demo_anon.docx / .pdf         the redacted outputs
+    kupna_zmluva_demo_anon_docx_report.txt     \ the Phase F collision fix — these two
+    kupna_zmluva_demo_anon_pdf_report.txt      / no longer overwrite each other
 
-RESULT: 41 auto-redacted + 2 review rows (docx), 38 + 2 (pdf), and ZERO leaks in either
-output across all 13 / 10 extracted surfaces (checked against 24 PII needles).
-The two review rows are honest, not noise: "Stavby Vychod" (an ORG, detector not built
-yet) and "Strana" (the stoplisted page-footer word).
+RESULT: 41 auto + 2 review rows (docx), 38 + 2 (pdf). ZERO leaks in either output,
+checked against 23 PII needles across every extracted surface. The two review rows are
+honest, not noise: an ORG (detector not built) and "Strana" from a page footer.
 
-The demo itself found four real defects, all now fixed -- including one genuine LEAK: an
-NBSP inside a multi-word anchor meant the PDF kept a client number that the DOCX of the
-same document correctly removed. See CONTRACTS_v11.md Amendments 5 and 6.
-
-NOTE ON "THROUGH THE GUI": the demo drives gui/model.py, which is exactly what the Qt
-wizard calls -- the scan page calls scan_file, the review table is built from the
-ReviewRows it returns, the export button calls export_file. Same code, same document, and
-unlike a screenshot it can be re-run and diffed. The Qt shell was verified live by you in
-Phase 6; this sprint changed only the review table's new checksum column.
+Building the demo found FOUR real defects the 140-document corpus had not, one of them a
+genuine leak. That is the argument for keeping it in the loop.
 
 =========================================================================
-CARRIED OVER FROM v1 (still true)
+WHAT CHANGED THIS SESSION
 =========================================================================
 
-Last feature commit: 6b956d8 "P7 closed: clean-machine test PASSED on no-Python PC"
+PHASE A — policy + your reported bug .......................... DONE
+  The checksum is a TAG, not a filter. A shape-matched RČ/IČO/IBAN/legacy account is
+  auto-redacted whatever its checksum says, tagged valid/invalid/n-a;
+  strict_checksums=True restores v1 behaviour. A mistyped IČO is still an IČO.
+  R0: the pre-1954 nine-digit rodné číslo (YYMMDD/XXX) has NO check digit; v1 both
+  required four digits after the slash and applied mod-11 regardless. Fixed, gated by
+  tests/regression/test_rc_3digit.py across all six placements you listed. Proven RED
+  against the v1 code pulled from git: v1 missed ALL SIX; the 10-digit control matched.
+  Ground truth moved with the policy — 363 checksum-invalid surfaces moved into the auto
+  class, so recall now SCORES them instead of rewarding the tool for skipping them.
 
-  1-2 corpus generator + eval harness ............ DONE
-  3   detection (4.1 deterministic, 5 declension,
-      4.3 known entities) ........................ DONE for v1
-      gazetteer (4.2) ............................ UN-DEFERRED by owner -> v1.1 Phase C
-  4   DOCX writer ................................ DONE (leak gate green)
-  5   PDF writer ................................. DONE (leak gate green)
-  6   GUI (PySide6 3-page wizard) ................ DONE (owner-verified live)
-      run:  .\.venv\Scripts\python.exe -m gui
-  7   PyInstaller + clean-machine install test ... DONE, CERTIFIED 2026-07-21
-      Build: python -m PyInstaller anonymizer.spec --noconfirm
-      Output: dist\Anonymizer\ (one-folder, windowed, ~165 MB; copy the WHOLE folder)
-  8   field acceptance (office, ~10 real docs) ... round 1 done -> produced R0 above
+PHASE B — new deterministic types ............................. DONE (16 types)
+  PSC ADRESA SUPISNE_CISLO CISLO_BYTU VCHOD POSCHODIE
+  CISLO_OP CISLO_PASU VODICSKY_PREUKAZ ECV VIN BIC
+  NAZOV_UCTU CISLO_KLIENTA KOD_BANKY FAX
+  detect() gained generalised overlap resolution: composite types nest and cross now, and
+  both writers slice by character offsets, so an unresolved overlap corrupts the document
+  rather than merely mislabelling it.
 
-KNOWN QUIRKS / OPEN ITEMS
-  - Same-stem .docx + .pdf in one batch collide on <stem>_anon_report.txt. Fix is
-    Phase F (<stem>_docx_report.txt / <stem>_pdf_report.txt).
-  - Exe is unsigned: SmartScreen "Run anyway" expected on first launch per machine.
-  - context.md §12 owner items: confirm to office (a) scans NOT supported v1,
-    (b) signatures/stamps NOT removed v1, (c) doc volume/week, (d) Acrobat Pro?
+PHASE C — name recall without ML .............................. DONE
+  Title / role / field-label anchors, a bare-name review heuristic, known-entity
+  expansion (female forms, declension stems, initials, diacritic-stripped, p./pán/pani)
+  and the gazetteer. OBEC/KATASTER/ULICA are detected and now GATED.
+
+PHASE D — red team ............................................ PARTIAL (see NOT DONE)
+  One full round. 29 findings; the extractor was blind to 16 of 34 DOCX surfaces and 13
+  of 23 PDF surfaces probed. All now read. Detail in redteam/FINDINGS.md.
+
+PHASE E — metrics + gates ..................................... PARTIAL (see NOT DONE)
+  The flag-survival gate had become unfireable and now guards a real population again.
+
+PHASE F — GUI + build + docs .................................. PARTIAL (see NOT DONE)
+  Report filename collision FIXED. PyInstaller spec bundles the gazetteer.
+
+GAZETTEERS (your R3) — fetched, license-checked, bundled, ~330 KB:
+  obce 2842 + ulice 12000 .... Register adries, MV SR ........ CC0 1.0
+  katastrálne územia 3416 .... CL000026, ÚGKK SR ............. CC BY 4.0 (attributed)
+  first names 481 ............ meniny calendar + CC0 corpus ... MIT + CC0
+  surnames 1169 .............. slovak-names-generator ......... CC0 1.0
+  Regenerate: python -m tools.build_gazetteer      Provenance: LICENSES.md
+  REJECTED: Facebook-leak-derived name lists (personal data from a breach — never, in a
+  tool whose purpose is protecting personal data). NBS bank-code list: not reachable at
+  any documented URL, so KOD_BANKY accepts any 4 digits after its anchor — recall-safe.
+  FIXED while building: the register lists Bratislava and Košice ONLY by borough, so a
+  bare "040 01 Košice" would have missed the town entirely.
+
+YOUR R1 FOUND A REAL GAP: Vyhláška 482/2011 clause (f) requires NÁZOV BANKY, missing from
+the type list entirely. Registered; detector not built. Full clause-by-clause mapping is
+CONTRACTS_v11.md §12.
+
+=========================================================================
+DEFECTS FOUND THAT NOTHING WAS LOOKING FOR
+=========================================================================
+Each was invisible to every gate that existed at the time.
+
+ 1. OUR OWN ORACLE WAS LEAKING. eval/baselines.py saved PDFs without garbage collection,
+    so greedy_redactor — the baseline every gate is calibrated against — leaked 62 real
+    PII strings through revision residue while reporting itself clean. A leaky oracle
+    miscalibrates every gate derived from it. FIXED.
+ 2. EVERY OUTPUT CARRIED A PICTURE OF PAGE ONE. python-docx ships docProps/thumbnail.jpeg
+    in its default template and the writer copied it through byte-for-byte. It is pixels,
+    so no text extractor can see it and no gate could ever have caught it. Now deleted.
+ 3. THE DIGIT/LETTER BOUNDARY. A regex \b does not sit between a digit and a letter, so
+    the 8-digit IČO pattern never matched "43235222IBAN" — every numeric identifier was
+    invisible when glued to a letter, which is what a PDF text layer produces at cell
+    boundaries. On one corpus string the IBAN went undetected while the widened RČ
+    pattern claimed a fragment of it. FIXED.
+ 4. A LINE BREAK INSIDE AN ANCHOR — AND IT LEAKED. A corpus PDF wrapped between the words
+    of "Číslo klienta", so the anchor missed and the client number survived into the
+    redacted text layer, while the DOCX of the same document was clean. FIXED.
+ 5. AN NBSP INSIDE AN ANCHOR — ALSO A LEAK, found by the demo. Same shape as 4. FIXED
+    once in detect(), for every detector at once.
+ 6. A FAX NUMBER REPORTED AS A RODNÉ ČÍSLO. "055 123 4567" parsed as 6+4 digits and
+    passed the month/day check. Redacted either way, but a report that mislabels what it
+    removed cannot be checked against the document. FIXED.
+ 7. A CORPUS GROUND-TRUTH BUG OF MINE: DocxBuilder.header/footer overwrote earlier text
+    while still recording it in ground truth, so GT claimed 30 surfaces that were not in
+    the files — inflating recall for the vanished types. FIXED in the builder, so the
+    invariant holds for every future template.
+ 8. TWO OF MY OWN CONTRACT CLAUSES WERE WRONG, and a round refused to implement one of
+    them (deleting the BANKOVY_UCET suppressor would have made strict_checksums a silent
+    no-op for every legacy account number). Both retracted — CONTRACTS_v11.md Am. 2, 3.
+
+=========================================================================
+NOT DONE — read this before calling v1.1 finished
+=========================================================================
+  - PHASE D IS NOT FINISHED. The brief asks for THREE CONSECUTIVE CLEAN red-team rounds;
+    one ran. The mutation matrix (zero-width chars, soft hyphen, Cyrillic homoglyphs,
+    NFC/NFD, ALL CAPS, missing diacritics) is NOT built as a corpus mutation suite. Two
+    attacks from that list were found by hand and fixed (NBSP, line break) — which is
+    evidence the rest of the list is worth running, not evidence it is clean.
+  - MISSING DIACRITICS: MEASURED, STILL OPEN (QUESTIONS.md Q7). Five anchor-required
+    types miss when a document is typed WITHOUT diacritics, which Slovak legal documents
+    frequently are. The NBSP and line-break fixes did NOT address this. HIGH severity for
+    recall. Needs one shared diacritic-folding anchor helper, not ten regex patches.
+  - PHASE E metrics incomplete: per-type PRECISION, mutation-robustness ratios,
+    cross-format consistency (same doc as docx and pdf -> same hit set) and perf numbers
+    (time/page, peak RSS) are NOT implemented as gates. Per-type RECALL exists.
+  - ORG and NAZOV_BANKY detectors are not built. ORG is the last Class A exclusion left
+    in the leak gate.
+  - GUI advanced toggles (redact_all_dates / anonymize_output_names / strict_checksums)
+    are NOT in gui/app.py. The config is threaded through the model and both writers, so
+    this is a panel, not plumbing. anonymize_output_names is not implemented at all.
+  - R4 (realistic text from public court decisions, 6 new doc types) NOT started — the
+    APIs returned 403/404 this session. R5 (keep_list) NOT started, as agreed.
+  - Corpus is seed-deterministic and gitignored. Regenerate with:
+      python -m corpus.generate --n 70 --out data/synthetic --seed 42 --formats docx,pdf
+      (NOTE --n 70, not 60: there is a seventh document type now, zmluva_v11.)
+
+=========================================================================
+WHERE THINGS ARE
+=========================================================================
+  CONTRACTS_v11.md ...... frozen interfaces + 6 dated amendments. Read before any round.
+  QUESTIONS.md .......... every open question, the default I chose, how to reverse it.
+  CHECKPOINTS.md ........ phase-boundary gate numbers.
+  redteam/FINDINGS.md ... 29 findings, the attributability rule, 6 KNOWN BLIND SPOTS.
+  LICENSES.md ........... provenance + licence of every bundled list; rejected sources.
+  handoff.md ............ round protocol + lesson history (untracked, single copy).
 
 BLOCKERS: none.
 
-Corpus is gitignored + seed-deterministic; regenerate with:
-  python -m corpus.generate --n 60 --out data/synthetic --seed 42 --formats docx,pdf
-
-Detailed round protocol + lesson history: handoff.md (untracked, single copy).
-Open questions + the default chosen for each: QUESTIONS.md.
-Phase-boundary gate numbers: CHECKPOINTS.md.
-
-=========================================================================
-OWNER ACTIONS (nothing here is blocking the sprint)
-=========================================================================
-  Tomorrow 17:00 — rebuild verify + clean-machine test of dist\Anonymizer are YOURS.
-  Nothing else is waiting on you. No push has been made; none will be without your OK.
+Four commits this session, NONE PUSHED:
+  7e480ad  Phase E: refill the flag-survival gate, fix a corpus GT bug and a PDF leak
+  cc83d21  NBSP-tolerant anchors, RC/gazetteer precision fixes, demo harness
+  0bc9f7f  Phases A-D: checksum policy, 16 new types, name recall, extractor hardening
+  d2e5708  infra: frozen contract, gazetteer data (license-checked), red-team findings
