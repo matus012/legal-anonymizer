@@ -22,6 +22,7 @@ from ..pii import (
     ico,
     phone,
     registry_refs,
+    review_bucket,
     rodne_cislo,
     url,
 )
@@ -75,6 +76,25 @@ def identifier_specs(rng: random.Random) -> dict:
         "decoy_a": PiiSpec(decoy_a, kind_a.upper(), auto_redact=False, should_flag=False),
         "decoy_b": PiiSpec(decoy_b, kind_b.upper(), auto_redact=False, should_flag=False),
     }
+
+
+def seed_review_bucket(b, rng: random.Random) -> None:
+    """Seed THE review-bucket item: a bare, unanchored personal name (§7).
+
+    Under v1.1 policy A1 the checksum is a TAG, not a filter, so no identifier routes to
+    review any more and ``should_flag`` would otherwise be empty for the whole corpus —
+    leaving ``EvalOutcome.flag_survival_ok`` to pass vacuously with no baseline able to fire
+    it. This is the population that replaces it, and it is the honest one: it is what the
+    shipped detector actually emits with ``auto=False`` (see ``corpus/pii/review_bucket.py``
+    for the verification against ``detect()``).
+
+    Only the NAME is PII; the surrounding sentence is ordinary text that must survive — so
+    the frame is split around the surface and emitted as plain string items, exactly as the
+    anchored generators are handled elsewhere.
+    """
+    placed, spec = review_bucket.make_bare_name(rng)
+    head, _, tail = placed.partition(spec.surface)
+    b.paragraph([head, spec, tail])
 
 
 def declension_showcase(b, person: Person, entity_id: str) -> None:
@@ -181,6 +201,7 @@ def seed_all(b, rng, bank, rec, *, is_docx: bool, ids: dict, people: list) -> No
     b.paragraph(["Ďalšie údaje: ", ids["dic"], ", ", ids["ic_dph"], ", ", ids["lv"], ", ",
                  ids["parcela"], ", ", ids["spis"], ", ", ids["orsr"], ", dátum ", ids["datum"], "."])
     b.paragraph(["Referencie (nie PII): ", ids["decoy_b"], "."])
+    seed_review_bucket(b, rng)
     capitalised_common_decoys(b, rng, p_main, place)
     if is_docx:
         seed_docx_failure_modes(b, rng, bank, ids, p_extra, e_extra)

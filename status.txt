@@ -103,6 +103,33 @@ assumed. Handed to the red-team phase as one systematic fix (a shared diacritic-
 anchor helper), not ten separate regex patches.
 
 =========================================================================
+DEMO READY: C:\Users\matus\A_MAIN\ws\013_legal_anonymizer_sk\legal-anonymizer\demo
+=========================================================================
+Rebuild + re-run it any time with:   python -m tools.make_demo
+
+A synthetic kupna zmluva with EVERY v1.1 type seeded, in .docx AND .pdf, driven through
+the GUI's own functions (scan_file -> build_decisions -> export_file). Files:
+    kupna_zmluva_demo.docx / .pdf                 the inputs
+    kupna_zmluva_demo_anon.docx / .pdf            the redacted outputs
+    kupna_zmluva_demo_anon_docx_report.txt        \ the Phase F collision fix: the two
+    kupna_zmluva_demo_anon_pdf_report.txt         / reports no longer overwrite each other
+
+RESULT: 41 auto-redacted + 2 review rows (docx), 38 + 2 (pdf), and ZERO leaks in either
+output across all 13 / 10 extracted surfaces (checked against 24 PII needles).
+The two review rows are honest, not noise: "Stavby Vychod" (an ORG, detector not built
+yet) and "Strana" (the stoplisted page-footer word).
+
+The demo itself found four real defects, all now fixed -- including one genuine LEAK: an
+NBSP inside a multi-word anchor meant the PDF kept a client number that the DOCX of the
+same document correctly removed. See CONTRACTS_v11.md Amendments 5 and 6.
+
+NOTE ON "THROUGH THE GUI": the demo drives gui/model.py, which is exactly what the Qt
+wizard calls -- the scan page calls scan_file, the review table is built from the
+ReviewRows it returns, the export button calls export_file. Same code, same document, and
+unlike a screenshot it can be re-run and diffed. The Qt shell was verified live by you in
+Phase 6; this sprint changed only the review table's new checksum column.
+
+=========================================================================
 CARRIED OVER FROM v1 (still true)
 =========================================================================
 

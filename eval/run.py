@@ -25,11 +25,15 @@ from .metrics import CorpusMetrics, evaluate
 # tell redaction from destruction. Retention and decoy-survival close that hole.
 RETENTION_MIN = 0.98
 DECOY_SURVIVAL_MIN = 0.95
-# §4.1 hard negatives (checksum-invalid RČ/IČO/IBAN) must reach the review bucket — i.e.
-# survive in the output — 100% of the time. Any loss is a checksum-invalid identifier
-# silently auto-redacted, the exact bug §4.1's checksum requirement exists to prevent
-# (context.md rejection round 2, defect D5). No tolerance: this is a correctness bug, not a
-# recall trade-off.
+# Review-bucket surfaces (``should_flag``) must reach review — i.e. survive in the output —
+# 100% of the time. Any loss is a weak-evidence surface silently AUTO-redacted instead of
+# being put in front of a human (context.md rejection round 2, defect D5). No tolerance: this
+# is a correctness bug, not a recall trade-off.
+#
+# v1.1 (CONTRACTS_v11.md §6/§7, policy A1): the population is NO LONGER checksum-invalid
+# RČ/IČO/IBAN — the checksum became a tag and those moved into the auto bucket. It is now
+# whatever a detector flags ``auto=False`` on WEAK evidence, i.e. the bare-name heuristic of
+# detect/name_anchors.py. The gate is unchanged; only its population moved.
 FLAG_SURVIVAL_MIN = 1.0
 
 
@@ -66,9 +70,10 @@ class EvalOutcome:
 
     @property
     def flag_survival_ok(self) -> bool:
-        """§4.1/§8.3 flag gate: should_flag surfaces (checksum-invalid RČ/IČO/IBAN) must
-        survive in the output 100%% of the time, per type — they belong in the review bucket,
-        never auto-redacted (defect D5)."""
+        """§8.3 flag gate: should_flag surfaces must survive in the output 100%% of the time,
+        per type — they belong in the review bucket, never auto-redacted (defect D5). Under
+        v1.1 that population is the bare-name heuristic's (CONTRACTS_v11.md §7), not the v1
+        checksum-invalid identifiers."""
         return all(
             t.flag_survival is None or t.flag_survival >= FLAG_SURVIVAL_MIN
             for t in self.metrics.per_type.values()

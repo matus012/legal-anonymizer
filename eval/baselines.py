@@ -14,7 +14,7 @@ green (pinned in ``tests/test_baseline_gate_matrix.py``):
 * :func:`scorch_redactor` / :func:`empty_output_redactor` destroy every character (emit a
   valid but empty file). Both trip THREE gates together — ``retention_ok`` (no non-PII
   content survived), ``decoy_survival_ok`` (every decoy destroyed) and ``flag_survival_ok``
-  (every checksum-invalid ``should_flag`` hard-negative destroyed). Tripping three gates is
+  (every ``should_flag`` review-bucket item destroyed). Tripping three gates is
   the CORRECT behaviour of total destruction, not a defect: the point (context.md rejection,
   defect 1a) is that zero leaks and 100%% recall must NOT read as success when the file was
   simply annihilated — the exact scenario the original harness passed with ``VERDICT: PASS``
@@ -25,13 +25,14 @@ green (pinned in ``tests/test_baseline_gate_matrix.py``):
   not success when nothing was produced (context.md rejection, defect 1b).
 * :func:`greedy_redactor` is an ORACLE (it reads the ground truth alongside each input to
   know exactly what to redact — no detection logic, no stage-3 dependency): it redacts every
-  ``auto_redact`` surface AND every checksum-invalid RODNE_CISLO/ICO/IBAN (``should_flag``
-  hard negatives that must reach the review bucket, never be auto-redacted, per §4.1). It
-  leaks nothing, retains everything else, preserves every decoy, produces output for every
-  doc — so it trips the FLAG-SURVIVAL gate (a checksum-invalid identifier auto-redacted
-  instead of routed to review, context.md rejection round 2, defect D5). A harness that
-  cannot catch an over-eager detector auto-redacting a checksum-invalid identifier is exactly
-  the bug §4.1's checksum requirement exists to prevent.
+  ``auto_redact`` surface AND every ``should_flag`` surface (the review bucket: items that
+  must reach a human, never be auto-redacted). Under v1.1 policy A1 that bucket is the
+  bare-name heuristic's population (CONTRACTS_v11.md §6/§7), not the v1 checksum-invalid
+  identifiers. It leaks nothing, retains everything else, preserves every decoy, produces
+  output for every doc — so it trips the FLAG-SURVIVAL gate (a review-bucket item
+  auto-redacted instead of routed to review, context.md rejection round 2, defect D5). A
+  harness that cannot catch an over-eager detector auto-redacting a review-bucket item is
+  exactly the bug the flag gate exists to prevent.
 * :func:`corrupt_output_redactor` writes an output with the correct extension but bytes that
   are not a valid docx/pdf, so eval/extract.py cannot open it. Trips the INTEGRITY gate
   (no_integrity_failures) alone: nothing opens, so nothing is graded and there is nothing
@@ -109,7 +110,6 @@ def refuse_all_redactor(src: Path, dst: Path) -> None:
 
 # ---------------------------------------------------------------- greedy_redactor (oracle)
 _GREEDY_LABEL = "[REDACTED]"
-_FLAG_TYPES = {"RODNE_CISLO", "ICO", "IBAN"}
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _TEXT_TAGS = (_W + "t", _W + "delText")
 _DOCX_CONTENT_PART = re.compile(
@@ -119,11 +119,19 @@ _DOCX_METADATA_PART = {"docProps/core.xml", "docProps/app.xml"}
 
 
 def _greedy_targets(gt: dict) -> list[str]:
-    """Every auto_redact surface, plus every checksum-invalid RODNE_CISLO/ICO/IBAN
-    (should_flag) — the over-eager behaviour §8.3's flag gate exists to catch."""
+    """Every auto_redact surface, plus EVERY should_flag surface — the over-eager behaviour
+    §8.3's flag gate exists to catch.
+
+    This used to key on a hard-coded ``_FLAG_TYPES = {"RODNE_CISLO", "ICO", "IBAN"}``, the
+    v1 review bucket. Policy A1 (CONTRACTS_v11.md §6/§7) moved every checksum-invalid
+    identifier into the AUTO bucket, so that set stopped matching anything and the oracle
+    silently stopped tripping the gate it exists to trip. It is not re-pinned to the new
+    population's type name (``MENO``) either: the oracle's defining behaviour is "auto-redacts
+    things that belong in review", which is a statement about the BUCKET, not about which
+    types happen to land in it this sprint. Keying on the bucket is what stops this baseline
+    rotting again the next time the routing policy moves."""
     surfaces = {
-        p["surface"] for p in gt["pii"]
-        if p["auto_redact"] or (p["should_flag"] and p["type"] in _FLAG_TYPES)
+        p["surface"] for p in gt["pii"] if p["auto_redact"] or p["should_flag"]
     }
     return sorted(surfaces)
 
@@ -326,7 +334,7 @@ def _redact_pdf(src: Path, dst: Path, targets: list[str], decoys: list[str]) -> 
 
 def greedy_redactor(src: Path, dst: Path) -> None:
     """Oracle redactor: reads ``<src>.gt.json`` alongside ``src`` and redacts every
-    auto_redact surface AND every checksum-invalid RODNE_CISLO/ICO/IBAN, while protecting
+    auto_redact surface AND every should_flag (review-bucket) surface, while protecting
     every decoy surface from substring collateral damage. See module docstring — must fail
     the §8.3 flag-survival gate alone."""
     gt_path = src.parent / f"{src.name}.gt.json"

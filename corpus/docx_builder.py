@@ -153,15 +153,34 @@ class DocxBuilder:
                                         {"row": r, "col": c})
 
     # ---------------------------------------------------------------- header / footer
+    def _append_hf(self, para, items: list, part: str) -> None:
+        """Append to a header/footer paragraph instead of REPLACING its text.
+
+        These two used to assign ``para.text = ...``, which silently destroyed whatever an
+        earlier call had put there -- while ``_record_items`` still recorded BOTH sets in
+        ground truth. A template that seeded a header twice therefore produced a corpus whose
+        GT claimed PII the file did not contain, which inflates recall for the vanished types
+        (they can never be "found still present", so they score as correctly removed).
+
+        Measured when zmluva_v11 began calling header()/footer() after the shared seeding had
+        already used them: 3 phantom surfaces x 10 documents = 30 ground-truth entries with no
+        text behind them, inflating EMAIL/URL/TELEFON recall on those files.
+
+        Appending makes the invariant unconditional -- everything recorded is in the file --
+        rather than leaving it as a rule each template has to remember."""
+        existing = para.text
+        if existing:
+            para.text = existing + " "
+            para.add_run(_text_of(items))
+        else:
+            para.text = _text_of(items)
+        self._record_items(items, part, {})
+
     def header(self, items: list) -> None:
-        para = self.doc.sections[0].header.paragraphs[0]
-        para.text = _text_of(items)
-        self._record_items(items, "header", {})
+        self._append_hf(self.doc.sections[0].header.paragraphs[0], items, "header")
 
     def footer(self, items: list) -> None:
-        para = self.doc.sections[0].footer.paragraphs[0]
-        para.text = _text_of(items)
-        self._record_items(items, "footer", {})
+        self._append_hf(self.doc.sections[0].footer.paragraphs[0], items, "footer")
 
     # ---------------------------------------------------------------- footnotes / endnotes
     def footnote(self, anchor_para: str, items: list) -> None:

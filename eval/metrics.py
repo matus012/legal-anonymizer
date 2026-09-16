@@ -9,8 +9,9 @@ failure:
 * ``auto_redact``  → must be redacted. ``recall`` = fraction removed from the output.
 * ``decoy``        → must NOT be redacted. ``decoy_survival`` = fraction still present.
 * ``should_flag``  → must reach the review bucket, i.e. survive in the output (never
-  auto-redacted) — checksum-invalid RČ/IČO/IBAN are the §4.1 hard negatives this exists to
-  protect. ``flag_survival`` = fraction still present.
+  auto-redacted). Under v1.1 (CONTRACTS_v11.md §6/§7) that class is the WEAK-evidence
+  bare-name population of detect/name_anchors.py, not the v1 checksum-invalid identifiers —
+  policy A1 moved those into the auto class. ``flag_survival`` = fraction still present.
 
 There is no per-type "precision" metric. It was deleted (context.md rejection round 2,
 defect D4): decoys are always recorded under a DIFFERENT type from the auto-redact type they
@@ -72,10 +73,10 @@ class TypeMetrics:
 
     @property
     def flag_survival(self) -> float | None:
-        """Fraction of this type's should_flag surfaces (checksum-invalid — must reach the
+        """Fraction of this type's should_flag surfaces (weak evidence — must reach the
         review bucket, never be auto-redacted) still present in the output. ``None`` when the
         type has none. Gated per type in ``eval/run.py`` at 100%% (defect D5): any loss here
-        is a checksum-invalid RČ/IČO/IBAN silently auto-redacted, exactly what §4.1 forbids."""
+        is a review-bucket surface silently auto-redacted, exactly what the gate forbids."""
         return None if self.flag_total == 0 else self.flag_retained / self.flag_total
 
 

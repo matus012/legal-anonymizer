@@ -32,8 +32,20 @@ _SP = f"[ {NBSP}]"  # a literal space or NBSP, exactly where Slovak typography a
 # flattened to text), whichever comes first. A single internal space is part of the
 # value (multi-word account names), so the stop condition specifically requires TWO or
 # more consecutive space/NBSP chars, not one.
+# ANCHOR PHRASES MUST SURVIVE A LINE BREAK (v1.1). A multi-word anchor written with a literal
+# space stops matching the moment the renderer wraps the line between its words -- and a PDF
+# does that constantly. Measured on the corpus: zmluva_v11_034.pdf wrapped as
+#     "... BIC FYCWSKZC . Cislo" + a newline + "klienta: 2019-7785 ."
+# so "cislo klienta" did not match, CISLO_KLIENTA was never detected, and the client number
+# LEAKED into the redacted PDF text layer. The DOCX of the same document was clean, because
+# nothing wrapped there. "line break mid-entity" is on the red-team attack list for exactly
+# this reason.
+# _AWS ("anchor word separator") is therefore used between the WORDS OF AN ANCHOR: any run of
+# whitespace, newline included. It is deliberately NOT used in value capture, where a newline
+# is still a terminator -- that is what keeps "value to end of line" meaning end of line.
+_AWS = r"\s+"
 _NAZOV_UCTU_RE = re.compile(
-    rf"(?:názov účtu|majiteľ účtu|vlastník účtu){_SP}*:?{_SP}*"
+    rf"(?:názov{_AWS}účtu|majiteľ{_AWS}účtu|vlastník{_AWS}účtu){_SP}*:?{_SP}*"
     rf"([^\n\t]+?)(?={_SP}{{2,}}|\t|\n|$)",
     re.IGNORECASE,
 )
@@ -60,7 +72,7 @@ def _detect_nazov_uctu(text: str) -> list[Candidate]:
 # klienta ...". The value is the single following alphanumeric token, which may itself
 # contain "-" or "/" (client numbers are frequently segmented, e.g. "2024-0091").
 _CISLO_KLIENTA_RE = re.compile(
-    rf"(?:číslo klienta|klientske číslo|zákaznícke číslo|č\.{_SP}klienta){_SP}*:?{_SP}*"
+    rf"(?:číslo{_AWS}klienta|klientske{_AWS}číslo|zákaznícke{_AWS}číslo|č\.{_AWS}klienta){_SP}*:?{_SP}*"
     r"([A-Za-z0-9][A-Za-z0-9\-/]*)",
     re.IGNORECASE,
 )
@@ -93,7 +105,7 @@ def _detect_cislo_klienta(text: str) -> list[Candidate]:
 #       prefix-base in front is not enough).
 # ``bank_codes`` is an OPTIONAL NBS allow-list, wired in by a later round; ``None`` (this
 # round's only caller) means "accept any 4 digits" -- no list is invented or hardcoded here.
-_KOD_BANKY_LABEL_RE = re.compile(rf"kód banky{_SP}*:?{_SP}*(\d{{4}})(?!\d)", re.IGNORECASE)
+_KOD_BANKY_LABEL_RE = re.compile(rf"kód{_AWS}banky{_SP}*:?{_SP}*(\d{{4}})(?!\d)", re.IGNORECASE)
 _LEGACY_ACCOUNT_RE = re.compile(r"(?<!\d)\d{1,6}-\d{2,10}/(\d{4})(?!\d)")
 
 

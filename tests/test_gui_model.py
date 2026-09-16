@@ -53,9 +53,21 @@ def test_scan_docx_builds_grouped_rows(tmp_path):
     auto = [r for r in scan.rows if r.bucket == "auto"]
     review = [r for r in scan.rows if r.bucket == "review"]
     meno = next(r for r in auto if r.type == "MENO")
-    # detect.known_entities emits one MENO per matched TOKEN: Jan + Novak + Novakovi ->
-    # three occurrences, all bound to ONE group (entity 0) by the declension matcher.
-    assert meno.count == 3
+    # v1: detect.known_entities emitted one MENO per matched TOKEN, so "Jan Novak a
+    # Novakovi" gave three occurrences. v1.1's name detectors emit the WHOLE name as one
+    # wider span ("Jan Novak"), and core's containment resolver drops the narrower token
+    # candidates inside it -- deliberately, because the writers slice by character offsets
+    # and overlapping spans corrupt the output. So the same text is now TWO occurrences:
+    # "Jan Novak" + "Novakovi". The REDACTION is unchanged; the wider span covers strictly
+    # more text.
+    #
+    # What this test is really about is the GROUPING, so that is what it now asserts:
+    # however many occurrences there are, they collapse into ONE row bound to entity 0 (the
+    # declension matcher recognises "Novakovi" as the same party). A review screen grouped
+    # by occurrence instead of by entity is the fatigue trap context.md 9 warns about.
+    assert meno.count == 2
+    assert meno.group == ("MENO", ("entity", 0))
+    assert len([r for r in auto if r.type == "MENO"]) == 1, "one row per party, not per hit"
     assert meno.locations == ("body",)
     assert any(r.type == "DIC" for r in auto)
     assert any(r.type == "RODNE_CISLO" for r in review)

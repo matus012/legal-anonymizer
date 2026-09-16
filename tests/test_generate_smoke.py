@@ -137,9 +137,12 @@ def test_decision_classes_present(corpus):
             else:
                 decoy += 1
     assert auto > 0 and decoy > 0
-    assert flag == 0, (
-        "no corpus surface should route to the review bucket under the default v1.1 policy; "
-        f"found {flag}"
+    assert flag > 0, (
+        "the review bucket must have a population. Policy A1 emptied it of identifiers "
+        "(checksum-invalid surfaces became auto), which left FLAG_SURVIVAL_MIN guarding "
+        "nothing and no baseline able to trip it -- a gate that cannot fail. "
+        "corpus/pii/review_bucket.py refills it with the class that genuinely belongs there: "
+        f"a bare name with no anchor confirming it. Found {flag}."
     )
 
 
