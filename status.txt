@@ -8,8 +8,11 @@ READ THIS FIRST — what is green, what is not, what is yours
 GREEN, and I re-ran every one of these myself (never taken from a subagent report):
 
   Full suite ............ 1142 passed, 8 skipped, 0 FAILED
-  Dual leak gate ........ PASS — 70 docx + 70 pdf, text_layer=0 scrub=0 other=0
-                          (OBEC and KATASTER are now GATED, not excluded)
+  Dual leak gate ........ PASS — 70 docx + 70 pdf, text_layer=0 scrub=0 other=0,
+                          and now with **NO TYPE EXCLUSIONS AT ALL**. Class A is empty:
+                          every type the tool can emit is gated. It began as OBEC,
+                          KATASTER and ORG; the first two left when the gazetteer
+                          shipped, ORG left tonight.
   DEMO .................. PASS — zero leaks in both formats, see DEMO READY below
   R0, your field bug .... CLOSED, with a named regression test, proven RED against v1
 
@@ -25,7 +28,7 @@ YOUR ACTIONS TOMORROW (nothing is blocked on you tonight):
      the frozen app the gazetteer matches nothing, no test notices, and the .exe quietly
      stops redacting place names. After building, confirm that
      dist\Anonymizer\detect\gazetteer_data\ exists and holds 6 .json files.
-  2. Nothing has been pushed. 7 commits are waiting. Say the word and I hand you the
+  2. Nothing has been pushed. 11 commits are waiting. Say the word and I hand you the
      push commands.
   3. Tell the office two things in writing (liability, not cosmetics):
      - Clause (i) of Vyhláška 482/2011 — utajované informácie / obchodné tajomstvo — is
@@ -46,11 +49,11 @@ the GUI's own functions (scan_file -> build_decisions -> export_file).
     kupna_zmluva_demo_anon_docx_report.txt     \ the Phase F collision fix — these two
     kupna_zmluva_demo_anon_pdf_report.txt      / no longer overwrite each other
 
-RESULT: 40 auto + 3 review rows (docx), 38 + 2 (pdf). ZERO leaks in either output,
+RESULT: 41 auto + 2 review rows (docx), 40 + 1 (pdf). ZERO leaks in either output,
 checked against 24 PII needles across every extracted surface. The review rows are honest,
-not noise: an ORG (detector not built), "Strana" from a page footer, and — new, and
-deliberate — the CONTRACT DATE 1.1.2025, which the v1.1 date policy detects but does not
-auto-redact. The DATE OF BIRTH in the same document IS auto-redacted. That is the policy
+not noise: "Strana" from a page footer, and — deliberate — the CONTRACT DATE 1.1.2025,
+which the v1.1 date policy detects but does not auto-redact. (The ORG row that used to sit
+here is gone: "Stavby Východ s.r.o." is now auto-redacted by the new ORG detector.) The DATE OF BIRTH in the same document IS auto-redacted. That is the policy
 working: the date that identifies a person goes, the dates that make the contract readable
 stay, and the reviewer decides.
 
@@ -72,10 +75,12 @@ PHASE A — policy + your reported bug .......................... DONE
   Ground truth moved with the policy — 363 checksum-invalid surfaces moved into the auto
   class, so recall now SCORES them instead of rewarding the tool for skipping them.
 
-PHASE B — new deterministic types ............................. DONE (16 types)
+PHASE B — new deterministic types ............................. DONE (18 types)
   PSC ADRESA SUPISNE_CISLO CISLO_BYTU VCHOD POSCHODIE
   CISLO_OP CISLO_PASU VODICSKY_PREUKAZ ECV VIN BIC
   NAZOV_UCTU CISLO_KLIENTA KOD_BANKY FAX
+  ORG NAZOV_BANKY  (ORG keys on the legal-form suffix — s.r.o., a.s., k.s. — because the
+  name itself is arbitrary; NAZOV_BANKY is the closed list vyhláška 482/2011 (f) requires)
   detect() gained generalised overlap resolution: composite types nest and cross now, and
   both writers slice by character offsets, so an unresolved overlap corrupts the document
   rather than merely mislabelling it.
@@ -209,8 +214,15 @@ NOT DONE — read this before calling v1.1 finished
   - PHASE E metrics incomplete: per-type PRECISION, mutation-robustness ratios,
     cross-format consistency (same doc as docx and pdf -> same hit set) and perf numbers
     (time/page, peak RSS) are NOT implemented as gates. Per-type RECALL exists.
-  - ORG and NAZOV_BANKY detectors are not built. ORG is the last Class A exclusion left
-    in the leak gate.
+  - ULICA has a detector and ZERO corpus coverage — no ground-truth occurrence anywhere, so
+    no gate grades it. A type nothing asks about is untested whether it is excluded
+    explicitly or simply absent, and the second is harder to see. redteam/FINDINGS_ROUND2.md
+    records it as C-2, along with the note that fourteen v1.1 types appear in only 10 of 70
+    documents, so several mutation-table rows move in steps of 0.1 and a 0.700 there is not
+    a precise fraction.
+  - NAZOV_BANKY matches its closed list LITERALLY, not through the Slovak stemmer, so an
+    inflected form ("Slovenskej sporiteľni") is caught only if a banka/banky anchor is also
+    present. Recorded as a known sub-gap, not fixed.
   - R4 (realistic text from public court decisions, 6 new doc types) NOT started — the
     APIs returned 403/404 this session. R5 (keep_list) NOT started, as agreed.
   - Corpus is seed-deterministic and gitignored. Regenerate with:
@@ -229,7 +241,11 @@ WHERE THINGS ARE
 
 BLOCKERS: none.
 
-7 commits this session, NONE PUSHED:
+11 commits this session, NONE PUSHED:
+  cf4775f v1.1: ORG + NAZOV_BANKY detectors, and the leak gate now excludes NOTHING
+  74ca4c2 v1.1 status: record the mutation gate and the eight open mutation classes
+  cfc10f1 v1.1 red-team round 2: a mutation gate that fails, and the separator class it condemned
+  9c1df7a v1.1 status: Phase F done, the dead date flag recorded, demo numbers refreshed
   5acd27d v1.1 Phase F: GUI advanced panel, filename-leak warning, and a DEAD CONFIG FLAG fixed
   c977063 v1.1: give Phase C's anchored names corpus coverage, and reject un-gradeable fixtures
   1a72fbd v1.1 docs: context.md 4/6/10, checkpoints, and the owner-facing status

@@ -99,3 +99,43 @@ which is the argument for finishing that list rather than trusting the green gat
 missing-diacritics gap (QUESTIONS.md Q7) is measured and still open; per-type precision,
 mutation robustness, cross-format consistency and perf are not yet gates; ORG and NAZOV_BANKY
 have no detectors.
+
+## Session close — 2026-09-16
+
+**Final gate numbers, every one re-run by the orchestrator.** Full suite **1142 passed, 8
+skipped, 0 failed**. Dual leak gate **PASS** — 70 docx + 70 pdf, `text_layer=0 scrub=0
+other=0`, and for the first time **with no type exclusions at all**. Demo: 41 auto + 2 review
+(docx), 40 + 1 (pdf), zero leaks against 25 PII needles. A third gate now exists and **fails
+on purpose**: `python -m eval.mutation_gate` measures detection robustness under 11 text
+mutations and exits non-zero while any is below 0.95.
+
+**The exclusion list is the finding worth carrying forward.** `CLASS_A_TYPES` began as "types
+v1 genuinely cannot detect". OBEC and KATASTER left when the gazetteer shipped. ORG left
+tonight — and had been detectable, partially, since the Phase C round, because
+`detect/name_anchors.py` emits ORG from the `Obchodné meno:` field label while the contract's
+ownership table listed that module as MENO-only and the gate's own comment said ORG stayed
+excluded "until its detector exists". An exclusion outlived its reason by several rounds and
+nothing noticed, because an excluded type produces no failures. The gate now prints its real
+exclusion set rather than a fixed string, so stale text cannot hide one again.
+
+**Red-team round 2 falsified an orchestrator expectation, which was its most valuable
+output.** I predicted `line_break_mid` would be clean — I had widened the anchor separator
+after a wrapped PDF leaked a client number. It measured 0.113, and `CISLO_KLIENTA`, the exact
+type that fix was written for, was at 0.000: I had widened the gap *between the words of an
+anchor* and not the gap between the *anchor and its value*, so a wrap one word later leaked
+the same number again. Fixed. The same gate then caught a crash I introduced while fixing it
+— a widened separator let a tab into an IBAN, and the mod-97 checksum does `int(c, 36)`,
+which raises on a tab. An exception in a shipped desktop app is strictly worse than a missed
+detection, and the gate refused to print a number for that column rather than a misleading
+one.
+
+**Eight mutation classes remain open**, each with a measured number and a named fix. The two
+largest need an offset-mapped normalization in `detect()` rather than a regex widening: the
+NBSP fix was safe *because* it is one character for one character and preserves the offsets
+both writers slice by, and deleting a zero-width character is not. The sharpest single case in
+the round is a Cyrillic homoglyph in an email address, which is not missed but **silently
+truncated** — the tool redacts `.novak@advokat.sk` and leaves `jan` standing beside it.
+
+**What this session did not finish:** Phase D wants three consecutive clean rounds and got two
+non-clean ones; per-type precision, cross-format consistency and perf are not gates; ULICA has
+a detector and no corpus coverage; `dist\Anonymizer` was not rebuilt.
