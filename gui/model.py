@@ -29,6 +29,15 @@ MSG_INCOMPLETE = (
     "Dokument sa nedá úplne redigovať automaticky ({n} nájditeľných miest zlyhalo). "
     "Súbor je z dávky vylúčený — spracujte ho manuálne."
 )
+MSG_DATA_MISSING = (
+    "NÁSTROJ NIE JE POUŽITEĽNÝ — chýbajú zabudované údaje.\n\n"
+    "{problems}\n\n"
+    "Hľadané v: {where}\n\n"
+    "Bez týchto súborov by nástroj naďalej vyzeral, že funguje, ale PRESTAL BY\n"
+    "odstraňovať obce, ulice, katastrálne územia, mená a priezviská — bez akejkoľvek\n"
+    "chybovej hlášky. Skenovanie je preto zablokované. Preinštalujte aplikáciu alebo\n"
+    "kontaktujte správcu."
+)
 MSG_DETECTOR_FAILED = (
     "POZOR: časť rozpoznávania na tomto dokumente ZLYHALA ({names}). Čo by tieto\n"
     "detektory našli, NIE JE v tabuľke nižšie a NEBUDE odstránené. Dokument\n"

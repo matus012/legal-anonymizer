@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -31,7 +32,9 @@ from PySide6.QtWidgets import (
 )
 
 from detect.config import DetectConfig
+from detect.selfcheck import describe_environment, verify_bundled_data
 from gui.model import (
+    MSG_DATA_MISSING,
     MSG_DETECTOR_FAILED,
     MSG_FILENAME_LEAK,
     SUPPORTED,
@@ -101,6 +104,14 @@ class MainWindow(QMainWindow):
         # Tests drive the wizard on one thread; the app never sets this.
         self.blocking: bool = False
 
+        # STARTUP SELF-CHECK (detect/selfcheck.py). Runs before any page is built, because
+        # its answer decides whether the scan button may ever be enabled. If the bundled
+        # gazetteer data did not make it into this build the application would otherwise
+        # keep working perfectly and just stop redacting every place name and surname in
+        # the country -- with no crash, no dialog, and a report that looks ordinary, only
+        # shorter. Refusing to scan is the only honest response to that.
+        self.data_problems: list[str] = verify_bundled_data()
+
         self.pages = QStackedWidget()
         self.setCentralWidget(self.pages)
         self.pages.addWidget(self._build_input_page())   # 0
@@ -111,10 +122,35 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.statusBar().addPermanentWidget(self.progress)
 
+        if self.data_problems:
+            self._show_data_problems()
+
+    def _show_data_problems(self) -> None:
+        """Say it twice, on purpose: a banner that stays on screen and a modal at startup.
+
+        The modal cannot be missed and the banner cannot be dismissed and forgotten. This
+        is the one condition where the tool is actively unsafe to trust, so it is the one
+        place where being irritating is correct."""
+        text = MSG_DATA_MISSING.format(
+            problems="\n".join(f"  - {p}" for p in self.data_problems),
+            where=describe_environment(),
+        )
+        self.data_warn.setText(text)
+        self.data_warn.show()
+        self.scan_btn.setEnabled(False)
+        QMessageBox.critical(self, "Chýbajúce údaje", text)
+
     # ------------------------------------------------------------ page 0: input
     def _build_input_page(self) -> QWidget:
         page = QWidget()
         lay = QVBoxLayout(page)
+        # Sits at the very top of the first page the user sees, above everything.
+        self.data_warn = QLabel()
+        self.data_warn.setWordWrap(True)
+        self.data_warn.setStyleSheet(
+            "color: #ffffff; background: #a00000; font-weight: bold; padding: 8px;")
+        self.data_warn.hide()
+        lay.addWidget(self.data_warn)
         lay.addWidget(_bold(QLabel("Vyberte dokumenty na anonymizáciu (.docx, .pdf)")))
         lay.addWidget(QLabel("Súbory sem môžete pretiahnuť myšou."))
 
@@ -149,7 +185,7 @@ class MainWindow(QMainWindow):
                 self.files.append(p)
         self.file_list.clear()
         self.file_list.addItems(self.files)
-        self.scan_btn.setEnabled(bool(self.files))
+        self.scan_btn.setEnabled(bool(self.files) and not self.data_problems)
 
     def dragEnterEvent(self, event):
         md = event.mimeData()
@@ -367,6 +403,12 @@ class MainWindow(QMainWindow):
         return [ln.strip() for ln in self.known_edit.toPlainText().splitlines() if ln.strip()]
 
     def start_scan(self, blocking: bool = False) -> None:
+        if self.data_problems:
+            # Belt and braces. The button is disabled, but start_scan is also called
+            # directly by tests and could be reached by a future code path; a guard that
+            # only lives in the UI layer is a guard that will eventually be bypassed.
+            self._show_data_problems()
+            return
         self._persist_current()
         known = self._known()
         config = self.detect_config()
@@ -525,7 +567,7 @@ class MainWindow(QMainWindow):
                     self.chk_strict, self.chk_all_dates, self.chk_anon_names):
             btn.setEnabled(not busy)
         if not busy:
-            self.scan_btn.setEnabled(bool(self.files))
+            self.scan_btn.setEnabled(bool(self.files) and not self.data_problems)
 
     def _run_jobs(self, jobs, blocking, on_result, on_all_done) -> None:
         if blocking:
