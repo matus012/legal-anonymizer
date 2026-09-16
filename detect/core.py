@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from .config import DEFAULT, DetectConfig
+from .normalize import normalize
 
 
 @dataclass(frozen=True)
@@ -260,36 +261,12 @@ def _resolve_partial_overlaps(candidates: list[Candidate]) -> list[Candidate]:
     return kept
 
 
-def detect(
-    text: str,
-    known_entities: list[str] | None = None,
-    config: DetectConfig | None = None,
+def _run_detectors(
+    norm: str, known_entities: list[str], config: DetectConfig
 ) -> list[Candidate]:
-    if known_entities is None:
-        known_entities = []
-    if config is None:
-        config = DEFAULT
-
-    # ---------------------------------------------------------------- NBSP NORMALIZATION
-    # Every detector runs over a copy in which U+00A0 (NBSP) has been replaced by an ordinary
-    # space. The replacement is 1 character for 1 character, so EVERY OFFSET IS PRESERVED and
-    # the candidates' start/end still index the ORIGINAL text -- which is what both writers
-    # slice by. The surface is re-sliced from the original below, so a reported surface keeps
-    # the document's real bytes, NBSP included.
-    #
-    # Why this is needed: several detectors are ANCHOR-REQUIRED, and their anchors are
-    # multi-word Slovak phrases -- "cislo klienta", "nazov uctu", "kod banky", "trvale bytom",
-    # "so sidlom", "rodne cislo". Slovak typography routinely puts an NBSP between such words,
-    # and a PDF text layer produces them constantly. Measured on the demo contract: the PDF
-    # rendered "Cislo klienta:" with an NBSP INSIDE the phrase, the anchor did not match, and
-    # the client number KL-99321 survived into the redacted PDF while the DOCX of the same
-    # document was clean. Fixing it once here beats widening a dozen regexes by hand and then
-    # discovering the thirteenth.
-    #
-    # Note this is NOT the same as folding NBSP out of a SURFACE: a phone number's NBSPs are
-    # still matched, still part of its surface, and still redacted exactly as before.
-    norm = text.replace(" ", " ") if " " in text else text
-
+    """Every layer-1 detector, over one normalized view. Split out of detect() so the two
+    views (see detect()) run the IDENTICAL battery -- a detector added to one and forgotten in
+    the other would be a type that silently stops working on wrapped text."""
     candidates: list[Candidate] = []
     candidates.extend(_detect_rc(norm, config))
     candidates.extend(_detect_ico(norm, config))
@@ -302,9 +279,9 @@ def detect(
     candidates.extend(_detect_telefon(norm))
     candidates.extend(detect_datetime_amounts(norm, config))
     candidates.extend(detect_registry(norm))
-    # v1.1 type modules (CONTRACTS_v11.md §8). Each is self-contained and emits only its own
+    # v1.1 type modules (CONTRACTS_v11.md 8). Each is self-contained and emits only its own
     # types; every cross-type collision they create with each other or with the v1 detectors
-    # is settled by the resolution stages below, never inside a detector module.
+    # is settled by the resolution stages in detect(), never inside a detector module.
     candidates.extend(detect_addresses(norm, config))
     candidates.extend(detect_documents(norm, config))
     candidates.extend(detect_office_refs(norm, config))
@@ -312,20 +289,81 @@ def detect(
     candidates.extend(detect_gazetteer(norm, config))
     candidates.extend(detect_orgs(norm, config))
     candidates.extend(detect_known_entities(norm, known_entities))
+    return candidates
+
+
+def detect(
+    text: str,
+    known_entities: list[str] | None = None,
+    config: DetectConfig | None = None,
+) -> list[Candidate]:
+    if known_entities is None:
+        known_entities = []
+    if config is None:
+        config = DEFAULT
+
+    # ------------------------------------------------------ NORMALIZATION WITH AN OFFSET MAP
+    # Every detector runs over NORMALIZED text; every candidate is then cut on ORIGINAL
+    # offsets through the map. detect/normalize.py documents what is folded, and the two
+    # things deliberately NOT folded there (case, diacritics) with the reasons.
+    #
+    # v1.1 originally did this for U+00A0 ONLY, with a 1:1 str.replace, because a 1:1
+    # substitution PRESERVES EVERY OFFSET and both writers slice the document by offset. That
+    # closed the NBSP class (robustness 1.000) and could not be extended by one more
+    # character: deleting a character shifts every later offset, and a redaction cut at a
+    # shifted offset removes the WRONG CHARACTERS -- it corrupts the document rather than
+    # mislabelling it. The mutation gate measured what that limit cost -- zero_width 0.070,
+    # soft_hyphen 0.070, line_break_mid 0.119, cyrillic_homoglyph 0.356, nfd 0.675 -- and
+    # those classes needed a MAP, not a wider regex. This is the map.
+    #
+    # TWO VIEWS, NOT ONE. The second view additionally JOINS a token a renderer broke across
+    # a line ("FYC\nWSKZC" -> "FYCWSKZC"). That is a GUESS, not a canonical equivalence, so it
+    # runs as an EXTRA pass whose candidates are merged with the base pass's rather than
+    # replacing them: the plain reading is always still on the table and the joined reading
+    # can only ADD detections. It is skipped entirely when it would change nothing, which is
+    # every text without a line break inside a token -- i.e. essentially every DOCX paragraph.
+    views = [normalize(text)]
+    joined = normalize(text, join_wrapped=True)
+    if joined.text != views[0].text:
+        views.append(joined)
+
+    # ------------------------------------------------- BACK TO ORIGINAL OFFSETS
+    # Mapped BEFORE resolution, unlike v1.1's single-view arrangement. With more than one view
+    # the collisions that matter are between candidates found in DIFFERENT coordinate systems,
+    # and those only become comparable once both sides are expressed in the original's. So the
+    # battery runs per view, every candidate is immediately mapped home, and the resolution
+    # stages below then see one coherent set -- exactly as they did when there was one view.
+    #
+    # The surface is re-sliced from the ORIGINAL text, so a reported surface carries the
+    # document's real characters: NBSP, soft hyphen, zero-width space and all. That matters
+    # beyond cosmetics -- writer/pdf_body.py relocates each candidate by SEARCHING FOR ITS
+    # SURFACE on the page, so a surface that is not byte-faithful to the document cannot be
+    # found and cannot be redacted.
+    candidates: list[Candidate] = []
+    seen: set[Candidate] = set()
+    for view in views:
+        for c in _run_detectors(view.text, known_entities, config):
+            a, b = view.span(c.start, c.end)
+            mapped = replace(c, start=a, end=b, surface=text[a:b])
+            # Deduplicated on the WHOLE candidate, never on (type, span). Two candidates can
+            # share a type and a span and still be different claims -- a bare-name heuristic
+            # emits MENO(auto=False) on exactly the span where a user-supplied known entity
+            # emits MENO(auto=True), and the resolution stages below exist to choose between
+            # them. Keying the dedupe on (type, span) kept whichever detector happened to run
+            # first: measured, it dropped the known-entity MENO, flag survival then preferred
+            # the confident gazetteer claim on the same span, and a party came out labelled
+            # [OBEC_1]. Candidate is frozen, so its own identity is the right key.
+            if mapped in seen:
+                continue
+            seen.add(mapped)
+            candidates.append(mapped)
+
     candidates = _suppress_identifiers_inside_bankovy_ucet(candidates)
     candidates = _resolve_flag_survival(candidates)
     candidates = _resolve_type_precedence(candidates)
     candidates = _resolve_containment(candidates)
     candidates = _resolve_partial_overlaps(candidates)
     candidates.sort(key=lambda c: (c.start, c.end))
-
-    # Re-slice every surface from the ORIGINAL text so a reported surface carries the
-    # document's real characters (NBSP included), not the normalized stand-ins.
-    if norm is not text:
-        candidates = [
-            c if c.surface == text[c.start : c.end] else replace(c, surface=text[c.start : c.end])
-            for c in candidates
-        ]
 
     # post-conditions, CONTRACTS_v11.md §3 -- all five, every call
     assert candidates == sorted(candidates, key=lambda c: (c.start, c.end))

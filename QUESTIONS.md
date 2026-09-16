@@ -102,3 +102,70 @@ no longer suppressed by an adjacent letter. Verified both directions, 170 detect
 text per paragraph and per table cell, so the glued form never arose there. It only appeared
 when detection was run over `eval.extract`'s own no-separator concatenation. Two different
 strings, two different answers — worth remembering when reading any recall number.
+
+## Q9 — cross-format consistency gate: real corpus pairs vs. a hand-authored fixture
+**Default chosen:** `eval/cross_format_gate.py` does NOT run against `data/synthetic`. It
+authors its own small matched-pair fixture corpus (6 pairs) directly from
+`corpus.docx_builder`/`corpus.pdf_builder`/`corpus.pii.*`, with literal PII content computed
+once and placed identically into both builders.
+**Why:** `corpus/generate.py::_emit` derives a DIFFERENT RNG seed per format
+(`seed*1000 + i*10 + f_idx`), so `kupna_zmluva_000.docx` and `kupna_zmluva_000.pdf` are not the
+same logical document today — verified: 53 vs 49 GT rows, almost no surface overlap. Even
+re-deriving one shared seed would not fix it: `corpus.docx_builder.DocxBuilder` consumes the
+SAME `random.Random` instance for its split-run decision as the template uses for content, so
+the two builders' draw counts diverge as soon as the first PiiSpec is placed. This is a
+`corpus/` defect, out of scope for this eval/tests-only round (task rules: read `corpus/`
+only). Reported to the orchestrator in the same-session final message.
+**To reverse:** once `corpus/generate.py` derives one seed per logical document AND
+`DocxBuilder`'s internal RNG is decoupled from the template's content RNG (two independent
+`random.Random` instances), replace `eval/cross_format_gate.py`'s `_author_pair`/`_content`
+with a loader over `data/synthetic/*.docx` / `*.pdf` pairs by shared index, keeping
+`judge_pair` (the actual comparison logic) unchanged — it already takes GT dicts + extracted
+text and does not care where they came from.
+
+## Q10 — perf report memory instrument: tracemalloc instead of psutil
+**Default chosen:** `eval/perf_report.py` measures peak memory with `tracemalloc` (stdlib),
+labelled explicitly as Python-heap only, not process RSS.
+**Why:** `psutil` is not installed in `.venv` and is not in `requirements.txt`; adding a new
+dependency is out of scope for an eval-only round. `tracemalloc` needs no install and the
+report says plainly what it does NOT capture (native allocations in `lxml`/`python-docx`'s
+zip writer/PyMuPDF).
+**To reverse:** add `psutil` to `requirements.txt`, then swap `_measure()` to poll
+`psutil.Process().memory_info().rss` (e.g. from a background thread while the redaction call
+runs) for a true peak-RSS number.
+
+
+## Q11 — the normalization layer does NOT fold case
+**Default chosen:** `detect/normalize.py` normalizes format characters, homoglyphs,
+whitespace runs, NFKC compatibility forms and NFD→NFC. It does **not** case-fold.
+**Why:** case-folding the text globally would not make the detectors case-insensitive — it
+would destroy the only signal several of them have. `detect/orgs.py` keys on a CAPITALIZED
+token beside a legal-form suffix and the bare-name heuristic in `detect/name_anchors.py`
+does the same; on lower-cased text those rules stop being "find a name" and become "match
+everything". The `all_caps` / `lowercase` classes are being fixed per anchor site instead,
+where the difference between "an anchor word" (case carries nothing) and "evidence" (case is
+the whole claim) is visible in the code.
+**To reverse:** add a `casefold` step to `normalize()` and delete the capitalisation
+requirement from `detect/orgs.py` and `name_anchors.py`'s `_CAP`, replacing it with some
+other evidence — there is currently none, which is the point.
+
+## Q12 — a wrap is rejoined only inside a run of CAPITALS AND DIGITS
+**Default chosen:** `detect()`'s second view (`normalize(text, join_wrapped=True)`) deletes a
+line break between two alphanumeric runs only when NEITHER run contains a lowercase letter.
+A wrap inside a mixed-case or lowercase token is left as a line break, and a whitespace
+character that is not a line break (a TAB, an NBSP, a space) inside a token is never deleted
+at all.
+**Why:** joining on any alphanumeric pair fuses the last word of every wrapped line with the
+first word of the next. Measured on a two-line fixture it produced the auto=True MENO surface
+`Novák\nRodne` — a party's surname welded to the label starting the following line — which
+would have redacted that label every time a name fell at a line end. Restricting to
+capitals-and-digits keeps the identifiers a renderer can break (IBAN, BIC, VIN, EČV, spisová
+značka, account numbers) and excludes ordinary Slovak words. Deleting a plain SPACE between
+digits was rejected for the same reason in the other direction: `\d{8}` would then match
+"v rokoch 2020 2021" and auto-redact a date range out of every contract that mentions one.
+**Cost, and where it is visible:** the `line_break_mid` class cannot reach 1.000 on types
+whose surfaces contain lowercase. That is not hidden — `eval/mutation_gate.py` grades it
+against the same 0.95 threshold every run.
+**To reverse:** relax `detect/normalize.py:_is_identifier_run` (drop the lowercase test to
+join any alphanumeric pair, or extend `_WRAPPED_TOKEN_RE` to whitespace runs without a line
+break) and then re-measure per-type PRECISION — that is the number this choice is trading.

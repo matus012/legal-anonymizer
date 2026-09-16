@@ -50,10 +50,13 @@ search_for at three rects is one redacted occurrence, three destroyed boxes.
 """
 from __future__ import annotations
 
+import re
+
 import fitz
 
 from detect.config import DetectConfig
 from detect.core import detect
+from detect.normalize import strip_format_chars
 from writer.decisions import RedactionDecisions
 from writer.labelmap import LabelMap, make_snippet
 from writer.report import write_report
@@ -80,6 +83,67 @@ class RedactionIncompleteError(Exception):
 
 def has_text_layer(doc: "fitz.Document") -> bool:
     return any(page.get_text("text").strip() for page in doc)
+
+
+# Single source of truth for 'which characters have no glyph': the same rule detect() uses to
+# see through them. Importing it means the writer can never drift from the detector -- a needle
+# stripped by one rule and produced by another is how a surface becomes unlocatable.
+_LINE_SPLIT_RE = re.compile(r"[^\S\n]*\n[^\S\n]*")
+
+
+def _locate(page, needle: str) -> tuple[list, bool]:
+    """Find every rectangle on ``page`` covering ``needle``. Returns ``(rects, complete)``.
+
+    ``page.search_for`` is byte-exact and CANNOT match a needle that contains a line break or
+    an invisible character, because neither has a glyph on the page. Before the v1.1
+    normalization layer that never came up: detect()'s regexes refused to span a line break, so
+    no candidate surface ever contained one. That refusal is exactly what the mutation gate
+    condemned -- line_break_mid measured 0.119, and a wrapped PDF text layer had already leaked
+    a client number -- so detect() now joins wrapped lines and sees through invisible
+    characters. The surfaces it returns are byte-faithful to the document, which means they can
+    now legitimately contain a '\\n' or a U+200B, and a single search_for on the whole surface
+    will find nothing.
+
+    Falling back matters because of what the alternative is: an unlocatable auto=True surface
+    raises RedactionIncompleteError, so without this the detection improvement would turn
+    silent misses into loud REFUSALS TO WRITE THE FILE. Three attempts, narrowest first:
+
+      1. the surface exactly as the document holds it;
+      2. the surface with format characters (category Cf) removed -- they have no glyph, so a
+         zero-width space inside an account number is simply not part of what was drawn;
+      3. the surface SPLIT AT ITS LINE BREAKS, each piece located on its own line.
+
+    Step 3 is split at NEWLINES ONLY, never at every space. Splitting a surface into its
+    whitespace-separated tokens would put "01" or "25" on the page as a search needle and
+    redact every unrelated occurrence of it; splitting at the wrap point yields two substrings
+    that are each a genuine contiguous run of the original surface.
+
+    ``complete`` is False when some piece could not be found, so the caller still records the
+    surface as skipped and the anti-theatre invariant still fires -- a partially located
+    surface must never be reported as fully redacted."""
+    rects = page.search_for(needle)
+    if rects:
+        return rects, True
+
+    flat = strip_format_chars(needle)
+    if flat != needle and flat.strip():
+        rects = page.search_for(flat)
+        if rects:
+            return rects, True
+
+    pieces = [p for p in (piece.strip() for piece in _LINE_SPLIT_RE.split(flat)) if p]
+    if len(pieces) < 2:
+        return [], False
+
+    found: list = []
+    complete = True
+    for piece in pieces:
+        piece_rects = page.search_for(piece)
+        if piece_rects:
+            found.extend(piece_rects)
+        else:
+            complete = False
+    return found, complete
 
 
 def _collect_page_redactions(
@@ -130,10 +194,16 @@ def _collect_page_redactions(
             )
             continue
         needle = raw[cand.start : cand.end]  # on-page glyphs; cand.surface is normalized
-        rects = page.search_for(needle)
+        rects, complete = _locate(page, needle)
         if not rects:
             skipped.append(needle)
             continue
+        if not complete:
+            # Some of the surface WAS located and will be destroyed, but not all of it. That is
+            # the worst possible state to report as success, so it is recorded as skipped too:
+            # the caller raises RedactionIncompleteError and the reviewer is told which surface
+            # to check by hand, rather than receiving a file that looks finished.
+            skipped.append(needle)
         label = labelmap.label_for(cand)
         # ONE occurrence per CANDIDATE, recorded before the rect loop: search_for can return
         # several rects for a single span (a wrapped line, a repeated glyph run), and counting

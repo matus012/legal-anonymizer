@@ -368,3 +368,27 @@ matched ONLY when followed by a number or preceded by `ul.` / `ulica` / `nám.` 
 * 2026-09-16 — AMENDMENT 8: `CLASS_A_TYPES` in `eval/leak_gate.py` is now EMPTY. Every type
   the tool can emit is gated. The gate prints "(NO type exclusions)" rather than a fixed
   "(Class A excluded)" string, so a future exclusion cannot hide behind stale text.
+* 2026-09-16 — AMENDMENT 9 (§3, §6): `detect()` now runs over a NORMALIZED view of the text
+  and maps every candidate back to ORIGINAL offsets through an index map. The new module is
+  `detect/normalize.py`; `detect()`'s signature, its five post-conditions and both writers are
+  unchanged, and candidates still carry original offsets and byte-faithful surfaces.
+  Normalized: format characters (category Cf) deleted, Cyrillic/Greek homoglyphs folded to
+  Latin, whitespace runs collapsed to one character, per-character NFKC, NFD recomposed to NFC.
+  NOT normalized, deliberately and with reasons in the module docstring: CASE (several
+  detectors use capitalisation as evidence — folding it would delete their only signal, not
+  make them case-insensitive) and DIACRITICS (folding č→c would silently widen every Slovak-word
+  pattern in `detect/` at once). The LINE BOUNDARY also survives: a whitespace run containing a
+  break collapses to `\n`, not to a space.
+* 2026-09-16 — AMENDMENT 10 (§3): `detect()` runs the detector battery over TWO views, not one.
+  The second (`normalize(text, join_wrapped=True)`) deletes a line break that falls between two
+  runs of CAPITALS AND DIGITS, reassembling an identifier a renderer broke across a line
+  (`FYC\nWSKZC` → `FYCWSKZC`). Its candidates are MERGED with the first view's, never
+  substituted for them, so the plain reading is always still on the table and the joined
+  reading can only ADD detections. The restriction to capitals-and-digits is load-bearing: the
+  first version joined ANY alphanumeric pair, and since every wrapped line ends one word and
+  begins another it welded them — measured, it produced the auto=True MENO surface
+  `Novák\nRodne`, which would have eaten the first word of the following line every time a name
+  fell at a line end. Candidates are de-duplicated on the WHOLE candidate, never on
+  `(type, span)`: a heuristic `MENO(auto=False)` and a known-entity `MENO(auto=True)` share a
+  type and a span and are different claims, and collapsing them dropped the known entity and
+  relabelled a party `[OBEC_1]`.
