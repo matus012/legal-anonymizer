@@ -73,6 +73,14 @@ class LabelMap:
         # are unpacked positionally by build_report, so the checksum tag CANNOT widen them.
         self.checksums: dict[str, str] = {}  # label -> checksum ("valid"|"invalid"|"n/a")
         self.lc_checksums: list[str] = []    # index-aligned with low_confidence
+        # v1.1 crash safety (CONTRACTS_v11.md Amendment 11): detectors that RAISED during
+        # this pass. Deduplicated on (detector, error) because the same bug fires on every
+        # unit of the document -- a report listing it 400 times would bury the one line
+        # that matters. The LOCATION kept is the FIRST one, which is where a reviewer
+        # should start looking, and the count is carried so the scale is not lost.
+        self.detector_failures: list[tuple[str, str, str]] = []  # [(detector, location, error)]
+        self._failure_seen: dict[tuple[str, str], int] = {}      # (detector, error) -> index
+        self._failure_counts: dict[tuple[str, str], int] = {}
 
     def group_key(self, cand) -> tuple:
         """Identity key for ``cand`` WITHIN its type. MENO resolves to its party via declension;
@@ -124,6 +132,26 @@ class LabelMap:
         self.low_confidence.append((location, type, surface))
         self.lc_contexts.append(snippet)
         self.lc_checksums.append(checksum)
+
+    def record_detector_failure(self, detector: str, location: str, error: str) -> None:
+        """Record that ``detector`` raised at ``location``. Idempotent per (detector, error).
+
+        A detector that chokes on one character shape chokes on it in every paragraph that
+        contains it, so the honest report is 'this detector failed, first at <location>,
+        <n> times' -- not four hundred identical rows."""
+        key = (detector, error)
+        self._failure_counts[key] = self._failure_counts.get(key, 0) + 1
+        if key in self._failure_seen:
+            i = self._failure_seen[key]
+            first_location = self.detector_failures[i][1].split(" (")[0]
+            self.detector_failures[i] = (
+                detector,
+                f"{first_location} (+{self._failure_counts[key] - 1} more)",
+                error,
+            )
+            return
+        self._failure_seen[key] = len(self.detector_failures)
+        self.detector_failures.append((detector, location, error))
 
     def groups(self) -> dict[str, tuple[str, tuple]]:
         """label -> (type, group_key) for every label minted so far — the GUI's bridge from

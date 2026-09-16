@@ -55,7 +55,7 @@ import re
 import fitz
 
 from detect.config import DetectConfig
-from detect.core import detect
+from detect.core import detect_with_failures
 from detect.normalize import strip_format_chars
 from writer.decisions import RedactionDecisions
 from writer.labelmap import LabelMap, make_snippet
@@ -176,7 +176,12 @@ def _collect_page_redactions(
 
     raw = page.get_text("text")
     norm = raw.replace(chr(0xAD), "-")  # soft hyphen -> hyphen-minus; offset-preserving (1:1)
-    for cand in detect(norm, known_entities, config):
+    detected, failures = detect_with_failures(norm, known_entities, config)
+    for f in failures:
+        # See writer/docx_body.py: a detector that raised leaves its share of this page
+        # unredacted, and the absence of its rows is indistinguishable from a clean page.
+        labelmap.record_detector_failure(f.detector, location, f.error)
+    for cand in detected:
         redact = cand.auto
         if decisions is not None:
             key = (cand.type, labelmap.group_key(cand))
@@ -313,7 +318,8 @@ def _redact_pdf(
     # output is precisely the file whose record a reviewer needs; writing the report after the
     # raise would leave the worst case as the one case with no record at all.
     write_report(out_path, labelmap.occurrences, labelmap.low_confidence,
-                 labelmap.checksums, labelmap.lc_checksums)
+                 labelmap.checksums, labelmap.lc_checksums,
+                 labelmap.detector_failures)
 
     # Every page was attempted and the (partial) output written -- but the caller must be told,
     # loudly, that this file is not fully redacted.

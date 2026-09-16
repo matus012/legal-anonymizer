@@ -42,7 +42,7 @@ from docx.text.paragraph import Paragraph
 from lxml import etree
 
 from detect.config import DetectConfig
-from detect.core import detect
+from detect.core import detect_with_failures
 from writer.decisions import RedactionDecisions
 from writer.labelmap import LabelMap, make_snippet
 from writer.report import write_report
@@ -151,7 +151,12 @@ def _redact_paragraph(
 
     # ONE detect() over the post-strip reconstructed text; both captures below read this same
     # result the redaction path uses — never a second detect() over a different tree state.
-    detected = detect(recon, known_entities, config)
+    detected, failures = detect_with_failures(recon, known_entities, config)
+    for f in failures:
+        # A detector that raised produced NO candidates for THIS paragraph, so whatever it
+        # would have found is still in the document. Nothing else in the report shows that:
+        # the missing rows look exactly like 'there was nothing here'.
+        labelmap.record_detector_failure(f.detector, location, f.error)
 
     # Decision-aware keep/skip: default (decisions None) is exactly the old auto/non-auto
     # split. A suppressed auto group is left intact and recorded to the report's
@@ -474,7 +479,8 @@ def _redact_docx(
     #    Purely additive — a separate .txt file that does not touch the redacted .docx bytes; the
     #    path is derived from out_path so the report can never desync from the document it records.
     write_report(out_path, labelmap.occurrences, labelmap.low_confidence,
-                 labelmap.checksums, labelmap.lc_checksums)
+                 labelmap.checksums, labelmap.lc_checksums,
+                 labelmap.detector_failures)
 
     return labelmap
 

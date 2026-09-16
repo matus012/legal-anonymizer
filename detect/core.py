@@ -261,35 +261,119 @@ def _resolve_partial_overlaps(candidates: list[Candidate]) -> list[Candidate]:
     return kept
 
 
+# --------------------------------------------------------------------- DETECTOR ISOLATION
+# CONTRACTS_v11.md Amendment 11. A desktop application that raises out of a redaction is worse
+# than one that misses a surface: the lawyer gets a traceback instead of a document, and has no
+# way to tell whether the file on disk is clean, partly redacted, or untouched.
+#
+# This is not hypothetical. The mutation gate has already caught one: widening a separator let a
+# TAB into an IBAN, and the mod-97 check does int(c, 36), which raises ValueError on a tab. That
+# reached a shipped code path and was found only because a gate happened to call detect() over
+# 2 559 mutated surfaces. Every checksum and validator in detect/ parses characters out of
+# arbitrary document text, and arbitrary document text is exactly what a law office has.
+#
+# So every detector runs inside a guard. A detector that raises loses ITS OWN candidates for
+# THAT unit and nothing else -- the other detectors' results are kept, and the failure is
+# reported rather than swallowed.
+#
+# WHAT IS *NOT* GUARDED, deliberately: detect()'s five post-conditions. Those assert that the
+# RESOLUTION stages produced a coherent, non-overlapping, sorted span set, and both writers cut
+# the document at those spans. Continuing past a violated post-condition would write a corrupted
+# file; the assert is the one place where stopping is the safe outcome. What the guard below
+# does instead is keep bad candidates from ever REACHING them: each detector's output is
+# validated at its own source, so a malformed span is attributed to the detector that made it
+# and dropped there, instead of surfacing later as an assertion nobody can trace back.
+
+
+@dataclass(frozen=True)
+class DetectorFailure:
+    """One detector that raised, or returned something malformed, on one unit of text.
+
+    ``detector`` is the module-level function name, so the report names the thing to fix.
+    ``error`` is the exception's own text, kept verbatim -- a report that says "a detector
+    failed" without saying which or why cannot be acted on.
+    """
+
+    detector: str
+    error: str
+
+
+_VALID_CHECKSUMS = ("valid", "invalid", "n/a")
+
+
+def _validated(name: str, produced, norm: str) -> tuple[list[Candidate], list[DetectorFailure]]:
+    """Keep the well-formed candidates from one detector; report the rest against that detector.
+
+    Checked here rather than in detect()'s post-conditions because attribution is the whole
+    point: a span of (12, 4) discovered after five resolution stages have shuffled the list is
+    a bug report with no author on it.
+    """
+    good: list[Candidate] = []
+    failures: list[DetectorFailure] = []
+    for c in produced:
+        if not isinstance(c, Candidate):
+            failures.append(DetectorFailure(name, f"returned {type(c).__name__}, not Candidate"))
+        elif not (0 <= c.start < c.end <= len(norm)):
+            failures.append(DetectorFailure(name, f"span ({c.start}, {c.end}) outside text of length {len(norm)}"))
+        elif c.type not in KNOWN_TYPES:
+            failures.append(DetectorFailure(name, f"unregistered type {c.type!r}"))
+        elif c.checksum not in _VALID_CHECKSUMS:
+            failures.append(DetectorFailure(name, f"bad checksum tag {c.checksum!r}"))
+        else:
+            good.append(c)
+    return good, failures
+
+
 def _run_detectors(
     norm: str, known_entities: list[str], config: DetectConfig
-) -> list[Candidate]:
-    """Every layer-1 detector, over one normalized view. Split out of detect() so the two
-    views (see detect()) run the IDENTICAL battery -- a detector added to one and forgotten in
-    the other would be a type that silently stops working on wrapped text."""
+) -> tuple[list[Candidate], list[DetectorFailure]]:
+    """Every layer-1 detector, over one normalized view, each inside its own guard.
+
+    Split out of detect() so the two views (see detect()) run the IDENTICAL battery -- a
+    detector added to one and forgotten in the other would be a type that silently stops
+    working on wrapped text.
+    """
+    battery = (
+        ("_detect_rc", lambda t: _detect_rc(t, config)),
+        ("_detect_ico", lambda t: _detect_ico(t, config)),
+        ("_detect_ic_dph", _detect_ic_dph),
+        ("_detect_dic", _detect_dic),
+        ("_detect_iban", lambda t: _detect_iban(t, config)),
+        ("_detect_bankovy_ucet", lambda t: _detect_bankovy_ucet(t, config)),
+        ("_detect_email", _detect_email),
+        ("_detect_url", _detect_url),
+        ("_detect_telefon", _detect_telefon),
+        ("detect_datetime_amounts", lambda t: detect_datetime_amounts(t, config)),
+        ("detect_registry", detect_registry),
+        # v1.1 type modules (CONTRACTS_v11.md 8). Each is self-contained and emits only its own
+        # types; every cross-type collision they create with each other or with the v1 detectors
+        # is settled by the resolution stages in detect(), never inside a detector module.
+        ("detect_addresses", lambda t: detect_addresses(t, config)),
+        ("detect_documents", lambda t: detect_documents(t, config)),
+        ("detect_office_refs", lambda t: detect_office_refs(t, config)),
+        ("detect_name_anchors", lambda t: detect_name_anchors(t, config)),
+        ("detect_gazetteer", lambda t: detect_gazetteer(t, config)),
+        ("detect_orgs", lambda t: detect_orgs(t, config)),
+        ("detect_known_entities", lambda t: detect_known_entities(t, known_entities)),
+    )
+
     candidates: list[Candidate] = []
-    candidates.extend(_detect_rc(norm, config))
-    candidates.extend(_detect_ico(norm, config))
-    candidates.extend(_detect_ic_dph(norm))
-    candidates.extend(_detect_dic(norm))
-    candidates.extend(_detect_iban(norm, config))
-    candidates.extend(_detect_bankovy_ucet(norm, config))
-    candidates.extend(_detect_email(norm))
-    candidates.extend(_detect_url(norm))
-    candidates.extend(_detect_telefon(norm))
-    candidates.extend(detect_datetime_amounts(norm, config))
-    candidates.extend(detect_registry(norm))
-    # v1.1 type modules (CONTRACTS_v11.md 8). Each is self-contained and emits only its own
-    # types; every cross-type collision they create with each other or with the v1 detectors
-    # is settled by the resolution stages in detect(), never inside a detector module.
-    candidates.extend(detect_addresses(norm, config))
-    candidates.extend(detect_documents(norm, config))
-    candidates.extend(detect_office_refs(norm, config))
-    candidates.extend(detect_name_anchors(norm, config))
-    candidates.extend(detect_gazetteer(norm, config))
-    candidates.extend(detect_orgs(norm, config))
-    candidates.extend(detect_known_entities(norm, known_entities))
-    return candidates
+    failures: list[DetectorFailure] = []
+    for name, fn in battery:
+        try:
+            produced = fn(norm)
+        except Exception as exc:  # noqa: BLE001 -- see DETECTOR ISOLATION above
+            # Deliberately broad. The point is not to handle a known error class, it is that
+            # NOTHING a detector can raise may escape to the caller: int(c, 36) on a control
+            # character, an IndexError on an empty match, a UnicodeError from a lone surrogate
+            # in a corrupt DOCX. Naming the classes we have already seen would only guarantee
+            # the app crashes on the one we have not.
+            failures.append(DetectorFailure(name, f"{type(exc).__name__}: {exc}"))
+            continue
+        good, bad = _validated(name, produced, norm)
+        candidates.extend(good)
+        failures.extend(bad)
+    return candidates, failures
 
 
 def detect(
@@ -297,6 +381,16 @@ def detect(
     known_entities: list[str] | None = None,
     config: DetectConfig | None = None,
 ) -> list[Candidate]:
+    """The v1 entry point, unchanged (CONTRACTS_v11.md 3). Detector failures are swallowed
+    here; a caller that must REPORT them -- both writers do -- calls detect_with_failures."""
+    return detect_with_failures(text, known_entities, config)[0]
+
+
+def detect_with_failures(
+    text: str,
+    known_entities: list[str] | None = None,
+    config: DetectConfig | None = None,
+) -> tuple[list[Candidate], list[DetectorFailure]]:
     if known_entities is None:
         known_entities = []
     if config is None:
@@ -321,7 +415,8 @@ def detect(
     # runs as an EXTRA pass whose candidates are merged with the base pass's rather than
     # replacing them: the plain reading is always still on the table and the joined reading
     # can only ADD detections. It is skipped entirely when it would change nothing, which is
-    # every text without a line break inside a token -- i.e. essentially every DOCX paragraph.
+    # every text without a line break inside an identifier -- i.e. essentially every DOCX
+    # paragraph.
     views = [normalize(text)]
     joined = normalize(text, join_wrapped=True)
     if joined.text != views[0].text:
@@ -340,9 +435,18 @@ def detect(
     # SURFACE on the page, so a surface that is not byte-faithful to the document cannot be
     # found and cannot be redacted.
     candidates: list[Candidate] = []
+    failures: list[DetectorFailure] = []
     seen: set[Candidate] = set()
+    seen_failures: set[DetectorFailure] = set()
     for view in views:
-        for c in _run_detectors(view.text, known_entities, config):
+        produced, view_failures = _run_detectors(view.text, known_entities, config)
+        for f in view_failures:
+            # The same detector raises the same way on both views, and reporting it twice would
+            # tell the reviewer there were two problems.
+            if f not in seen_failures:
+                seen_failures.add(f)
+                failures.append(f)
+        for c in produced:
             a, b = view.span(c.start, c.end)
             mapped = replace(c, start=a, end=b, surface=text[a:b])
             # Deduplicated on the WHOLE candidate, never on (type, span). Two candidates can
@@ -374,4 +478,4 @@ def detect(
     )
     assert all(c.type in KNOWN_TYPES for c in candidates), "unregistered type emitted"
     assert all(c.checksum in ("valid", "invalid", "n/a") for c in candidates), "bad checksum tag"
-    return candidates
+    return candidates, failures

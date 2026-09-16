@@ -392,3 +392,29 @@ matched ONLY when followed by a number or preceded by `ul.` / `ulica` / `nám.` 
   `(type, span)`: a heuristic `MENO(auto=False)` and a known-entity `MENO(auto=True)` share a
   type and a span and are different claims, and collapsing them dropped the known entity and
   relabelled a party `[OBEC_1]`.
+* 2026-09-16 — AMENDMENT 11 (§3): DETECTOR ISOLATION. Every detector in `detect/core.py`'s
+  battery runs inside a guard, and each one's output is validated AT ITS OWN SOURCE (span in
+  range, registered type, valid checksum tag). A detector that raises, or returns something
+  malformed, loses ITS OWN candidates for THAT unit and nothing else; the failure is recorded
+  as a `DetectorFailure(detector, error)` rather than swallowed. `detect()`'s signature is
+  UNCHANGED and still returns a bare list; the new `detect_with_failures()` returns
+  `(candidates, failures)` and is what both writers call. The `LabelMap` collects failures for
+  the document (de-duplicated on `(detector, error)`, keeping the first location and a count),
+  `writer/report.py` prints a warning block ABOVE the redaction tables — byte-identical output
+  when there are none — and the GUI review screen shows it in red, because it is the only
+  message on that screen meaning "the list below may be incomplete".
+  NOT guarded, deliberately: `detect()`'s five post-conditions. They assert that RESOLUTION
+  produced a coherent non-overlapping span set, and both writers cut the document at those
+  spans — continuing past a violated post-condition would write a corrupted file, so the
+  assert is the one place where stopping is the safe outcome. The per-detector validation
+  exists so malformed candidates never reach them and are attributed to their author instead
+  of surfacing as an assertion with no origin.
+* 2026-09-16 — AMENDMENT 12 (§8, ULICA): a street name that is a Slovak ADJECTIVE ("Hlavná",
+  "Krátka", "Školská") declines adjectivally — Hlavná → Hlavnej / Hlavnú / Hlavnou — and
+  `detect/declension.py`'s suffix inventory deliberately EXCLUDES the plain adjectival `-ej`
+  in order to keep the surname-versus-adjective discriminator working (`stem("Kovacovej")` is
+  a person, `stem("Kovacskej")` is not). So the shared stemmer cannot be widened for streets
+  without breaking names. Measured with ULICA's new corpus coverage: every anchored nominative
+  shape scores 1.000, and the declined form scores 0.000 (20/20 missed). The fix belongs in
+  the gazetteer as a street-specific adjectival expansion gated on the existing ULICA anchor
+  requirement — NOT in `detect/declension.py`.

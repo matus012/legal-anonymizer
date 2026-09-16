@@ -37,6 +37,19 @@ _REDACTED_COLS = _SEP.join(["TYPE", "label", "count", "locations"])
 _LOWCONF_HEADER = "[LOW CONFIDENCE / NOT REDACTED]"
 _LOWCONF_COLS = _SEP.join(["type", "surface", "location"])
 _NONE = "(none)"
+# v1.1 crash safety (CONTRACTS_v11.md Amendment 11). A detector that raised on this document
+# produced NO candidates for the unit it raised on, so the document may be UNDER-REDACTED in a
+# way nothing else in this report shows: the missing rows look exactly like "there was nothing
+# there". This block therefore sits ABOVE the redaction tables, not below them, and is emitted
+# only when there is something to say -- a warning that appears on every clean document is a
+# warning nobody reads.
+_FAILURE_HEADER = "[!! DETECTOR FAILURES -- THIS DOCUMENT MAY BE UNDER-REDACTED !!]"
+_FAILURE_COLS = _SEP.join(["detector", "location", "error"])
+_FAILURE_NOTE = (
+    "One or more detectors could not run on part of this document. Whatever they would\n"
+    "have found is NOT in the table below and was NOT removed. Review those locations by\n"
+    "hand before sharing this file, and report the error text to the maintainer."
+)
 # v1.1 checksum column (CONTRACTS_v11.md §10) — appended ONLY when the caller supplies the
 # matching side-channel, so the v1 layout is reproduced byte-for-byte when it is omitted.
 _CHECKSUM_COL = "checksum"
@@ -57,6 +70,7 @@ def build_report(
     low_confidence: list[tuple[str, str, str]],
     checksums: dict[str, str] | None = None,
     lc_checksums: list[str] | None = None,
+    detector_failures: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """Pure formatter — no I/O. Return the deterministic report string for the two captures.
 
@@ -70,8 +84,25 @@ def build_report(
     all, so no existing report, test or diff shifts by a single byte. A label/index missing
     from a supplied side-channel reads ``"n/a"`` rather than raising — a report must never be
     the thing that crashes a redaction pass.
+
+    ``detector_failures``: [(detector, location, error), ...]. When non-empty a WARNING BLOCK
+    is emitted ABOVE the redaction tables. When omitted or empty nothing is emitted and the
+    output is byte-identical to a report without the parameter -- same discipline as the
+    checksum side-channels above, for the same reason: a v1 report, test or diff must not
+    shift by a byte because a v1.1 feature exists.
     """
-    lines: list[str] = [_HEADER, _REDACTED_HEADER]
+    lines: list[str] = [_HEADER]
+
+    # Section 0 DETECTOR FAILURES -- first, because it changes how the rest should be read.
+    if detector_failures:
+        lines.append(_FAILURE_HEADER)
+        lines.append(_FAILURE_NOTE)
+        lines.append(_FAILURE_COLS)
+        for detector, location, error in detector_failures:
+            lines.append(_SEP.join([detector, location, error]))
+        lines.append("")
+
+    lines.append(_REDACTED_HEADER)
 
     # Section 1 REDACTED: one row per label, sorted by (TYPE, numeric N).
     lines.append(_REDACTED_COLS if checksums is None else _SEP.join([_REDACTED_COLS, _CHECKSUM_COL]))
@@ -123,10 +154,15 @@ def write_report(
     low_confidence: list[tuple[str, str, str]],
     checksums: dict[str, str] | None = None,
     lc_checksums: list[str] | None = None,
+    detector_failures: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """Build the report and write it as UTF-8 next to ``out_path`` (path via ``report_path_for``).
     Returns the written path. This is the only entry point the writer calls."""
     path = report_path_for(out_path)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write(build_report(occurrences, low_confidence, checksums, lc_checksums))
+        fh.write(
+            build_report(
+                occurrences, low_confidence, checksums, lc_checksums, detector_failures
+            )
+        )
     return path

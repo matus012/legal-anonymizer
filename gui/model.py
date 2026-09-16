@@ -29,6 +29,11 @@ MSG_INCOMPLETE = (
     "Dokument sa nedá úplne redigovať automaticky ({n} nájditeľných miest zlyhalo). "
     "Súbor je z dávky vylúčený — spracujte ho manuálne."
 )
+MSG_DETECTOR_FAILED = (
+    "POZOR: časť rozpoznávania na tomto dokumente ZLYHALA ({names}). Čo by tieto\n"
+    "detektory našli, NIE JE v tabuľke nižšie a NEBUDE odstránené. Dokument\n"
+    "skontrolujte ručne a chybu nahláste správcovi."
+)
 MSG_FILENAME_LEAK = (
     "Pozor: názov tohto súboru obsahuje osobný údaj ({names}). Redigovaný dokument sa volá "
     "rovnako, takže údaj uniká už v názve prílohy. Zapnite „Anonymizovať názvy súborov“ "
@@ -59,6 +64,12 @@ class FileScan:
     # redaction cleans the document body and then writes `Novak_zmluva_anon.docx` — the
     # leak walks out in the attachment name. Carried here so the review screen can say so.
     filename_hits: tuple[str, ...] = ()
+    # v1.1 crash safety (CONTRACTS_v11.md Amendment 11): detectors that RAISED during the
+    # scan, as (detector, location, error). This is the ONE case where the review table
+    # cannot be trusted to be complete -- the rows a failed detector would have produced
+    # are simply absent, and absent rows look exactly like a clean document. The screen
+    # must say so out loud; silence here is the failure mode.
+    detector_failures: tuple[tuple[str, str, str], ...] = ()
 
 
 # Tokens worth testing against a filename: ≥3 chars, letters/digits only after folding.
@@ -153,7 +164,8 @@ def scan_file(src: str, known_entities, extra_terms: tuple[str, ...] = (),
         except RedactionIncompleteError as e:
             return FileScan(src, [], MSG_INCOMPLETE.format(n=len(e.surfaces)))
         rows = _rows_from(lm)
-        return FileScan(src, rows, filename_hits=filename_leak_hits(src, rows))
+        return FileScan(src, rows, filename_hits=filename_leak_hits(src, rows),
+                        detector_failures=tuple(lm.detector_failures))
 
 
 def build_decisions(rows, checked: dict[tuple, bool], extra_terms) -> RedactionDecisions:

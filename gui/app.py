@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from detect.config import DetectConfig
 from gui.model import (
+    MSG_DETECTOR_FAILED,
     MSG_FILENAME_LEAK,
     SUPPORTED,
     FileScan,
@@ -187,6 +188,15 @@ class MainWindow(QMainWindow):
         self.fname_warn.setStyleSheet("color: #8a4b00; font-weight: bold;")
         self.fname_warn.hide()
         rlay.addWidget(self.fname_warn)
+        # Detector-failure warning. Sits ABOVE the filename warning and is styled red
+        # rather than amber, because it is the only message on this screen that means
+        # "the list below may be incomplete" -- every other row and warning is a
+        # statement about something the tool DID find.
+        self.detector_warn = QLabel()
+        self.detector_warn.setWordWrap(True)
+        self.detector_warn.setStyleSheet("color: #a00000; font-weight: bold;")
+        self.detector_warn.hide()
+        rlay.insertWidget(0, self.detector_warn)
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         self.error_label.hide()
@@ -305,6 +315,12 @@ class MainWindow(QMainWindow):
         scan = self.scans.get(src)
         if scan is None:
             return
+        if scan.detector_failures:
+            self.detector_warn.setText(MSG_DETECTOR_FAILED.format(
+                names=", ".join(dict.fromkeys(d for d, _loc, _err in scan.detector_failures))))
+            self.detector_warn.show()
+        else:
+            self.detector_warn.hide()
         if scan.filename_hits:
             self.fname_warn.setText(MSG_FILENAME_LEAK.format(
                 names=", ".join(dict.fromkeys(scan.filename_hits))))
