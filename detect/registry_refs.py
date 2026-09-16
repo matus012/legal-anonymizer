@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 
 from .core import Candidate
+from .identifiers import diacritic_pattern
 
 NBSP = "\u00a0"
 # v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
@@ -34,26 +35,37 @@ NBSP = "\u00a0"
 # phone number. Anchor-to-value separators are widened to full whitespace separately.
 _SP = '[^\\S\\n\\r]'
 
+# CASE / DIACRITICS (round-2 red-team, all_caps/lowercase/no_diacritics): every literal
+# below is a fixed registry PREFIX, never free-typed evidence, so it is folded on BOTH axes
+# at its own site -- `re.IGNORECASE` for case, `diacritic_pattern` for diacritics (technique
+# A: the anchor is embedded in the primary match and is itself part of the redacted surface,
+# so the PATTERN is widened rather than any text folded -- offsets still come straight off
+# the original string). See detect/identifiers.py for both helpers.
+
 # --------------------------------------------------------------------------- LV
 # "LV č. <1-4 digits>"; (?!\d) refuses to split a 5+ digit run mid-number.
-_LV_RE = re.compile(rf"\bLV č\.{_SP}\d{{1,4}}(?!\d)")
+_LV_RE = re.compile(rf"\bLV {diacritic_pattern('č')}\.{_SP}\d{{1,4}}(?!\d)", re.IGNORECASE)
 
 # --------------------------------------------------------------------------- PARCELA
 # One detector over the four authored styles: plain "parc. č. 123", subdivided
 # "parc. č. 123/4", and the long cadastral forms with the „C“/„E“ register (Slovak
 # quotes U+201E/U+201C are part of the surface). (?!\d) guards the end so a longer
 # digit run is never split.
+_C = diacritic_pattern("č")
 _PARCELA_RE = re.compile(
-    rf"\bparc\. č\.{_SP}\d{{1,4}}(?:/\d{{1,2}})?(?!\d)"  # plain / sub
+    rf"\bparc\. {_C}\.{_SP}\d{{1,4}}(?:/\d{{1,2}})?(?!\d)"  # plain / sub
     rf"|"
-    rf"\bparcela registra „[CE]“ KN č\.{_SP}\d{{1,4}}/\d{{1,2}}(?!\d)"  # kn_c / kn_e
+    rf"\bparcela registra „[CE]“ KN {_C}\.{_SP}\d{{1,4}}/\d{{1,2}}(?!\d)",  # kn_c / kn_e
+    re.IGNORECASE,
 )
 
 # --------------------------------------------------------------------------- ORSR_VLOZKA
 # The whole "Oddiel: <section>, Vložka č. <3-5 digits>/<court letter>" string is the
 # GT surface; the spaces after "Oddiel:" and after the comma are always plain spaces.
 _ORSR_VLOZKA_RE = re.compile(
-    rf"\bOddiel: (?:Sro|Sa|Pš|Dr), Vložka č\.{_SP}\d{{3,5}}/[VBTNZ]\b"
+    rf"\bOddiel: (?:Sro|Sa|P{diacritic_pattern('š')}|Dr), Vlo{diacritic_pattern('ž')}ka {_C}\."
+    rf"{_SP}\d{{3,5}}/[VBTNZ]\b",
+    re.IGNORECASE,
 )
 
 # --------------------------------------------------------------------------- SPISOVA_ZNACKA
@@ -61,11 +73,12 @@ _ORSR_VLOZKA_RE = re.compile(
 # bare "1234/2025" is never claimed. court: the agenda letters are fused to the
 # leading digits with no space. Two-char agendas (Cb, Ro, Er) must precede the
 # single-char C in the alternation, or C consumes the C of Cb and the match dies on
-# the leftover "b".
+# the leftover "b". No diacritics in any agenda/cadastral letter, so only case folds here.
 _SPISOVA_ZNACKA_RE = re.compile(
     r"\b[VZPXR]-\d{1,4}/\d{4}(?!\d)"  # cadastral: V-1234/2025 (also Z, P, X, R)
     r"|"
-    r"\b\d{1,2}(?:Cb|Ro|Er|C|T|D)/\d{1,3}/\d{4}(?!\d)"  # court: 12Cb/345/2025
+    r"\b\d{1,2}(?:Cb|Ro|Er|C|T|D)/\d{1,3}/\d{4}(?!\d)",  # court: 12Cb/345/2025
+    re.IGNORECASE,
 )
 
 

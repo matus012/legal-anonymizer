@@ -33,6 +33,7 @@ import re
 
 from .config import DetectConfig
 from .core import Candidate
+from .identifiers import ascii_fold, diacritic_pattern
 
 NBSP = " "
 # v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
@@ -53,7 +54,15 @@ _SEP = '[^\\S\\n\\r]'
 # Slovak alphabet, explicit (no bare [A-Z]/[a-z] — those silently drop diacritics).
 _SK_UPPER = "AÁÄBCČDĎEÉFGHIÍJKLĹĽMNŇOÓÔPQRŔSŠTŤUÚVWXYÝZŽ"
 _SK_LOWER = "aáäbcčdďeéfghiíjklĺľmnňoóôpqrŕsštťuúvwxyýzž"
-_CAP = rf"[{_SK_UPPER}][{_SK_LOWER}]+"  # one Capitalized token (street/obec name)
+# CASE: kept case-SENSITIVE (reverted from an earlier `(?i:...)` attempt). Unlike
+# name_anchors.py's title/role anchors, this token has NO separator-based right boundary of
+# its own -- `_ADRESA_BARE_RE`'s anchor is a preceding context WINDOW check, not embedded in
+# the main pattern, so a case-relaxed token run swallows the anchor phrase itself ("trvale
+# bytom Hlavná" all became one 3-token run, consuming the anchor and leaving nothing for the
+# window check to find). Capitalisation is therefore genuine boundary evidence here, not
+# just anchor-adjacent decoration; `all_caps`/`lowercase` robustness on ADRESA is not reached
+# (measured ~0.667) and is reported rather than "fixed" by breaking the anchor.
+_CAP = rf"[{_SK_UPPER}][{_SK_LOWER}]+"  # one street/obec token
 _TOKEN_SEQ = rf"{_CAP}(?:{_SEP}{_CAP}){{0,2}}"  # 1-3 Capitalized tokens
 _HOUSENUM = rf"(?<!\d)\d{{1,4}}(?:/[A-Za-z0-9]{{1,3}})?(?!\d)"  # house + optional /orient
 
@@ -114,17 +123,20 @@ def _detect_psc(text: str) -> list[Candidate]:
 # case-insensitively via the scoped (?i:...) group, so the class doesn't also loosen the
 # Capitalized-token requirement), then 1-3 Capitalized tokens, then a house number.
 _ADRESA_KEYWORD_RE = re.compile(
-    rf"(?i:ul\.|ulica|nám\.|námestie|trieda|cesta|sídlisko)"
+    rf"(?i:ul\.|ulica|{diacritic_pattern('nám.')}|{diacritic_pattern('námestie')}"
+    rf"|trieda|cesta|{diacritic_pattern('sídlisko')})"
     rf"{_SEP}+{_TOKEN_SEQ}{_SEP}+{_HOUSENUM}"
 )
 
 # Keyword-less form: 1-3 Capitalized tokens + house number, matched only when an address
-# anchor phrase appears within 40 chars before ("trvale bytom Hlavná 12/A").
+# anchor phrase appears within 40 chars before ("trvale bytom Hlavná 12/A"). The anchor
+# test folds a WINDOW it only ever tests against (technique B, ascii_fold) -- never sliced,
+# never a source of an offset -- so it is case- AND diacritic-insensitive in one step,
+# ascii-spelled here to match the folded window.
 _ADRESA_BARE_RE = re.compile(rf"{_TOKEN_SEQ}{_SEP}+{_HOUSENUM}")
 _ADRESA_ANCHOR_RE = re.compile(
-    r"trvale bytom|trvalé bydlisko|bytom|bydlisko|so sídlom|sídlo"
-    r"|miesto podnikania|na adrese|adresa",
-    re.IGNORECASE,
+    r"trvale bytom|trvale bydlisko|bytom|bydlisko|so sidlom|sidlo"
+    r"|miesto podnikania|na adrese|adresa"
 )
 
 # Extension: ", " (or ","+NBSP) + PSC (spaced or contiguous) + SEP + Capitalized obec token
@@ -147,7 +159,7 @@ def _detect_adresa(text: str) -> list[Candidate]:
         spans.append((start, end))
         out.append(_make("ADRESA", text, start, end))
     for m in _ADRESA_BARE_RE.finditer(text):
-        if not _ADRESA_ANCHOR_RE.search(text[max(0, m.start() - 40) : m.start()]):
+        if not _ADRESA_ANCHOR_RE.search(ascii_fold(text[max(0, m.start() - 40) : m.start()])):
             continue
         start, end = _extend_adresa(text, m.start(), m.end())
         if any(s <= start and end <= e for s, e in spans):
@@ -163,20 +175,23 @@ def _detect_adresa(text: str) -> list[Candidate]:
 # with a different literal ("sú...") than every other alternative, so ordering cannot cause
 # a partial match.
 _SUPISNE_CISLO_RE = re.compile(
-    rf"(?i:súpisné/orientačné číslo|súpisné číslo|súp\. č\.|orientačné číslo|or\. č\.|s\. č\.)"
+    rf"(?i:{diacritic_pattern('súpisné/orientačné číslo')}|{diacritic_pattern('súpisné číslo')}"
+    rf"|{diacritic_pattern('súp. č.')}|{diacritic_pattern('orientačné číslo')}"
+    rf"|{diacritic_pattern('or. č.')}|{diacritic_pattern('s. č.')})"
     rf"{_SEP}+\d{{1,4}}(?:/\d{{1,4}})?"
 )
 
 # --------------------------------------------------------------------------- CISLO_BYTU
 _CISLO_BYTU_RE = re.compile(
-    rf"(?i:byt č\.|byt číslo|číslo bytu|b\. č\.){_SEP}+\d{{1,4}}"
+    rf"(?i:{diacritic_pattern('byt č.')}|{diacritic_pattern('byt číslo')}"
+    rf"|{diacritic_pattern('číslo bytu')}|{diacritic_pattern('b. č.')}){_SEP}+\d{{1,4}}"
 )
 
 # --------------------------------------------------------------------------- VCHOD
 # "vchod" + optional "č." or ":" (each optionally preceded by SEP) + SEP + 1-3 alnum chars
 # (a house/orientation number or a bare capital letter, "vchod A").
 _VCHOD_RE = re.compile(
-    rf"(?i:vchod)(?:{_SEP}*č\.|{_SEP}*:)?{_SEP}+[A-Za-z0-9]{{1,3}}"
+    rf"(?i:vchod)(?:{_SEP}*{diacritic_pattern('č.')}|{_SEP}*:)?{_SEP}+[A-Za-z0-9]{{1,3}}"
 )
 
 # --------------------------------------------------------------------------- POSCHODIE
@@ -185,12 +200,20 @@ _VCHOD_RE = re.compile(
 # "poschodie[:] <n>" (suffix), and the standalone "prízemie" (ground floor, no number at
 # all). The locative alternative is listed first and matches ONLY the "-í" ending (never
 # "-ie") so it cannot swallow the "na" out of a following nominative "3. poschodie" match.
+# DIACRITICS: `diacritic_pattern('í')` widens to `[íi]`, which -- unlike every other fold in
+# this round -- ALSO matches the plain "i" that sits inside "poschodie" itself ("poschod" +
+# "i" + "e"). The locative-only alternative must never match that "i" without checking that
+# an "e" doesn't immediately follow, or it accepts a PREFIX of the nominative "poschodie" and
+# stops one character short ("na 3. poschodi", dropping the final "e" and the trailing
+# "budovy" then reads as unconsumed suffix -- measured via
+# `test_poschodie_prefix_number`). `(?!e)` restores the original "-í never -ie" discriminator
+# under the fold.
 _POSCHODIE_RE = re.compile(
     rf"(?i:"
-    rf"na{_SEP}\d{{1,2}}\. poschodí"
-    rf"|\d{{1,2}}\. poschod(?:ie|í)"
-    rf"|poschod(?:ie|í)(?:{_SEP}*:)?{_SEP}+\d{{1,2}}"
-    rf"|prízemie"
+    rf"na{_SEP}\d{{1,2}}\. poschod{diacritic_pattern('í')}(?!e)"
+    rf"|\d{{1,2}}\. poschod(?:ie|{diacritic_pattern('í')}(?!e))"
+    rf"|poschod(?:ie|{diacritic_pattern('í')}(?!e))(?:{_SEP}*:)?{_SEP}+\d{{1,2}}"
+    rf"|{diacritic_pattern('prízemie')}"
     rf")"
 )
 

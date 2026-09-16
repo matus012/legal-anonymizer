@@ -105,10 +105,78 @@ _RC_ANCHOR_RE = re.compile(
 )
 
 
-def _ascii_fold(s: str) -> str:
+# --------------------------------------------------------------------------- shared folds
+# CENTRALIZED HERE per the round-2 red-team brief (all_caps / lowercase / no_diacritics):
+# CASE is not folded globally (detect/normalize.py's docstring -- several detectors use
+# capitalisation as evidence) and DIACRITICS are not stripped globally (folding c->c would
+# silently widen every Slovak-word pattern in detect/ at once). Both classes are fixed PER
+# ANCHOR SITE instead, with exactly two offset-safe techniques, both used across every
+# module in this round rather than reimplemented nine times:
+#
+#   * `ascii_fold` -- casefold + diacritic-strip a context WINDOW that is only ever TESTED
+#     against (never sliced, never a source of an offset). This is the technique this
+#     module already used for the RODNE_CISLO anchor (formerly `_ascii_fold`, renamed and
+#     exported here) and that datetime_amounts.py's `_is_dob` uses independently -- safe
+#     because NFKD + drop-combining is NOT 1:1 (it can change length) and a length-changing
+#     fold must never touch text that offsets are taken from.
+#   * `diacritic_pattern` -- build the regex PATTERN itself diacritic-insensitive by turning
+#     each accented character into a bracket class (`c` -> `[cc]`), so the match still runs
+#     against the ORIGINAL text and every offset still comes off it untouched. Used wherever
+#     the anchor word is embedded inside the primary matching regex (so there is no separate
+#     "context window" to fold) -- e.g. a registry prefix that is itself part of the redacted
+#     surface, or a role/label word immediately followed by the captured value.
+#
+# CASE is handled separately at each site, almost always via `(?i:...)` scoped to the ANCHOR
+# only -- never a bare module-wide `re.IGNORECASE`, which would also fold the case of a VALUE
+# character class built to require true capitalisation as evidence.
+_DIACRITIC_CLASSES = {
+    "á": "[áa]", "ä": "[äa]", "č": "[čc]", "ď": "[ďd]", "é": "[ée]", "í": "[íi]",
+    "ľ": "[ľl]", "ĺ": "[ĺl]", "ň": "[ňn]", "ó": "[óo]", "ô": "[ôo]", "ŕ": "[ŕr]",
+    "š": "[šs]", "ť": "[ťt]", "ú": "[úu]", "ý": "[ýy]", "ž": "[žz]",
+}
+
+
+def ascii_fold(s: str) -> str:
+    """Casefold + strip every combining mark (NFKD). For a boolean anchor TEST against a
+    context window ONLY -- never slice the result, never compute an offset from it (see the
+    module-level comment above and detect/normalize.py's docstring)."""
     return "".join(
-        ch for ch in unicodedata.normalize("NFKD", s.lower()) if not unicodedata.combining(ch)
+        ch for ch in unicodedata.normalize("NFKD", s.casefold()) if not unicodedata.combining(ch)
     )
+
+
+# CASE-AS-BOUNDARY (round-2 red-team, R2-5): several modules use TRUE capitalisation not
+# just as evidence but as the RIGHT-hand boundary of a value run next to a lowercase-word
+# anchor (name_anchors.py's title/role captures, orgs.py's office/bank-name runs,
+# addresses.py's keyword-less ADRESA form). Folding that token class to accept any case
+# UNCONDITIONALLY was tried first and regressed real mixed-case documents: with case no
+# longer distinguishing "the anchor word" from "the value", a greedy run swallows the
+# anchor itself ("vypracoval Ján Novák, PhD." matched "vypracoval Ján Novák" as the name).
+# The fix threads a per-call, per-unit "relaxed" flag instead: a document with no letters
+# left in any other case (the shape an all_caps/lowercase mutation actually produces) has no
+# capitalisation signal to lose either way, so relaxing there costs nothing a mixed-case
+# document still has. Below `_SINGLE_CASE_MIN_LETTERS` a short unit is never judged, so a
+# short single-case label ("VIN", "OP") never re-admits a collision a real mixed-case
+# document would have avoided (redteam finding C-5).
+_SINGLE_CASE_MIN_LETTERS = 20
+
+
+def document_is_single_case(text: str) -> bool:
+    """True when ``text`` has enough letters to judge, and they are (almost) all one case."""
+    letters = [ch for ch in text if ch.isalpha()]
+    if len(letters) < _SINGLE_CASE_MIN_LETTERS:
+        return False
+    upper = sum(ch.isupper() for ch in letters)
+    return upper == 0 or upper == len(letters)
+
+
+def diacritic_pattern(word: str) -> str:
+    """A regex fragment matching ``word`` OR its diacritic-stripped spelling, one character
+    at a time -- ``č`` becomes the bracket class ``[čc]``, every other character is
+    ``re.escape``d literally. Offset-safe because it widens the PATTERN, not the TEXT: the
+    match is still taken directly off the original string. Case is NOT handled here -- wrap
+    the caller's alternation in a scoped ``(?i:...)`` where case should fold too."""
+    return "".join(_DIACRITIC_CLASSES.get(ch, re.escape(ch)) for ch in word)
 
 
 def _rc_anchored(text: str, start: int, end: int | None = None) -> bool:
@@ -121,12 +189,12 @@ def _rc_anchored(text: str, start: int, end: int | None = None) -> bool:
     characters by the words "rodné číslo", which in a legal document is vanishingly rare and
     would in any case be redacted rather than leaked."""
     before = text[max(0, start - _RC_ANCHOR_WINDOW) : start]
-    if _RC_ANCHOR_RE.search(_ascii_fold(before)) is not None:
+    if _RC_ANCHOR_RE.search(ascii_fold(before)) is not None:
         return True
     if end is None:
         return False
     after = text[end : end + _RC_ANCHOR_WINDOW]
-    return _RC_ANCHOR_RE.search(_ascii_fold(after)) is not None
+    return _RC_ANCHOR_RE.search(ascii_fold(after)) is not None
 
 
 def _rc_shape_ok(digits: str) -> bool:
@@ -225,7 +293,7 @@ def _detect_ico(text: str, config: DetectConfig = DEFAULT) -> list[Candidate]:
 # DOES emit a candidate on the inner span. Handled explicitly instead of by luck: the
 # IC_DPH span strictly CONTAINS the DIC span, so detect.core's containment resolver drops
 # the inner DIC and keeps IC_DPH. Identical outcome, documented mechanism not a side effect.
-_IC_DPH_RE = re.compile(r"(?<![A-Za-z0-9])SK(\d{10})(?!\d)")
+_IC_DPH_RE = re.compile(r"(?<![A-Za-z0-9])SK(\d{10})(?!\d)", re.IGNORECASE)
 _DIC_RE = re.compile(r"(?<!\d)\d{10}(?!\d)")
 
 
@@ -247,7 +315,7 @@ def _detect_dic(text: str) -> list[Candidate]:
 # The group separator was a hardcoded " ?" -- exactly ONE optional space -- so an IBAN
 # pasted from a bank portal with doubled or tabbed grouping was not matched at all.
 # It uses the shared horizontal-whitespace class now, quantified with *.
-_IBAN_RE = re.compile(rf"(?<![A-Za-z0-9])SK\d{{2}}(?:{_SEP}*\d{{4}}){{5}}(?!\d)")
+_IBAN_RE = re.compile(rf"(?<![A-Za-z0-9])SK\d{{2}}(?:{_SEP}*\d{{4}}){{5}}(?!\d)", re.IGNORECASE)
 
 
 def _iban_mod97_ok(compact: str) -> bool:

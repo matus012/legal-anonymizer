@@ -20,6 +20,7 @@ import re
 
 from .config import DetectConfig
 from .core import Candidate
+from .identifiers import diacritic_pattern
 
 NBSP = " "
 # v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
@@ -72,7 +73,9 @@ _AWS = r"\s+"
 # column. Only the gap BEFORE the value is widened.
 _AVS = r"\s"
 _NAZOV_UCTU_RE = re.compile(
-    rf"(?:názov{_AWS}účtu|majiteľ{_AWS}účtu|vlastník{_AWS}účtu){_AVS}*:?{_AVS}*"
+    rf"(?:{diacritic_pattern('názov')}{_AWS}{diacritic_pattern('účtu')}"
+    rf"|{diacritic_pattern('majiteľ')}{_AWS}{diacritic_pattern('účtu')}"
+    rf"|{diacritic_pattern('vlastník')}{_AWS}{diacritic_pattern('účtu')}){_AVS}*:?{_AVS}*"
     rf"([^\n\t]+?)(?={_SP}{{2,}}|\t|\n|$)",
     re.IGNORECASE,
 )
@@ -98,8 +101,11 @@ def _detect_nazov_uctu(text: str) -> list[Candidate]:
 # "číslo klienta[:] <token>" / "klientske číslo ..." / "zákaznícke číslo ..." / "č.
 # klienta ...". The value is the single following alphanumeric token, which may itself
 # contain "-" or "/" (client numbers are frequently segmented, e.g. "2024-0091").
+_C = diacritic_pattern("č")
 _CISLO_KLIENTA_RE = re.compile(
-    rf"(?:číslo{_AWS}klienta|klientske{_AWS}číslo|zákaznícke{_AWS}číslo|č\.{_AWS}klienta){_AVS}*:?{_AVS}*"
+    rf"(?:{diacritic_pattern('číslo')}{_AWS}klienta|klientske{_AWS}{diacritic_pattern('číslo')}"
+    rf"|{diacritic_pattern('zákaznícke')}{_AWS}{diacritic_pattern('číslo')}"
+    rf"|{_C}\.{_AWS}klienta){_AVS}*:?{_AVS}*"
     r"([A-Za-z0-9][A-Za-z0-9\-/]*)",
     re.IGNORECASE,
 )
@@ -132,7 +138,9 @@ def _detect_cislo_klienta(text: str) -> list[Candidate]:
 #       prefix-base in front is not enough).
 # ``bank_codes`` is an OPTIONAL NBS allow-list, wired in by a later round; ``None`` (this
 # round's only caller) means "accept any 4 digits" -- no list is invented or hardcoded here.
-_KOD_BANKY_LABEL_RE = re.compile(rf"kód{_AWS}banky{_AVS}*:?{_AVS}*(\d{{4}})(?!\d)", re.IGNORECASE)
+_KOD_BANKY_LABEL_RE = re.compile(
+    rf"{diacritic_pattern('kód')}{_AWS}banky{_AVS}*:?{_AVS}*(\d{{4}})(?!\d)", re.IGNORECASE
+)
 _LEGACY_ACCOUNT_RE = re.compile(r"(?<!\d)\d{1,6}-\d{2,10}/(\d{4})(?!\d)")
 
 
@@ -165,7 +173,7 @@ def _detect_kod_banky(text: str, bank_codes: frozenset[str] | None = None) -> li
 # phrases don't apply.
 _FAX_SEPCHAR = f"[-.{NBSP} ]"
 _FAX_RE = re.compile(
-    rf"(?:faxové číslo|fax č\.|fax){_AVS}*:?{_AVS}*"
+    rf"(?:{diacritic_pattern('faxové')} {diacritic_pattern('číslo')}|fax {_C}\.|fax){_AVS}*:?{_AVS}*"
     rf"((?:\+421|00421|0)(?:{_FAX_SEPCHAR}?\d){{6,12}})(?!\d)",
     re.IGNORECASE,
 )

@@ -20,10 +20,11 @@ refused to ship a checkbox describing behaviour the engine did not have.
 from __future__ import annotations
 
 import re
-import unicodedata
 
 from .config import DEFAULT, DetectConfig
 from .core import Candidate
+from .identifiers import ascii_fold as _fold
+from .identifiers import diacritic_pattern
 
 # v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
 # a space or an NBSP. That accepted the one spelling the corpus generator writes and
@@ -45,7 +46,10 @@ _MONTH_WORDS = (
     "januára", "februára", "marca", "apríla", "mája", "júna",
     "júla", "augusta", "septembra", "októbra", "novembra", "decembra",
 )
-_MONTH_WORDS_ALT = "|".join(_MONTH_WORDS)
+# CASE / DIACRITICS (round-2 red-team): a month word is anchor vocabulary, never evidence,
+# so it folds on both axes at its own site -- diacritic_pattern widens the pattern (offsets
+# still come off the original text) and the whole alternation is scoped case-insensitive.
+_MONTH_WORDS_ALT = "|".join(diacritic_pattern(w) for w in _MONTH_WORDS)
 
 _DATUM_RE = re.compile(
     rf"\b\d{{1,2}}\.\d{{1,2}}\.\d{{4}}\b"  # dotted: D.M.YYYY, no leading zeros, no spaces
@@ -54,7 +58,8 @@ _DATUM_RE = re.compile(
     rf"|"
     rf"\b\d{{4}}-\d{{2}}-\d{{2}}\b"  # iso: YYYY-MM-DD, fully zero-padded
     rf"|"
-    rf"\b\d{{1,2}}\.{_SEP}(?:{_MONTH_WORDS_ALT}){_SEP}\d{{4}}\b"  # words: D. <month> YYYY
+    rf"\b\d{{1,2}}\.{_SEP}(?:{_MONTH_WORDS_ALT}){_SEP}\d{{4}}\b",  # words: D. <month> YYYY
+    re.IGNORECASE,
 )
 
 
@@ -78,12 +83,6 @@ _DOB_ANCHOR_RE = re.compile(
     r"|\br\.?\s?c\.?"          # a rodne cislo sits next to a birth date constantly
     r"|\brodne(?:ho)?\s+cisl[oa]"
 )
-
-
-def _fold(s: str) -> str:
-    return "".join(
-        ch for ch in unicodedata.normalize("NFKD", s.lower()) if not unicodedata.combining(ch)
-    )
 
 
 def _is_dob(text: str, start: int, end: int) -> bool:
@@ -116,7 +115,8 @@ _SUMA_RE = re.compile(
     rf"|"
     rf"\b{_SUMA_INT},-{_SEP}€"  # dash_cents: <grouped>,-<sep>€, no digits in the cents
     rf"|"
-    rf"\b{_SUMA_INT}{_SEP}Sk\b"  # sk_legacy: <grouped><sep>Sk, no decimal part at all
+    rf"\b{_SUMA_INT}{_SEP}Sk\b",  # sk_legacy: <grouped><sep>Sk, no decimal part at all
+    re.IGNORECASE,  # currency literals ("EUR", "Sk") are anchor vocabulary, not evidence
 )
 
 

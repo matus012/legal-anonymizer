@@ -31,6 +31,7 @@ import re
 
 from .config import DetectConfig
 from .core import Candidate
+from .identifiers import diacritic_pattern
 
 NBSP = " "
 # v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
@@ -72,16 +73,25 @@ def _emit(type_: str, m: re.Match[str]) -> Candidate:
 # run is load-bearing: on a 2-letter+7-digit string (a passport, not an OP) it stops the
 # 6-digit alternative from claiming the first 6 of the 7 digits, so CISLO_OP and
 # CISLO_PASU never both fire on the same document number (spec's explicit guard).
+# CASE: kept case-SENSITIVE (reverted from an earlier `re.IGNORECASE` attempt). This shape
+# has no separator-based right boundary -- an ordinary two-letter lowercase Slovak word
+# ("je", "sa", "na") directly followed by six digits is common, and folding case turned every
+# one of them into a false CISLO_OP, which then partially overlapped and corrupted a REAL
+# RODNE_CISLO candidate a few characters later (measured: `test_normalize_property.py`'s
+# corruption-detector fixture). A real OP/passport code is issued in caps by convention, so
+# nothing is lost for a genuine document; the anchored path (`_OP_ANCHOR_RE`, already
+# case-insensitive) still catches an anchored lowercase OP number.
 _OP_CORE_RE = re.compile(rf"[A-Z]{{2}}{_SP}?\d{{6}}(?!\d)")
 
+_C = diacritic_pattern("č")
 _OP_ANCHOR_RE = re.compile(
     r"\bOP\b"
-    rf"|č\.{_SP}OP\b"
-    rf"|\bOP{_SP}č\."
-    r"|občiansky preukaz"
-    r"|občianskeho preukazu"
-    r"|preukaz totožnosti"
-    r"|doklad totožnosti",
+    rf"|{_C}\.{_SP}OP\b"
+    rf"|\bOP{_SP}{_C}\."
+    rf"|{diacritic_pattern('občiansky preukaz')}"
+    rf"|{diacritic_pattern('občianskeho preukazu')}"
+    rf"|{diacritic_pattern('preukaz totožnosti')}"
+    rf"|{diacritic_pattern('doklad totožnosti')}",
     re.IGNORECASE,
 )
 
@@ -97,14 +107,16 @@ def _detect_cislo_op(text: str) -> list[Candidate]:
 # --------------------------------------------------------------------------- CISLO_PASU
 # 2 uppercase letters + 7 digits, optional space/NBSP between. Same anchored-always /
 # unanchored-standalone-only policy as CISLO_OP; same (?!\d) run-purity guard.
+# CASE: reverted to case-SENSITIVE for the same reason as `_OP_CORE_RE` above -- an
+# unanchored fold turns any "xx1234567" lowercase run into a false positive.
 _PASU_CORE_RE = re.compile(rf"[A-Z]{{2}}{_SP}?\d{{7}}(?!\d)")
 
 _PASU_ANCHOR_RE = re.compile(
     r"\bpas\b"
     r"|\bpasu\b"
-    r"|cestovný pas"
-    r"|cestovného pasu"
-    rf"|č\.{_SP}pasu",
+    rf"|{diacritic_pattern('cestovný pas')}"
+    rf"|{diacritic_pattern('cestovného pasu')}"
+    rf"|{_C}\.{_SP}pasu",
     re.IGNORECASE,
 )
 
@@ -126,7 +138,8 @@ def _detect_cislo_pasu(text: str) -> list[Candidate]:
 # the token itself is captured, and the surface is that TOKEN, not the anchor -- the
 # anchor is match context, never part of the redacted span.
 _VP_RE = re.compile(
-    rf"(?:vodičský preukaz|vodičského preukazu|VP{_SP}č\.|č\.{_SP}VP|vodičák)"
+    rf"(?:{diacritic_pattern('vodičský preukaz')}|{diacritic_pattern('vodičského preukazu')}"
+    rf"|VP{_SP}{_C}\.|{_C}\.{_SP}VP|{diacritic_pattern('vodičák')})"
     r"[^A-Za-z0-9]{0,20}"
     r"([A-Za-z0-9]{6,10})(?![A-Za-z0-9])",
     re.IGNORECASE,
@@ -155,6 +168,10 @@ def _detect_vodicsky_preukaz(text: str) -> list[Candidate]:
 # anchor required -- the shape is distinctive enough on its own. The (?!\d) after the
 # digit run and the \b at both ends stop a plate from being read out of a longer digit
 # or letter run (e.g. a 4-digit number or a longer all-caps abbreviation run).
+# CASE: kept case-SENSITIVE. This is a fixed-shape identifier with no anchor at all (a
+# licence plate is written in caps by law), so `[A-Z]{2}` here IS the evidence, not anchor
+# vocabulary -- folding it turns any lowercase "xx123xy"-shaped run into a false ECV, same
+# lesson as `_OP_CORE_RE`/`_PASU_CORE_RE` above.
 _ECV_RE = re.compile(rf"\b[A-Z]{{2}}[-{NBSP} ]?\d{{3}}(?!\d){_SP}?[A-Z]{{2}}\b")
 
 
@@ -167,6 +184,10 @@ def _detect_ecv(text: str) -> list[Candidate]:
 # confusable with 1 and 0) -- that exclusion, plus requiring at least one digit AND one
 # letter, is exactly what stops this from matching an arbitrary 17-character run of caps
 # (a pure-digit or pure-letter 17-run is refused below).
+# CASE: kept case-SENSITIVE. Same reasoning -- a VIN is stamped in caps and has no anchor;
+# `re.IGNORECASE` here would fold the excluded-letter guard (I/O/Q) onto lowercase i/o/q too,
+# which is harmless on its own, but the class would also start matching ordinary lowercase
+# 17-character runs across word boundaries, which is evidence-shaped, not anchor-shaped.
 _VIN_RE = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b")
 
 

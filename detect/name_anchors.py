@@ -53,6 +53,7 @@ import re
 from .config import DetectConfig
 from .core import Candidate
 from .declension import fold_length, stem
+from .identifiers import ascii_fold, diacritic_pattern, document_is_single_case
 
 NBSP = " "
 # v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
@@ -75,7 +76,20 @@ _SEP = '[^\\S\\n\\r]'
 _UP = "A-ZÁÄČĎÉÍĽĹŇÓÔŔŠŤÚÝŽ"
 _LO = "a-záäčďéíľĺňóôŕšťúýž"
 _CAP = rf"[{_UP}][{_LO}]+"
-_NAME_SEQ = rf"{_CAP}(?:{_SEP}{_CAP}){{0,2}}"  # 1-3 Capitalized tokens
+# CASE (round-2 red-team, R2-5): naively making the anchored NAME group case-insensitive
+# regressed real mixed-case documents -- with case no longer marking where the value run
+# ENDS (there is no separator-based terminator here, only the token-count cap), a greedy
+# run swallows the lowercase ANCHOR WORD sitting right next to it: "vypracoval Ján Novák,
+# PhD." matched "vypracoval Ján Novák" as the name, because "vypracoval" now also qualifies
+# as a token. So case-insensitivity is gated behind `document_is_single_case`: a genuinely
+# all-caps/all-lowercase unit (what the mutation produces) has no capitalisation signal left
+# to lose either way, so relaxing there is free; an ordinary mixed-case document keeps the
+# exact original, strict (case-sensitive) behaviour, so this never regresses a real document.
+# Two full regex sets are precompiled at import time -- STRICT (`_CAP`) and RELAXED
+# (`_CAP_CI`) -- and `_anchored` below picks the set once per unit.
+_CAP_CI = rf"(?i:[{_UP}][{_LO}]+)"
+_NAME_SEQ = rf"{_CAP}(?:{_SEP}{_CAP}){{0,2}}"
+_NAME_SEQ_CI = rf"{_CAP_CI}(?:{_SEP}{_CAP_CI}){{0,2}}"
 _TOKEN_RE = re.compile(rf"[^ {NBSP}]+")
 
 
@@ -134,9 +148,19 @@ _TITLE_TOKEN = rf"(?<!\w)(?:{'|'.join(_TITLE_WORDS)})\."
 # sloppy "JUDr.Ján" form still anchors.
 _TITLE_RUN = rf"(?:{_TITLE_TOKEN}{_SEP}*)+"
 
-_TITLE_LEADING_RE = re.compile(rf"{_TITLE_RUN}({_NAME_SEQ})")
-# Trailing academic degree: "Ján Novák, PhD." — the name precedes the title.
-_TITLE_TRAILING_RE = re.compile(rf"({_NAME_SEQ}){_SEP}*,?{_SEP}*{_TITLE_TOKEN}")
+def _title_leading_re(name_seq: str) -> re.Pattern[str]:
+    return re.compile(rf"{_TITLE_RUN}({name_seq})")
+
+
+def _title_trailing_re(name_seq: str) -> re.Pattern[str]:
+    # Trailing academic degree: "Ján Novák, PhD." — the name precedes the title.
+    return re.compile(rf"({name_seq}){_SEP}*,?{_SEP}*{_TITLE_TOKEN}")
+
+
+_TITLE_LEADING_RE = _title_leading_re(_NAME_SEQ)
+_TITLE_LEADING_RE_CI = _title_leading_re(_NAME_SEQ_CI)
+_TITLE_TRAILING_RE = _title_trailing_re(_NAME_SEQ)
+_TITLE_TRAILING_RE_CI = _title_trailing_re(_NAME_SEQ_CI)
 
 
 # -------------------------------------------------------------------------- 2. ROLES
@@ -156,19 +180,28 @@ _ROLE_STEMS = (
     "povinn", "dlžník", "dedič", "darc", "sved",
 )
 _END = rf"[{_LO}]{{0,3}}"
+# DIACRITICS (round-2 red-team, R2-2): a role stem is anchor vocabulary, not evidence, so it
+# folds via `diacritic_pattern` (technique A -- the anchor sits directly in the primary
+# match, so the pattern widens rather than any text being folded; offsets still come off the
+# original string untouched).
 _ROLE_ALT = "|".join(
-    [rf"{re.escape(a)}{_END}{_SEP}+{re.escape(b)}{_END}" for a, b in _ROLE_MULTIWORD]
-    + [rf"{re.escape(s)}{_END}" for s in _ROLE_STEMS]
+    [rf"{diacritic_pattern(a)}{_END}{_SEP}+{diacritic_pattern(b)}{_END}" for a, b in _ROLE_MULTIWORD]
+    + [rf"{diacritic_pattern(s)}{_END}" for s in _ROLE_STEMS]
 )
 # The role word is case-insensitive (documents write "PREDÁVAJÚCI", "Predávajúci",
 # "predávajúci"), but the NAME group must stay case-SENSITIVE — a global re.IGNORECASE
 # would make [A-Z…] match lowercase words and the Capitalized-token rule would evaporate.
-_ROLE_RE = re.compile(
-    rf"(?<!\w)(?i:{_ROLE_ALT})(?!\w)"
-    rf"{_SEP}*[:,]?{_SEP}*"
-    rf"(?:(?i:v){_SEP}+(?i:zastúpení|zastupeni){_SEP}*[:,]?{_SEP}*)?"
-    rf"({_NAME_SEQ})"
-)
+def _role_re(name_seq: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?<!\w)(?i:{_ROLE_ALT})(?!\w)"
+        rf"{_SEP}*[:,]?{_SEP}*"
+        rf"(?:(?i:v){_SEP}+(?i:zastúpení|zastupeni){_SEP}*[:,]?{_SEP}*)?"
+        rf"({name_seq})"
+    )
+
+
+_ROLE_RE = _role_re(_NAME_SEQ)
+_ROLE_RE_CI = _role_re(_NAME_SEQ_CI)
 
 
 # ------------------------------------------------------------------- 3. FIELD LABELS
@@ -189,7 +222,11 @@ _LABEL_TYPES: dict[str, str] = {
 }
 # Longest first: "Meno a priezvisko:" must win over the "priezvisko:" it contains, or the
 # same value would be emitted twice (finditer resumes after the longer match instead).
-_LABEL_ALT = "|".join(re.escape(lbl) for lbl in sorted(_LABEL_TYPES, key=len, reverse=True))
+# DIACRITICS: the label text itself is anchor vocabulary (folded via diacritic_pattern,
+# technique A); the dict lookup below therefore keys on `ascii_fold`, which folds case AND
+# diacritics together, rather than the exact literal the old `.casefold()` lookup required.
+_LABEL_ALT = "|".join(diacritic_pattern(lbl) for lbl in sorted(_LABEL_TYPES, key=len, reverse=True))
+_LABEL_TYPES_ASCII: dict[str, str] = {ascii_fold(k): v for k, v in _LABEL_TYPES.items()}
 _LABEL_RE = re.compile(
     # The gap between label and value may be padding tabs in a table row, so tabs are
     # skipped HERE while still terminating the value below — a leading tab is layout, a
@@ -240,14 +277,28 @@ def _trim_run(text: str, start: int, end: int) -> int | None:
 
 
 def _anchored(text: str) -> list[Candidate]:
+    # CASE: pick the STRICT (case-sensitive) or RELAXED (case-insensitive) regex set once
+    # per unit. Relaxing is safe here even though the value has no separator-based right
+    # boundary of its own, because `_trim_run` below already scans the WHOLE captured run
+    # (not just its leading token) and cuts at the first stoplisted word -- so a relaxed
+    # run that swallows a following anchor word ("PREDÁVAJÚCI JÁN NOVÁK TRVALE BYTOM..." in
+    # a genuinely all-caps party block) is truncated at "TRVALE" before "TRVALE BYTOM" is
+    # lost to the ADRESA detector. This is verified by
+    # `test_role_all_caps_document_stops_at_address_anchor` in tests/test_detect_name_anchors.py.
+    relaxed = document_is_single_case(text)
+    regexes = (
+        (_TITLE_LEADING_RE_CI, _TITLE_TRAILING_RE_CI, _ROLE_RE_CI)
+        if relaxed
+        else (_TITLE_LEADING_RE, _TITLE_TRAILING_RE, _ROLE_RE)
+    )
     out: list[Candidate] = []
-    for regex in (_TITLE_LEADING_RE, _TITLE_TRAILING_RE, _ROLE_RE):
+    for regex in regexes:
         for m in regex.finditer(text):
             end = _trim_run(text, m.start(1), m.end(1))
             if end is not None:
                 out.append(_cand("MENO", text, m.start(1), end, auto=True))
     for m in _LABEL_RE.finditer(text):
-        type_ = _LABEL_TYPES[m.group(1).casefold()]
+        type_ = _LABEL_TYPES_ASCII[ascii_fold(m.group(1))]
         value = m.group(2).rstrip(f" {NBSP}")
         if value:
             out.append(_cand(type_, text, m.start(2), m.start(2) + len(value), auto=True))

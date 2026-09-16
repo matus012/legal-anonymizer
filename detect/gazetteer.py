@@ -89,6 +89,7 @@ import sys
 from .config import DetectConfig
 from .core import Candidate
 from .declension import _tokens, stem
+from .identifiers import ascii_fold, document_is_single_case
 
 NBSP = " "
 # v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
@@ -186,8 +187,36 @@ def _index(filename: str) -> tuple[dict[str, str], dict[str, tuple], dict[str, s
 
 
 @functools.lru_cache(maxsize=None)
+def _index_ascii(filename: str) -> tuple[dict[str, str], dict[str, tuple], dict[str, str]]:
+    """A DIACRITIC-FOLDED mirror of ``_index`` (round-2 red-team, R2-2): "Kosice" (no
+    diacritics -- a mutated document, or a lawyer who never learned to type them) must still
+    meet ``Košice``'s stem, and the plain stem index is diacritic-EXACT because ``stem()``
+    deliberately preserves them (the -sk-/-ck- discriminator is a consonant infix, untouched
+    by folding vowels and consonant diacritics away).
+
+    OFFSET-SAFE even though ``ascii_fold`` is not 1:1: the fold is applied only to the
+    DICTIONARY KEY, never to the text a span is cut from. Every canonical value and every
+    offset returned to a caller still comes from ``_index``'s own (unfolded) data and from
+    the caller's own token span -- this function only widens which KEY reaches that unchanged
+    data, exactly the way ``diacritic_pattern`` widens a regex pattern instead of folding the
+    text it matches against."""
+    single, multi, head = _index(filename)
+    single_a: dict[str, str] = {ascii_fold(k): v for k, v in single.items()}
+    multi_a: dict[str, list[tuple[tuple[str, ...], str]]] = {}
+    for k, entries in multi.items():
+        multi_a.setdefault(ascii_fold(k), []).extend(entries)
+    head_a: dict[str, str] = {ascii_fold(k): v for k, v in head.items()}
+    return single_a, {k: tuple(v) for k, v in multi_a.items()}, head_a
+
+
+@functools.lru_cache(maxsize=None)
 def _stoplist_stems() -> frozenset[str]:
     return frozenset(stem(w) for w in _load_names(_STOPLIST))
+
+
+@functools.lru_cache(maxsize=None)
+def _stoplist_stems_ascii() -> frozenset[str]:
+    return frozenset(ascii_fold(s) for s in _stoplist_stems())
 
 
 def _clear_caches() -> None:
@@ -195,21 +224,24 @@ def _clear_caches() -> None:
     ``_data_dir`` at a temporary directory."""
     _load_names.cache_clear()
     _index.cache_clear()
+    _index_ascii.cache_clear()
     _stoplist_stems.cache_clear()
+    _stoplist_stems_ascii.cache_clear()
 
 
 # ----------------------------------------------------------------------------- anchors
 # Place/address context that independently confirms a stoplisted word really is a place.
+# CASE / DIACRITICS: both anchor tests below are context-WINDOW checks (never sliced, never
+# a source of an offset), so they use technique B -- fold the window with ``ascii_fold`` and
+# match against an ascii-spelled, lowercase pattern. That one fold covers case AND
+# diacritics together, so no separate ``re.IGNORECASE`` is needed here.
 _PLACE_ANCHOR_RE = re.compile(
-    r"ul\.|ulica|ulici|nám\.|námest|trieda|cesta|obec|obci|obce|mesto|meste|mesta"
-    r"|okres|kataster|katastrálne územie|k\.\s?ú\.|trvale bytom|bytom|bydlisko"
-    r"|so sídlom|sídlo|na adrese|adresa|adrese|pobyt",
-    re.IGNORECASE,
+    r"ul\.|ulica|ulici|nam\.|namest|trieda|cesta|obec|obci|obce|mesto|meste|mesta"
+    r"|okres|kataster|katastralne uzemie|k\.\s?u\.|trvale bytom|bytom|bydlisko"
+    r"|so sidlom|sidlo|na adrese|adresa|adrese|pobyt"
 )
 # Street-specific keyword, immediately before the street name (contract §12).
-_STREET_KEYWORD_RE = re.compile(
-    rf"(?:ul\.|ulica|nám\.|námestie|trieda|cesta){_SEP}+$", re.IGNORECASE
-)
+_STREET_KEYWORD_RE = re.compile(rf"(?:ul\.|ulica|nam\.|namestie|trieda|cesta){_SEP}+$")
 # A house number (optionally with an orientation suffix) or a PSČ right after the name.
 _NUMBER_AFTER_RE = re.compile(
     rf"^,?{_SEP}*(?:\d{{3}}{_SEP}\d{{2}}|\d{{1,4}}(?:/[A-Za-z0-9]{{1,3}})?)(?!\d)"
@@ -239,7 +271,7 @@ def _place_anchored(text: str, start: int, end: int) -> bool:
     A plain house number still anchors a NON-stoplisted street (see _street_anchored); this
     stricter rule applies only to the 79 hand-listed collision words."""
     return bool(
-        _PLACE_ANCHOR_RE.search(text[max(0, start - _ANCHOR_WINDOW) : start])
+        _PLACE_ANCHOR_RE.search(ascii_fold(text[max(0, start - _ANCHOR_WINDOW) : start]))
         or _PSC_AFTER_RE.match(text[end:])
     )
 
@@ -258,7 +290,7 @@ def _street_anchored(text: str, start: int, end: int, *, stoplisted: bool = Fals
     place in the gazetteer where precision beats recall, and it is narrow on purpose: it
     applies only to the 79 hand-listed collision words, and only to the weaker of the two
     anchors. "ul. Strana 3" still matches."""
-    keyword = _STREET_KEYWORD_RE.search(text[max(0, start - _ANCHOR_WINDOW) : start])
+    keyword = _STREET_KEYWORD_RE.search(ascii_fold(text[max(0, start - _ANCHOR_WINDOW) : start]))
     if stoplisted:
         return bool(keyword)
     return bool(keyword or _HOUSENUM_AFTER_RE.match(text[end:]))
@@ -273,6 +305,12 @@ _SURNAME_COMMON_WORDS = frozenset(
         "Čierny", "Bystrý", "Tichý", "Krátky", "Dlhý", "Sokol", "Holub", "Zajac", "Baran",
         "Kohút", "Vrabec", "Mráz", "Slovák", "Nemec", "Rybár", "Bača", "Richtár", "Sedliak",
         "Pekný", "Hlava", "Hruška", "Sviečka", "Zima", "Jeseň",
+        # "Sídlo" (the "so sídlom" / "Sídlo:" address anchor word) collides with a real
+        # surname once the diacritic-folded lookup fallback is applied (R2-2): stem("Sídlo")
+        # folds to "sidl", which some surname in surnames.json also ascii-folds to. Measured
+        # on the corpus (zmluva_v11_041.docx): "Sídlo:" was emitted as a review-bucket MENO
+        # candidate. Suppressed here exactly like the other common-word/surname collisions.
+        "Sídlo",
     }
 )
 
@@ -280,6 +318,11 @@ _SURNAME_COMMON_WORDS = frozenset(
 @functools.lru_cache(maxsize=None)
 def _surname_stop_stems() -> frozenset[str]:
     return frozenset(stem(w) for w in _SURNAME_COMMON_WORDS)
+
+
+@functools.lru_cache(maxsize=None)
+def _surname_stop_stems_ascii() -> frozenset[str]:
+    return frozenset(ascii_fold(s) for s in _surname_stop_stems())
 
 
 # -------------------------------------------------------------------------- token helpers
@@ -297,13 +340,25 @@ def _surname_stop_stems() -> frozenset[str]:
 # reviewer start blind-approving (context.md 9).
 _MIN_GAZETTEER_TOKEN = 3
 
-
-def _capitalized(core: str) -> bool:
-    return (
-        len(core) >= _MIN_GAZETTEER_TOKEN
-        and core[:1].isupper()
-        and any(ch.islower() for ch in core[1:])
-    )
+# CASE (round-2 red-team, R2-5/C-5): the Amendment-6 guard above needs a lowercase letter to
+# exist AT ALL, which an all_caps/lowercase mutation removes from the entire unit -- the
+# guard then rejects every place/street/name token regardless of whether it is a real
+# gazetteer hit, punishing the STEM INDEX lookup (which still matches: stem("KOSICE") ==
+# stem("Kosice")) for a precision guard that has no evidence left to test. Relaxed to "looks
+# like a whole word, no digits" ONLY when `document_is_single_case` (detect/identifiers.py,
+# shared across every module that needs this gate) says the unit itself has no
+# capitalisation signal left to lose -- an ordinary mixed-case paragraph never reaches it.
+# This does not re-admit "VIN" (redteam finding C-5): that unit is short (~11 letters between
+# the label and the code), under the shared helper's length floor, so it still gets the
+# STRICT guard even when it happens to be written in a single case. Unlike name_anchors.py
+# and orgs.py, no right-boundary fix is needed here: `_capitalized` gates a single TOKEN
+# (never a multi-token greedy run), so there is nothing for a relaxed match to swallow.
+def _capitalized(core: str, *, relaxed: bool = False) -> bool:
+    if len(core) < _MIN_GAZETTEER_TOKEN:
+        return False
+    if relaxed:
+        return core.isalpha()
+    return core[:1].isupper() and any(ch.islower() for ch in core[1:])
 
 
 def _adjacent(text: str, end: int, next_start: int) -> bool:
@@ -334,30 +389,58 @@ def _match_multi(
     return None
 
 
+def _match_multi_folded(
+    text: str,
+    toks: list[tuple[str, int, int]],
+    tstems: list[str],
+    tstems_ascii: list[str],
+    i: int,
+    s: str,
+    s_ascii: str,
+    multi: dict[str, tuple],
+    multi_ascii: dict[str, tuple],
+) -> int | None:
+    """``_match_multi``, tried first on the exact (diacritic-preserving) stem and, only if
+    that misses, again on the diacritic-folded stem against the folded index (R2-2). Offset-
+    safe: both attempts return a token INDEX, and every span the caller builds from it still
+    comes from ``toks`` -- the original token positions, never a folded string."""
+    if s in multi:
+        last = _match_multi(text, toks, tstems, i, multi[s])
+        if last is not None:
+            return last
+    if s_ascii in multi_ascii:
+        return _match_multi(text, toks, tstems_ascii, i, multi_ascii[s_ascii])
+    return None
+
+
 def _place_hits(
     text: str,
     toks: list[tuple[str, int, int]],
     tstems: list[str],
+    tstems_ascii: list[str],
     filename: str,
     type_: str,
+    *,
+    relaxed: bool,
 ) -> list[Candidate]:
     single, multi, head = _index(filename)
+    single_a, multi_a, head_a = _index_ascii(filename)
     out: list[Candidate] = []
     i = 0
     while i < len(toks):
         core, start, end = toks[i]
-        if not _capitalized(core):
+        if not _capitalized(core, relaxed=relaxed):
             i += 1
             continue
-        s = tstems[i]
-        last = _match_multi(text, toks, tstems, i, multi.get(s, ())) if s in multi else None
+        s, s_a = tstems[i], tstems_ascii[i]
+        last = _match_multi_folded(text, toks, tstems, tstems_ascii, i, s, s_a, multi, multi_a)
         if last is not None:
             out.append(_place_candidate(text, type_, start, toks[last][2]))
             i = last + 1
             continue
-        if s in single:
+        if s in single or s_a in single_a:
             out.append(_place_candidate(text, type_, start, end))
-        elif s in head:
+        elif s in head or s_a in head_a:
             # head-noun-only hit on a multi-word place — the recorded sub-gap, review bucket
             out.append(Candidate(type_, text[start:end], start, end, False, "n/a"))
         i += 1
@@ -374,18 +457,24 @@ def _place_candidate(text: str, type_: str, start: int, end: int) -> Candidate:
 
 # --------------------------------------------------------------------------- street walk
 def _street_hits(
-    text: str, toks: list[tuple[str, int, int]], tstems: list[str]
+    text: str,
+    toks: list[tuple[str, int, int]],
+    tstems: list[str],
+    tstems_ascii: list[str],
+    *,
+    relaxed: bool,
 ) -> list[Candidate]:
     single, multi, _head = _index(_ULICE)
+    single_a, multi_a, _head_a = _index_ascii(_ULICE)
     out: list[Candidate] = []
     i = 0
     while i < len(toks):
         core, start, end = toks[i]
-        if not _capitalized(core):
+        if not _capitalized(core, relaxed=relaxed):
             i += 1
             continue
-        s = tstems[i]
-        last = _match_multi(text, toks, tstems, i, multi.get(s, ())) if s in multi else None
+        s, s_a = tstems[i], tstems_ascii[i]
+        last = _match_multi_folded(text, toks, tstems, tstems_ascii, i, s, s_a, multi, multi_a)
         if last is not None:
             span_end = toks[last][2]
             if _street_anchored(text, start, span_end):
@@ -396,35 +485,45 @@ def _street_hits(
             # it here, so it is dropped — and the walk does NOT skip its tokens: the inner
             # name may still be anchored on its own ("bydlisko Ulica Štúrova" anchors
             # "Štúrova" on the keyword "Ulica").
-        if s in single and _street_anchored(text, start, end, stoplisted=s in _stoplist_stems()):
-            out.append(Candidate("ULICA", text[start:end], start, end, True, "n/a"))
+        if s in single or s_a in single_a:
+            stoplisted = s in _stoplist_stems() or s_a in _stoplist_stems_ascii()
+            if _street_anchored(text, start, end, stoplisted=stoplisted):
+                out.append(Candidate("ULICA", text[start:end], start, end, True, "n/a"))
         i += 1
     return out
 
 
 # ----------------------------------------------------------------------------- name walk
 def _name_hits(
-    text: str, toks: list[tuple[str, int, int]], tstems: list[str]
+    text: str,
+    toks: list[tuple[str, int, int]],
+    tstems: list[str],
+    tstems_ascii: list[str],
+    *,
+    relaxed: bool,
 ) -> list[Candidate]:
-    given = _index(_FIRST_NAMES)[0]
+    given, _given_m, _given_h = _index(_FIRST_NAMES)
+    given_a = _index_ascii(_FIRST_NAMES)[0]
     surnames = _index(_SURNAMES)[0]
+    surnames_a = _index_ascii(_SURNAMES)[0]
     stopped = _surname_stop_stems()
+    stopped_a = _surname_stop_stems_ascii()
     out: list[Candidate] = []
     i = 0
     while i < len(toks):
         core, start, end = toks[i]
-        if not _capitalized(core):
+        if not _capitalized(core, relaxed=relaxed):
             i += 1
             continue
-        s = tstems[i]
-        if s in given:
+        s, s_a = tstems[i], tstems_ascii[i]
+        if s in given or s_a in given_a:
             nxt = toks[i + 1] if i + 1 < len(toks) else None
-            if nxt is not None and _capitalized(nxt[0]) and _adjacent(text, end, nxt[1]):
+            if nxt is not None and _capitalized(nxt[0], relaxed=relaxed) and _adjacent(text, end, nxt[1]):
                 out.append(Candidate("MENO", text[start : nxt[2]], start, nxt[2], True, "n/a"))
                 i += 2
                 continue
             out.append(Candidate("MENO", core, start, end, False, "n/a"))
-        elif s in surnames and s not in stopped:
+        elif (s in surnames or s_a in surnames_a) and s not in stopped and s_a not in stopped_a:
             out.append(Candidate("MENO", core, start, end, False, "n/a"))
         i += 1
     return out
@@ -443,9 +542,13 @@ def detect_gazetteer(text: str, config: DetectConfig) -> list[Candidate]:
     if not toks:
         return []
     tstems = [stem(core) for core, _s, _e in toks]
+    tstems_ascii = [ascii_fold(s) for s in tstems]
+    relaxed = document_is_single_case(text)
     out: list[Candidate] = []
-    out.extend(_place_hits(text, toks, tstems, _OBCE, "OBEC"))
-    out.extend(_place_hits(text, toks, tstems, _KATASTER, "KATASTER"))
-    out.extend(_street_hits(text, toks, tstems))
-    out.extend(_name_hits(text, toks, tstems))
+    out.extend(_place_hits(text, toks, tstems, tstems_ascii, _OBCE, "OBEC", relaxed=relaxed))
+    out.extend(
+        _place_hits(text, toks, tstems, tstems_ascii, _KATASTER, "KATASTER", relaxed=relaxed)
+    )
+    out.extend(_street_hits(text, toks, tstems, tstems_ascii, relaxed=relaxed))
+    out.extend(_name_hits(text, toks, tstems, tstems_ascii, relaxed=relaxed))
     return out

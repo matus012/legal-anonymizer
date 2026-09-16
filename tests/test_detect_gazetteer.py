@@ -65,8 +65,19 @@ def test_head_city_names_derived_by_the_builder_match() -> None:
 
 
 def test_lowercase_common_word_is_not_a_place() -> None:
-    # gazetteer entries are proper nouns; a lowercase token is never a place hit
-    assert of_type("pri potoku a lúke rástla lipa", "OBEC") == []
+    # gazetteer entries are proper nouns; a lowercase token is never AUTO-redacted as a
+    # place, on the strength of the word alone.
+    #
+    # CONTRACT CHANGE (round-2 red-team, R2-5/C-5): this text is a bare, entirely-lowercase
+    # fragment -- every letter in it is lowercase, well past `document_is_single_case`'s
+    # length floor. An all_caps/lowercase mutation produces exactly this shape over a whole
+    # unit, and the Amendment-6 capitalisation guard was rejecting the STEM INDEX's own
+    # correct hit in that state (OBEC/KATASTER measured 0.043/0.057 robustness) with no
+    # capitalisation evidence left to test either way. The fix relaxes the SHAPE guard for a
+    # single-case unit, but the AUTO/review split is unchanged: a stoplisted word (like
+    # "potoku") still lands in the REVIEW bucket, never AUTO, without an independent place
+    # anchor -- so this now asserts the narrower, still-true claim.
+    assert autos("pri potoku a lúke rástla lipa", "OBEC") == []
 
 
 # ------------------------------------------------------------------------- KATASTER

@@ -61,6 +61,7 @@ import re
 
 from .config import DetectConfig
 from .core import Candidate
+from .identifiers import ascii_fold, diacritic_pattern, document_is_single_case
 
 NBSP = " "
 _SP = f"[ {NBSP}]"  # a literal space or NBSP, exactly where Slovak typography allows one
@@ -86,26 +87,35 @@ _CONN = rf"(?i:a|and)(?![{_NAMECHAR}])|&"
 # Up to four capitalised tokens: enough for "Erste Group Bank AG", short enough that a
 # runaway capitalised sentence cannot be claimed whole.
 _RUN = rf"{_TOK}(?:{_AWS}(?:(?:{_CONN}){_AWS})?{_TOK}){{0,3}}"
-_TOK_RE = re.compile(_TOK)
+# CASE: (?i:...) so this still finds tokens inside a `_RUN_CI` match that came back in any
+# case (an anchored bank-name run, see `_trim_run` below).
+_TOK_RE = re.compile(rf"(?i:{_TOK})")
 
 
 def _dotted(letters: str) -> str:
     """A dotted abbreviation with every spacing variant that really occurs: ``s.r.o.``,
     ``s. r. o.``, ``s.r.o`` (no final dot), an NBSP or a line break anywhere a space can go.
     The trailing whitespace is INSIDE the optional-dot group, so a suffix written without its
-    final dot never drags trailing spaces into the span."""
-    return r"\s*\.\s*".join(letters) + r"(?:\s*\.)?"
+    final dot never drags trailing spaces into the span. DIACRITICS: each letter folds via
+    `diacritic_pattern` (``š`` -> ``[šs]``) -- the abbreviation letters are anchor vocabulary,
+    not evidence."""
+    return r"\s*\.\s*".join(diacritic_pattern(ch) for ch in letters) + r"(?:\s*\.)?"
 
 
 # ------------------------------------------------------------------------ legal-form suffixes
 # Longest / most specific alternative FIRST: Python's alternation takes the first that
 # matches, and "spol. s r.o." must not be left to the bare "s.r.o." alternative.
+# DIACRITICS (round-2 red-team): every literal word here is the legal-form suffix itself --
+# fixed anchor vocabulary defined by the Obchodný zákonník, never evidence -- so it folds via
+# `diacritic_pattern` (technique A: the pattern widens, the match still comes off the
+# original text). CASE folds separately via the module-scoped `(?i:...)` around `_SUFFIX`.
 _SUFFIX_ALTS = (
-    rf"spoločnosť{_AWS}s{_AWS}ručením{_AWS}obmedzeným",
+    rf"{diacritic_pattern('spoločnosť')}{_AWS}s{_AWS}{diacritic_pattern('ručením')}"
+    rf"{_AWS}{diacritic_pattern('obmedzeným')}",
     rf"spol(?:\s*\.)?{_AWS}s{_AWS}" + _dotted("ro"),
-    rf"akciová{_AWS}spoločnosť",
-    rf"štátny{_AWS}podnik",
-    r"družstvo",
+    rf"{diacritic_pattern('akciová')}{_AWS}{diacritic_pattern('spoločnosť')}",
+    rf"{diacritic_pattern('štátny')}{_AWS}podnik",
+    diacritic_pattern("družstvo"),
     _dotted("jsa"),
     _dotted("vos"),
     _dotted("sro"),
@@ -130,7 +140,8 @@ _ORG_SUFFIX_RE = re.compile(rf"(?<!\w)({_RUN}(?:,)?\s+{_SUFFIX})")
 # exactly as detect/office_refs.py::_NAZOV_UCTU_RE does. A single internal space is part of
 # the value, so multi-word company names survive.
 _ORG_LABEL_RE = re.compile(
-    rf"(?i:obchodné{_AWS}meno|obchodná{_AWS}firma|názov{_AWS}spoločnosti){_SP}*:?{_SP}*"
+    rf"(?i:{diacritic_pattern('obchodné')}{_AWS}meno|{diacritic_pattern('obchodná')}{_AWS}firma"
+    rf"|{diacritic_pattern('názov')}{_AWS}{diacritic_pattern('spoločnosti')}){_SP}*:?{_SP}*"
     rf"([^\n\t]+?)(?={_SP}{{2,}}|\t|\n|$)"
 )
 
@@ -138,10 +149,33 @@ _ORG_LABEL_RE = re.compile(
 # ``corpus/templates/_common.py`` seeds "Advokátska kancelária <surname>" as an ORG ground
 # truth — a company name with NO legal-form suffix. These office forms name the organisation,
 # so the anchor phrase is INSIDE the span: "Advokátska kancelária Kováč" is the whole name.
-_ORG_OFFICE_RE = re.compile(
-    rf"(?<!\w)((?i:advokátska{_AWS}kancelária|notársky{_AWS}úrad|exekútorský{_AWS}úrad"
-    rf"|znalecký{_AWS}ústav){_AWS}{_RUN})"
-)
+# CASE: the office phrase is a REAL anchor (unlike the bare legal-form-suffix rule below,
+# which keeps `_RUN` case-sensitive because capitalisation is its only evidence). BUT: this
+# run has no separator-based right boundary either (nothing requires a suffix or a comma
+# after the name), so relaxing it unconditionally regressed real mixed-case text -- a
+# genuinely all-caps unit has no case signal left to mark where the office name ends, so
+# `_RUN_CI` alone would swallow trailing prose ("ADVOKÁTSKA KANCELÁRIA KOVÁČ SO SÍDLOM V..."
+# would consume "SO SÍDLOM V" too). Two things fix it together: (1) `_RUN_CI` is used ONLY
+# when `document_is_single_case` says the whole unit has no case signal to lose anyway
+# (mirrors name_anchors.py's `_anchored`), and (2) every match -- strict or relaxed -- is
+# passed through `_trim_run` below, which truncates at the first stoplisted word regardless
+# of which variant matched. `_TOK_CI`/`_RUN_CI` mirror `_TOK`/`_RUN` with the leading-capital
+# requirement folded case-insensitive.
+_TOK_CI = rf"(?i:[{_UPPER}][{_NAMECHAR}]*)"
+_RUN_CI = rf"{_TOK_CI}(?:{_AWS}(?:(?:{_CONN}){_AWS})?{_TOK_CI}){{0,3}}"
+
+
+def _org_office_re(run: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?<!\w)((?i:{diacritic_pattern('advokátska')}{_AWS}{diacritic_pattern('kancelária')}"
+        rf"|{diacritic_pattern('notársky')}{_AWS}{diacritic_pattern('úrad')}"
+        rf"|{diacritic_pattern('exekútorský')}{_AWS}{diacritic_pattern('úrad')}"
+        rf"|{diacritic_pattern('znalecký')}{_AWS}{diacritic_pattern('ústav')}){_AWS}{run})"
+    )
+
+
+_ORG_OFFICE_RE = _org_office_re(_RUN)
+_ORG_OFFICE_RE_CI = _org_office_re(_RUN_CI)
 
 
 # ================================================================================ NAZOV_BANKY
@@ -195,18 +229,20 @@ _BANKS = (
 
 
 def _literal(name: str) -> str:
-    """A closed-list entry as a regex: every word escaped, every gap tolerant of a newline,
-    an NBSP or a run of spaces (the ``_AWS`` rule — a bank name wrapped across a PDF line
-    break must still match)."""
-    return _AWS.join(re.escape(w) for w in name.split())
+    """A closed-list entry as a regex: every word diacritic-folded (``diacritic_pattern``)
+    and case handled by the caller's ``(?i:...)`` wrap, every gap tolerant of a newline, an
+    NBSP or a run of spaces (the ``_AWS`` rule — a bank name wrapped across a PDF line break
+    must still match). DIACRITICS: a bank's registered name is fixed vocabulary here, not
+    evidence, so a de-accented spelling ("Slovenska sporitelna") must still match."""
+    return _AWS.join(diacritic_pattern(w) for w in name.split())
 
 
 _BANK_NAMES = "(?i:" + "|".join(
     _literal(n) for n in sorted(_BANKS, key=len, reverse=True)
 ) + ")"
-_POBOCKA = rf"(?i:pobočka{_AWS}zahraničnej{_AWS}banky)"
+_POBOCKA = rf"(?i:{diacritic_pattern('pobočka')}{_AWS}{diacritic_pattern('zahraničnej')}{_AWS}banky)"
 # The anchor words, in the cases a Slovak contract actually writes them.
-_BANK_WORD = r"(?i:bank(?:a|y|e|ou|ám|ách))"
+_BANK_WORD = rf"(?i:bank(?:a|y|e|ou|{diacritic_pattern('ám')}|{diacritic_pattern('ách')}))"
 
 # A closed-list name, optionally trailed by a legal-form suffix and/or the foreign-branch
 # phrase. Both tails are part of the bank's registered name as written, so both are in the
@@ -214,32 +250,75 @@ _BANK_WORD = r"(?i:bank(?:a|y|e|ou|ám|ách))"
 _BANK_RE = re.compile(
     rf"(?<!\w){_BANK_NAMES}(?!\w)(?:,?\s+{_SUFFIX})?(?:,?\s+{_POBOCKA})?"
 )
-# Anchored forms, for a bank that is not on the closed list.
-_BANK_BEFORE_RE = re.compile(rf"(?<!\w)({_RUN}{_AWS}{_BANK_WORD})(?!\w)")
-_BANK_POBOCKA_BEFORE_RE = re.compile(rf"(?<!\w)({_RUN})(?:,)?\s+{_POBOCKA}(?!\w)")
-_BANK_AFTER_RE = re.compile(rf"(?:{_POBOCKA}|(?<!\w){_BANK_WORD}){_AWS}({_RUN})(?!\w)")
+# Anchored forms, for a bank that is not on the closed list. CASE: same "relaxed only when
+# the whole unit has no case signal left" gating as `_ORG_OFFICE_RE` above -- `_BANK_BEFORE_RE`
+# in particular has NOTHING after the run but the bank word (no comma, no suffix), so an
+# unconditional case fold swallowed ordinary prose ("Banka poskytla úver dňa" read as a bank
+# name). Every match, strict or relaxed, still goes through `_trim_run`.
+def _bank_before_re(run: str) -> re.Pattern[str]:
+    # Group 1 is the RUN ONLY (unlike the other two forms, the trailing "banka"/"banky" IS
+    # part of this form's surface -- "Považská banka" -- so it must never be handed to
+    # `_trim_run`'s stopword scan, which would otherwise cut the anchor word right back off
+    # since "banka" is itself in `_ANCHOR_STOPWORDS`). The caller extends the trimmed run's
+    # end out to the full match instead of using group 1's own end.
+    return re.compile(rf"(?<!\w)({run}){_AWS}{_BANK_WORD}(?!\w)")
+
+
+def _bank_pobocka_before_re(run: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<!\w)({run})(?:,)?\s+{_POBOCKA}(?!\w)")
+
+
+def _bank_after_re(run: str) -> re.Pattern[str]:
+    return re.compile(rf"(?:{_POBOCKA}|(?<!\w){_BANK_WORD}){_AWS}({run})(?!\w)")
+
+
+_BANK_BEFORE_RE = _bank_before_re(_RUN)
+_BANK_BEFORE_RE_CI = _bank_before_re(_RUN_CI)
+_BANK_POBOCKA_BEFORE_RE = _bank_pobocka_before_re(_RUN)
+_BANK_POBOCKA_BEFORE_RE_CI = _bank_pobocka_before_re(_RUN_CI)
+_BANK_AFTER_RE = _bank_after_re(_RUN)
+_BANK_AFTER_RE_CI = _bank_after_re(_RUN_CI)
 
 # Words that are the LABEL, not the name, when they stand next to the anchor. Without this,
 # "Kód banky: 1100" emits "Kód" as a bank name, and the report then tells the reviewer the
 # document names a bank called "Kód" — a report that cannot be checked against the document is
 # the failure mode CONTRACTS_v11.md Amendment 5 was written about.
 _ANCHOR_STOPWORDS = frozenset(
-    {
-        "kód", "kod", "číslo", "cislo", "názov", "nazov", "pobočka", "pobocka", "adresa",
-        "sídlo", "sidlo", "účet", "ucet", "iban", "bic", "swift", "zmluva", "banka",
+    ascii_fold(w)
+    for w in (
+        "kód", "číslo", "názov", "pobočka", "adresa",
+        "sídlo", "účet", "iban", "bic", "swift", "zmluva", "banka",
         "banky", "banke", "klient", "klienta", "majiteľ", "vlastník", "prevod", "platba",
-        "suma", "výpis", "vypis", "strana", "článok", "clanok", "príloha", "priloha",
-    }
+        "suma", "výpis", "strana", "článok", "príloha",
+    )
 )
 
 
 def _trim_run(text: str, start: int, end: int) -> tuple[int, int] | None:
-    """Drop leading stoplisted tokens from a capitalised run. Returns the trimmed span, or
-    None when nothing survives (the whole run was a label)."""
+    """Drop leading stoplisted tokens from a capitalised run, and TRUNCATE the run at the
+    first stoplisted token found anywhere after that. Returns the trimmed span, or None when
+    nothing survives (the whole run was a label).
+
+    The truncation half matters for the RELAXED (`_RUN_CI`) match sites: a genuinely all-caps
+    unit ("BANKA POSKYTLA ÚVER OD SLOVENSKEJ SPORITEĹNE") has no capitalisation signal left
+    to mark where the bank's actual name ends, so the run can swallow trailing prose. Cutting
+    at the first stoplisted word ("ÚVER" is not one, but a real label word like "ÚČET"/"IBAN"
+    would be) bounds the damage the same way name_anchors.py's `_trim_run` already does for
+    MENO -- see that module's docstring for the mechanism this mirrors."""
+    tok_start = None
     for m in _TOK_RE.finditer(text, start, end):
-        if m.group().casefold() not in _ANCHOR_STOPWORDS:
-            return m.start(), end
-    return None
+        if ascii_fold(m.group()) not in _ANCHOR_STOPWORDS:
+            tok_start = m.start()
+            break
+    if tok_start is None:
+        return None
+    run_end = end
+    for m in _TOK_RE.finditer(text, tok_start, end):
+        if ascii_fold(m.group()) in _ANCHOR_STOPWORDS:
+            run_end = m.start()
+            break
+    trimmed = text[tok_start:run_end].rstrip()
+    return (tok_start, tok_start + len(trimmed)) if trimmed else None
 
 
 def _candidate(type_: str, text: str, start: int, end: int) -> Candidate:
@@ -253,16 +332,34 @@ def _candidate(type_: str, text: str, start: int, end: int) -> Candidate:
     )
 
 
-def _detect_org(text: str) -> list[tuple[str, int, int]]:
+def _detect_org(text: str, *, relaxed: bool) -> list[tuple[str, int, int]]:
+    office_re = _ORG_OFFICE_RE_CI if relaxed else _ORG_OFFICE_RE
     spans = [(m.start(1), m.end(1)) for m in _ORG_SUFFIX_RE.finditer(text)]
     spans += [(m.start(1), m.end(1)) for m in _ORG_LABEL_RE.finditer(text)]
-    spans += [(m.start(1), m.end(1)) for m in _ORG_OFFICE_RE.finditer(text)]
-    return [("ORG", s, e) for s, e in spans]
+    out = [("ORG", s, e) for s, e in spans]
+    for m in office_re.finditer(text):
+        trimmed = _trim_run(text, m.start(1), m.end(1))
+        if trimmed is not None:
+            out.append(("ORG", trimmed[0], trimmed[1]))
+    return out
 
 
-def _detect_nazov_banky(text: str) -> list[tuple[str, int, int]]:
+def _detect_nazov_banky(text: str, *, relaxed: bool) -> list[tuple[str, int, int]]:
+    before_re, pobocka_re, after_re = (
+        (_BANK_BEFORE_RE_CI, _BANK_POBOCKA_BEFORE_RE_CI, _BANK_AFTER_RE_CI)
+        if relaxed
+        else (_BANK_BEFORE_RE, _BANK_POBOCKA_BEFORE_RE, _BANK_AFTER_RE)
+    )
     out = [("NAZOV_BANKY", m.start(), m.end()) for m in _BANK_RE.finditer(text)]
-    for pattern in (_BANK_BEFORE_RE, _BANK_POBOCKA_BEFORE_RE, _BANK_AFTER_RE):
+    # "banka"/"banky" trails the RUN and is part of THIS form's surface -- trim only the
+    # run, then extend back out to the whole match (which includes that trailing word).
+    for m in before_re.finditer(text):
+        trimmed = _trim_run(text, m.start(1), m.end(1))
+        if trimmed is not None:
+            out.append(("NAZOV_BANKY", trimmed[0], m.end(0)))
+    # The other two forms exclude their anchor phrase from the surface, so the trimmed run
+    # is the whole answer.
+    for pattern in (pobocka_re, after_re):
         for m in pattern.finditer(text):
             trimmed = _trim_run(text, m.start(1), m.end(1))
             if trimmed is not None:
@@ -284,9 +381,12 @@ def detect_orgs(text: str, config: DetectConfig) -> list[Candidate]:
     itself.
     """
     del config
+    relaxed = document_is_single_case(text)
     seen: set[tuple[str, int, int]] = set()
     out: list[Candidate] = []
-    for type_, start, end in _detect_org(text) + _detect_nazov_banky(text):
+    for type_, start, end in _detect_org(text, relaxed=relaxed) + _detect_nazov_banky(
+        text, relaxed=relaxed
+    ):
         key = (type_, start, end)
         if key in seen:
             continue
