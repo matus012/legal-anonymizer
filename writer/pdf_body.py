@@ -51,6 +51,7 @@ search_for at three rects is one redacted occurrence, three destroyed boxes.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import fitz
 
@@ -64,6 +65,25 @@ from writer.report import write_report
 
 class NoTextLayerError(Exception):
     pass
+
+
+class UnreadableTextLayerError(NoTextLayerError):
+    """Some page carries drawn text whose characters cannot be interpreted.
+
+    A SUBCLASS of NoTextLayerError on purpose: every existing caller that already refuses a
+    PDF without a text layer refuses this one too, with no change. The distinct type exists so
+    the GUI can say something more useful than "this is a scan" -- the file is not a scan, it
+    is a PDF whose font carries no /ToUnicode map, and the fix for the lawyer is different.
+
+    Carries ``pages`` (1-based) so the message can name them."""
+
+    def __init__(self, path: str, pages: list[int]) -> None:
+        self.pages = list(pages)
+        super().__init__(
+            f"PDF has text that cannot be decoded on page(s) "
+            f"{', '.join(str(p) for p in self.pages)}; refusing rather than writing a file "
+            f"whose visible text was never examined: {path}"
+        )
 
 
 class RedactionIncompleteError(Exception):
@@ -81,8 +101,82 @@ class RedactionIncompleteError(Exception):
         )
 
 
+# A character is UNDECODABLE when it is a CONTROL character (Cc), a private-use codepoint (Co)
+# or unassigned (Cn) -- what a font with no /ToUnicode map yields, since the extractor falls
+# back to the raw glyph index.
+#
+# NOT str.isprintable(), which was the first attempt and was badly wrong. isprintable() is
+# False for FORMAT characters (Cf) too, and a PDF text layer is full of legitimate ones:
+# PyMuPDF renders an ordinary hyphen in an account number as U+00AD SOFT HYPHEN. Measured
+# before shipping: every one of the first six corpus PDFs carries 1-5 soft hyphens, inside
+# account numbers, LV references and ISO dates -- text the pipeline reads perfectly and
+# eval/extract.py already normalises. The first version of this guard would have refused them
+# all. A false refusal is not the safe direction here; it is the tool declining ordinary work,
+# which ends with the office switching it off.
+_UNDECODABLE_CATEGORIES = frozenset({"Cc", "Co", "Cn"})
+
+
+def _is_undecodable(ch: str) -> bool:
+    return unicodedata.category(ch) in _UNDECODABLE_CATEGORIES
+
+
+# A page's text is USABLE when enough of its non-space characters are printable. A subset font
+# with no /ToUnicode map extracts as raw glyph codes -- control characters -- which are neither
+# blank nor readable, and that is the exact gap this ratio closes.
+#
+# The threshold is deliberately loose. A legal page is overwhelmingly letters, digits and
+# punctuation, so a genuine page scores near 1.0 and a garbage page near 0.0; anything in
+# between is rare enough that erring toward REFUSAL is right. Refusing costs the lawyer a
+# conversion step. Accepting costs them an unredacted file they believe is clean.
+_READABLE_MIN_RATIO = 0.80
+_READABLE_MIN_CHARS = 8
+
+
+def page_text_is_readable(text: str) -> bool:
+    """Can this page's extracted text be interpreted at all? Blank counts as NOT readable."""
+    dense = [ch for ch in text if not ch.isspace()]
+    if len(dense) < _READABLE_MIN_CHARS:
+        return False
+    decodable = sum(1 for ch in dense if not _is_undecodable(ch))
+    return decodable / len(dense) >= _READABLE_MIN_RATIO
+
+
+# How many undecodable characters make a page untrustworthy. THREE, not a ratio.
+#
+# A ratio was tried first and was too lenient for the shape that actually occurs. The real
+# case is not a page of pure garbage -- it is a page where MOST text decodes and one field
+# does not, because only that field is set in a subset font. The red-team reproduction is
+# exactly that: "Predavajuci: Jan Novak" decodes, the rodné číslo beside it is six control
+# characters, and the page scores 86% readable. detect() finds the name, misses the number,
+# the number stays drawn on the page, and eval/extract.py reads the same control characters
+# so the leak gate agrees the output is clean.
+#
+# Legitimate extracted text contains essentially NO control characters, so a small absolute
+# count is both a tight test and a quiet one: it does not fire on ordinary documents, and it
+# fires on the one that matters. Three rather than one leaves room for a stray artefact.
+_UNDECODABLE_MAX = 3
+
+
+def page_has_unreadable_text(text: str) -> bool:
+    """Is there text here we CANNOT interpret? This is the dangerous state.
+
+    NOT an empty page -- an image has nothing for us to remove, and a document with no
+    readable text at all is refused by has_text_layer() instead. This is a page carrying
+    DRAWN TEXT whose characters did not map, which a human reads perfectly and detect()
+    silently skips.
+    """
+    undecodable = sum(1 for ch in text if not ch.isspace() and _is_undecodable(ch))
+    return undecodable >= _UNDECODABLE_MAX
+
+
 def has_text_layer(doc: "fitz.Document") -> bool:
-    return any(page.get_text("text").strip() for page in doc)
+    return any(page_text_is_readable(page.get_text("text")) for page in doc)
+
+
+def unreadable_pages(doc: "fitz.Document") -> list[int]:
+    """1-based page numbers carrying text we cannot interpret."""
+    return [i for i, page in enumerate(doc, 1)
+            if page_has_unreadable_text(page.get_text("text"))]
 
 
 # Single source of truth for 'which characters have no glyph': the same rule detect() uses to
@@ -277,6 +371,15 @@ def _redact_pdf(
         known_entities = list(known_entities or []) + extras
 
     doc = fitz.open(in_path)
+    # R3-C4: a page whose text we cannot decode is MORE dangerous than a page with none. The
+    # glyphs are drawn and a human reads them; detect() sees control characters and removes
+    # nothing; and eval/extract.py reads the same control characters, so the leak gate agrees
+    # the output is clean. Refuse instead.
+    bad_pages = unreadable_pages(doc)
+    if bad_pages:
+        doc.close()
+        raise UnreadableTextLayerError(in_path, bad_pages)
+
     if not has_text_layer(doc):
         doc.close()
         raise NoTextLayerError(

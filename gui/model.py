@@ -17,13 +17,29 @@ from detect.config import DetectConfig
 from writer.decisions import RedactionDecisions
 from writer.docx_body import redact_docx_collect
 from writer.labelmap import LabelMap
-from writer.pdf_body import NoTextLayerError, RedactionIncompleteError, redact_pdf_collect
+from writer.pdf_body import (
+    NoTextLayerError,
+    RedactionIncompleteError,
+    UnreadableTextLayerError,
+    redact_pdf_collect,
+)
 from writer.report import report_path_for
 
 SUPPORTED = {".docx", ".pdf"}
 
 MSG_NO_TEXT_LAYER = (
     "Tento PDF nemá textovú vrstvu (pravdepodobne sken). Skeny v1 nepodporuje — súbor bol odmietnutý."
+)
+# R3-C4. Deliberately a DIFFERENT message from MSG_NO_TEXT_LAYER, even though the exception
+# is a subclass: the file is not a scan, and telling the lawyer it is would send them to
+# rescan a document that has perfectly good text in it. The real cause is a PDF whose font
+# carries no character map, so the text is drawn but cannot be read by any program -- and the
+# fix on their side is to re-export or print-to-PDF, not to scan.
+MSG_UNREADABLE_TEXT = (
+    "Tento PDF obsahuje text, ktorý sa nedá strojovo prečítať (chýba mapovanie znakov "
+    "písma) — na stranách: {pages}. NIE JE to sken. Text je na strane viditeľný, ale "
+    "nástroj ho nevie prečítať, a teda ani spoľahlivo odstrániť. Súbor bol odmietnutý; "
+    "vyexportujte ho znova (napr. Tlač → Uložiť ako PDF) a skúste znova."
 )
 MSG_INCOMPLETE = (
     "Dokument sa nedá úplne redigovať automaticky ({n} nájditeľných miest zlyhalo). "
@@ -168,6 +184,11 @@ def scan_file(src: str, known_entities, extra_terms: tuple[str, ...] = (),
         out = os.path.join(tmp, "scan" + os.path.splitext(src)[1])
         try:
             lm = _collect(src, out, known_entities, decisions, config)
+        except UnreadableTextLayerError as e:
+            # BEFORE NoTextLayerError: it is a subclass, so the order of these two clauses is
+            # what decides whether the lawyer is told to rescan a file that needs re-exporting.
+            return FileScan(src, [], MSG_UNREADABLE_TEXT.format(
+                pages=", ".join(str(p) for p in e.pages)))
         except NoTextLayerError:
             return FileScan(src, [], MSG_NO_TEXT_LAYER)
         except RedactionIncompleteError as e:
