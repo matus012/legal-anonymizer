@@ -6,10 +6,20 @@ or by detect/ itself). Shapes were read from corpus/pii/dates.py, corpus/pii/amo
 and corpus/templates/_common.py (canonical GT type labels) to stay faithful to what the
 generator actually emits, but every fixture below is typed out independently.
 
-Both types are shape-only: no checksum exists for either, so every match is
-Candidate(auto=True). There is no review-bucket path for these two types.
+Neither type has a checksum. SUMA is always Candidate(auto=True).
+
+DATUM is not (v1.1): every date is DETECTED, but only a DATE OF BIRTH is auto-redacted by
+default -- a contract is a chain of dates (signed on, effective from, payable by) and
+destroying all of them leaves a document nobody can use. A date with no birth anchor near it
+is still detected and goes to the REVIEW bucket, auto=False; DetectConfig(redact_all_dates=
+True) auto-redacts every date. The DATUM cases below therefore assert the bucket that matches
+their own context, and each date shape is checked in BOTH contexts so a shape can never
+quietly lose its anchored behaviour.
 """
 from detect import detect
+from detect.config import DetectConfig
+
+ALL_DATES = DetectConfig(redact_all_dates=True)
 
 NBSP = chr(0xA0)
 
@@ -27,7 +37,11 @@ def test_datum_dotted_no_leading_zero_detected():
     text = "Zmluva bola podpísaná 1.1.1980 v Bratislave."
     hits = _find(detect(text), "DATUM", "1.1.1980")
     assert len(hits) == 1
-    assert hits[0].auto is True
+    # No birth anchor in this sentence -> detected, but REVIEW bucket (v1.1 date policy).
+    assert hits[0].auto is False
+    # ... and the same shape IS auto-redacted when the config says redact every date.
+    all_hits = _find(detect(text, None, ALL_DATES), "DATUM", "1.1.1980")
+    assert len(all_hits) == 1 and all_hits[0].auto is True
 
 
 def test_datum_dotted_two_digit_day_month_detected():
@@ -41,7 +55,9 @@ def test_datum_spaced_plain_space_detected():
     text = "Dátum: 01. 01. 1980 bol stanovený."
     hits = _find(detect(text), "DATUM", "01. 01. 1980")
     assert len(hits) == 1
-    assert hits[0].auto is True
+    # No birth anchor here -> detected, REVIEW bucket (v1.1 date policy); auto under all-dates.
+    assert hits[0].auto is False
+    assert _find(detect(text, None, ALL_DATES), "DATUM", "01. 01. 1980")[0].auto is True
 
 
 def test_datum_spaced_nbsp_detected():
@@ -49,14 +65,18 @@ def test_datum_spaced_nbsp_detected():
     text = f"Dátum: {surface} bol stanovený."
     hits = _find(detect(text), "DATUM", surface)
     assert len(hits) == 1
-    assert hits[0].auto is True
+    # No birth anchor here -> detected, REVIEW bucket (v1.1 date policy); auto under all-dates.
+    assert hits[0].auto is False
+    assert _find(detect(text, None, ALL_DATES), "DATUM", surface)[0].auto is True
 
 
 def test_datum_iso_detected():
     text = "Platnosť od 1980-01-01 do konca roka."
     hits = _find(detect(text), "DATUM", "1980-01-01")
     assert len(hits) == 1
-    assert hits[0].auto is True
+    # No birth anchor here -> detected, REVIEW bucket (v1.1 date policy); auto under all-dates.
+    assert hits[0].auto is False
+    assert _find(detect(text, None, ALL_DATES), "DATUM", "1980-01-01")[0].auto is True
 
 
 def test_datum_words_plain_space_detected():
@@ -71,6 +91,9 @@ def test_datum_words_nbsp_detected():
     text = f"Narodený {surface} v meste."
     hits = _find(detect(text), "DATUM", surface)
     assert len(hits) == 1
+    # This fixture's own sentence says "Narodený", so it IS a date of birth and IS
+    # auto-redacted under the default policy -- unlike the bare-date cases above. Kept
+    # deliberately as the anchored counterpart for the word-month NBSP shape.
     assert hits[0].auto is True
 
 

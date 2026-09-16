@@ -72,7 +72,14 @@ def identifier_specs(rng: random.Random) -> dict:
         "orsr": PiiSpec(registry_refs.orsr_vlozka(rng), "ORSR_VLOZKA"),
         "spis": PiiSpec(registry_refs.spisova_znacka(rng), "SPISOVA_ZNACKA"),
         "suma": PiiSpec(amounts.generate(rng), "SUMA"),
-        "datum": PiiSpec(dates.generate(rng), "DATUM"),
+        # v1.1 DATE POLICY (detect/datetime_amounts.py): only a DATE OF BIRTH is auto-redacted
+        # by default; every other date goes to the review bucket so the document stays
+        # readable. Both branches are seeded, because a corpus that only carried one of them
+        # would let the other regress unnoticed.
+        #   "datum"           - a plain contract date with NO birth anchor -> REVIEW
+        #   "datum_narodenia" - placed next to "Dátum narodenia" below     -> AUTO
+        "datum": PiiSpec(dates.generate(rng), "DATUM", auto_redact=False, should_flag=True),
+        "datum_narodenia": PiiSpec(dates.generate(rng), "DATUM"),
         "decoy_a": PiiSpec(decoy_a, kind_a.upper(), auto_redact=False, should_flag=False),
         "decoy_b": PiiSpec(decoy_b, kind_b.upper(), auto_redact=False, should_flag=False),
     }
@@ -200,6 +207,8 @@ def seed_all(b, rng, bank, rec, *, is_docx: bool, ids: dict, people: list) -> No
     ])
     b.paragraph(["Ďalšie údaje: ", ids["dic"], ", ", ids["ic_dph"], ", ", ids["lv"], ", ",
                  ids["parcela"], ", ", ids["spis"], ", ", ids["orsr"], ", dátum ", ids["datum"], "."])
+    # The DOB branch of the date policy: a birth anchor next to the date makes it auto.
+    b.paragraph(["Dátum narodenia: ", ids["datum_narodenia"], "."])
     b.paragraph(["Referencie (nie PII): ", ids["decoy_b"], "."])
     seed_review_bucket(b, rng)
     capitalised_common_decoys(b, rng, p_main, place)

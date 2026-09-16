@@ -299,7 +299,7 @@ def detect(
     candidates.extend(_detect_email(norm))
     candidates.extend(_detect_url(norm))
     candidates.extend(_detect_telefon(norm))
-    candidates.extend(detect_datetime_amounts(norm))
+    candidates.extend(detect_datetime_amounts(norm, config))
     candidates.extend(detect_registry(norm))
     # v1.1 type modules (CONTRACTS_v11.md §8). Each is self-contained and emits only its own
     # types; every cross-type collision they create with each other or with the v1 detectors

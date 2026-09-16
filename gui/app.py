@@ -12,6 +12,7 @@ from functools import partial
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -29,10 +30,46 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.model import SUPPORTED, FileScan, build_decisions, export_file, scan_file
+from detect.config import DetectConfig
+from gui.model import (
+    MSG_FILENAME_LEAK,
+    SUPPORTED,
+    FileScan,
+    build_decisions,
+    export_file,
+    out_path_for,
+    scan_file,
+)
 from gui.worker import BatchWorker
 
 _TABLE_HEADERS = ["", "Typ", "Text", "Kontext", "Umiestnenie", "Počet"]
+
+_ADV_CLOSED = "▸ Rozšírené nastavenia"
+_ADV_OPEN = "▾ Rozšírené nastavenia"
+# One line of plain Slovak per option: what it does and what it costs. These users do not
+# read a manual (context.md §2) — if the label needs explaining, the explanation ships next
+# to it or the option is a liability.
+_HELP_STRICT = (
+    "Identifikátor s chybným kontrolným súčtom sa nezredaguje automaticky, "
+    "ale pôjde na ručné posúdenie."
+)
+# The contracted meaning is "OFF = iba dátum narodenia, ON = každý dátum". The engine does
+# NOT implement that yet — detect/datetime_amounts.py emits every DATUM with auto=True and
+# does not take a config at all, so the flag is currently a no-op (reported to the
+# orchestrator; the field and its threading are correct and go live the moment the detector
+# honours it). Until then the help line says what the tool ACTUALLY does: a GUI that
+# describes behaviour the tool does not have is the liability posture context.md §9 forbids.
+# The "POZOR" warning that used to be here said the engine ignored this setting. It did --
+# detect/datetime_amounts.py took no config and auto-redacted every date. The engine now
+# honours the flag, so the warning is gone and the help text describes what actually happens.
+_HELP_DATES = (
+    "Predvolene sa automaticky rediguje iba dátum narodenia; ostatné dátumy sa nájdu, "
+    "ale zostanú na kontrolu. Po zapnutí sa rediguje každý dátum."
+)
+_HELP_NAMES = (
+    "Výstupy sa pomenujú doc_001_anon, doc_002_anon… Pôvodné názvy nájdete "
+    "v sekcii MANIFEST v protokole."
+)
 
 
 def _bold(label: QLabel) -> QLabel:
@@ -60,6 +97,8 @@ class MainWindow(QMainWindow):
         self._export_srcs: list[str] = []
         self._first_out: str | None = None
         self._worker: BatchWorker | None = None
+        # Tests drive the wizard on one thread; the app never sets this.
+        self.blocking: bool = False
 
         self.pages = QStackedWidget()
         self.setCentralWidget(self.pages)
@@ -140,6 +179,14 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         rlay = QVBoxLayout(right)
+        # Filename-leak warning: shown for the selected file when its own NAME contains a
+        # surface the scan found. Sits above the table because it is a fact about the file,
+        # not about any one row, and it is actionable with the tool switched off.
+        self.fname_warn = QLabel()
+        self.fname_warn.setWordWrap(True)
+        self.fname_warn.setStyleSheet("color: #8a4b00; font-weight: bold;")
+        self.fname_warn.hide()
+        rlay.addWidget(self.fname_warn)
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         self.error_label.hide()
@@ -162,10 +209,72 @@ class MainWindow(QMainWindow):
         extra_row.addWidget(self.extra_btn)
         lay.addLayout(extra_row)
 
+        lay.addWidget(self._build_advanced())
+
         self.export_btn = QPushButton("Exportovať všetko")
         self.export_btn.clicked.connect(lambda: self.start_export())
         lay.addWidget(self.export_btn)
         return page
+
+    # ---------------------------------------------------- review page: advanced settings
+    def _build_advanced(self) -> QWidget:
+        """Collapsed-by-default panel holding the three v1.1 toggles, ALL OFF.
+
+        Collapsed, not merely grouped: an option a non-technical user does not understand and
+        did not ask for is a liability the moment it is visible (QUESTIONS.md Q1 keeps
+        strict_checksums reachable, not prominent)."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        self.advanced_btn = QPushButton(_ADV_CLOSED)
+        self.advanced_btn.setCheckable(True)
+        self.advanced_btn.setChecked(False)
+        self.advanced_btn.toggled.connect(self._toggle_advanced)
+        lay.addWidget(self.advanced_btn)
+
+        self.advanced_box = QWidget()
+        self.advanced_box.setVisible(False)
+        alay = QVBoxLayout(self.advanced_box)
+
+        self.chk_strict = QCheckBox("Prísna kontrola kontrolných súčtov")
+        self.adv_help_strict = QLabel(_HELP_STRICT)
+        self.chk_all_dates = QCheckBox("Anonymizovať všetky dátumy")
+        self.adv_help_dates = QLabel(_HELP_DATES)
+        self.chk_anon_names = QCheckBox("Anonymizovať názvy súborov")
+        self.adv_help_names = QLabel(_HELP_NAMES)
+        for chk, help_ in ((self.chk_strict, self.adv_help_strict),
+                           (self.chk_all_dates, self.adv_help_dates),
+                           (self.chk_anon_names, self.adv_help_names)):
+            row = QHBoxLayout()
+            row.addWidget(chk)
+            help_.setWordWrap(True)
+            row.addWidget(help_, 1)
+            alay.addLayout(row)
+        # Only the two DETECTION toggles invalidate the review table; the naming toggle is
+        # an export-time decision and changes nothing that was scanned.
+        self.chk_strict.toggled.connect(self._on_detect_config_changed)
+        self.chk_all_dates.toggled.connect(self._on_detect_config_changed)
+
+        lay.addWidget(self.advanced_box)
+        return box
+
+    def _toggle_advanced(self, open_: bool) -> None:
+        self.advanced_box.setVisible(open_)
+        self.advanced_btn.setText(_ADV_OPEN if open_ else _ADV_CLOSED)
+
+    def detect_config(self) -> DetectConfig:
+        """The ONE config object; the same instance semantics feed scan AND export."""
+        return DetectConfig(strict_checksums=self.chk_strict.isChecked(),
+                            redact_all_dates=self.chk_all_dates.isChecked())
+
+    def _on_detect_config_changed(self, _checked: bool) -> None:
+        """A detection toggle invalidates the review table — it was built by a scan under the
+        old config. Re-scan immediately (same path, same busy state, as "Pridať a preskenovať"
+        already does for an extra term) rather than leaving a table that disagrees with what
+        export would do. Nothing to invalidate before the first scan."""
+        if self.files and self.scans:
+            self.start_scan(self.blocking)
 
     def _on_sidebar_change(self, row: int):
         if row < 0 or row >= len(self.files):
@@ -196,6 +305,12 @@ class MainWindow(QMainWindow):
         scan = self.scans.get(src)
         if scan is None:
             return
+        if scan.filename_hits:
+            self.fname_warn.setText(MSG_FILENAME_LEAK.format(
+                names=", ".join(dict.fromkeys(scan.filename_hits))))
+            self.fname_warn.show()
+        else:
+            self.fname_warn.hide()
         if scan.error is not None:
             self.table.hide()
             self.error_label.setText(scan.error)
@@ -238,7 +353,9 @@ class MainWindow(QMainWindow):
     def start_scan(self, blocking: bool = False) -> None:
         self._persist_current()
         known = self._known()
-        jobs = [partial(scan_file, f, known, tuple(self.extra_terms)) for f in self.files]
+        config = self.detect_config()
+        jobs = [partial(scan_file, f, known, tuple(self.extra_terms), config)
+                for f in self.files]
 
         def on_result(i: int, r: object) -> None:
             src = self.files[i]
@@ -263,7 +380,11 @@ class MainWindow(QMainWindow):
         self.sidebar.clear()
         for src in self.files:
             scan = self.scans.get(src)
-            prefix = "⚠ " if scan is not None and scan.error is not None else ""
+            # One ⚠ for "this file needs your attention" — a refusal or a leaking filename.
+            # Which of the two it is, is on the right-hand pane; the sidebar only has to make
+            # the lawyer click the file.
+            flagged = scan is not None and (scan.error is not None or bool(scan.filename_hits))
+            prefix = "⚠ " if flagged else ""
             self.sidebar.addItem(prefix + os.path.basename(src))
         self.sidebar.blockSignals(False)
         if self.files:
@@ -279,11 +400,24 @@ class MainWindow(QMainWindow):
             f for f in self.files
             if f in self.scans and self.scans[f].error is None]
         self._export_results = {}
+        # The SAME config that produced the review table — re-reading it here is what keeps
+        # the spec's invariant (the review screen can never disagree with the export).
+        config = self.detect_config()
+        anon = self.chk_anon_names.isChecked()
+        # Index is the file's 1-based position in the WHOLE batch, not in the exportable
+        # subset: a refused file leaves a gap rather than shifting every later document's
+        # number, so doc_003 is the third file in the sidebar no matter what failed.
+        indices = {f: self.files.index(f) + 1 for f in self._export_srcs}
+        manifest = tuple(
+            (os.path.basename(out_path_for(f, indices[f], anon)), os.path.basename(f))
+            for f in self._export_srcs
+        ) if anon else None
         jobs = []
         for f in self._export_srcs:
             decisions = build_decisions(
                 self.scans[f].rows, self.row_states.get(f, {}), tuple(self.extra_terms))
-            jobs.append(partial(export_file, f, known, decisions))
+            jobs.append(partial(export_file, f, known, decisions, config,
+                                index=indices[f], anonymize_names=anon, manifest=manifest))
 
         def on_result(i: int, r: object) -> None:
             self._export_results[i] = r
@@ -305,7 +439,10 @@ class MainWindow(QMainWindow):
                 out, _report = r
                 if self._first_out is None:
                     self._first_out = out
-                self.done_list.addItem(f"✓ {out}")
+                # With anonymised names the output no longer says which document it is, so
+                # the mapping is shown here too — not only in the report's MANIFEST.
+                origin = f"   ← {os.path.basename(src)}" if self.chk_anon_names.isChecked() else ""
+                self.done_list.addItem(f"✓ {out}{origin}")
             else:
                 self.done_list.addItem(f"⚠ {os.path.basename(src)}: {r}")
         self.pages.setCurrentIndex(2)
@@ -352,6 +489,15 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.done_list.clear()
         self.extra_edit.clear()
+        self.fname_warn.hide()
+        # A new batch starts from the documented defaults. A detection toggle left on from a
+        # previous batch, hidden inside a collapsed panel, is exactly the silent-state trap
+        # the panel is collapsed to avoid. blockSignals: nothing to re-scan, files are gone.
+        for chk in (self.chk_strict, self.chk_all_dates, self.chk_anon_names):
+            chk.blockSignals(True)
+            chk.setChecked(False)
+            chk.blockSignals(False)
+        self.advanced_btn.setChecked(False)
         self.scan_btn.setEnabled(False)
         self.pages.setCurrentIndex(0)
 
@@ -359,7 +505,8 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool) -> None:
         """Double-click guard: one running worker at a time — a second Skenovať/Exportovať
         click must not spawn a second batch writing the same output paths."""
-        for btn in (self.scan_btn, self.export_btn, self.extra_btn, self.add_btn):
+        for btn in (self.scan_btn, self.export_btn, self.extra_btn, self.add_btn,
+                    self.chk_strict, self.chk_all_dates, self.chk_anon_names):
             btn.setEnabled(not busy)
         if not busy:
             self.scan_btn.setEnabled(bool(self.files))

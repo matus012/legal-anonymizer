@@ -3,11 +3,21 @@
 Hand-built fixtures via the same helpers as tests/test_writer_decisions.py and
 tests/test_writer_decisions_pdf.py — tests never import corpus/ or eval/.
 """
+import os
+
 import docx as _docx
 import fitz
 
 from detect.config import DetectConfig
-from gui.model import FileScan, ReviewRow, build_decisions, export_file, out_path_for, scan_file
+from gui.model import (
+    FileScan,
+    ReviewRow,
+    build_decisions,
+    export_file,
+    filename_leak_hits,
+    out_path_for,
+    scan_file,
+)
 
 
 def _mk_docx(tmp_path, text):
@@ -153,3 +163,115 @@ def test_export_cleans_up_partial_output_on_incomplete(tmp_path, monkeypatch):
         pass
     leftovers = [p.name for p in tmp_path.iterdir() if p.name != "doc.pdf"]
     assert leftovers == [], f"partial files left behind: {leftovers}"
+
+
+# ---------------------------------------------------------------- v1.1 Phase F: output naming
+def _mk_named_docx(tmp_path, name, text):
+    p = tmp_path / name
+    d = _docx.Document()
+    d.add_paragraph(text)
+    d.save(str(p))
+    return str(p)
+
+
+def test_out_path_for_anonymized_is_indexed(tmp_path):
+    """anonymize_names=True replaces the whole stem, keeping the extension and the directory —
+    the source stem (which carries the client's name) must not survive into the output name."""
+    src = os.path.join("C:", os.sep, "x", "Novak_kupna_zmluva.docx")
+    out = out_path_for(src, index=1, anonymize_names=True)
+    assert os.path.basename(out) == "doc_001_anon.docx"
+    assert os.path.dirname(out) == os.path.dirname(src)
+    assert "Novak" not in out
+    assert os.path.basename(out_path_for(src, index=12, anonymize_names=True)) == "doc_012_anon.docx"
+
+
+def test_out_path_for_flag_off_is_unchanged(tmp_path):
+    """Byte-identical to today whenever the flag is off, even with an index supplied."""
+    src = r"C:\x\Novak_kupna_zmluva.docx"
+    assert out_path_for(src) == out_path_for(src, index=3, anonymize_names=False)
+    assert out_path_for(src).endswith("Novak_kupna_zmluva_anon.docx")
+
+
+def test_export_with_anonymized_name_and_manifest(tmp_path):
+    src = _mk_named_docx(tmp_path, "Novak_kupna_zmluva.docx", "Jan Novak, DIC 2023456789.")
+    scan = scan_file(src, ["Jan Novak"])
+    checked = {r.group: (r.bucket == "auto") for r in scan.rows}
+    out, report = export_file(
+        src, ["Jan Novak"], build_decisions(scan.rows, checked, ()),
+        index=1, anonymize_names=True,
+        manifest=(("doc_001_anon.docx", "Novak_kupna_zmluva.docx"),))
+    assert os.path.basename(out) == "doc_001_anon.docx"
+    assert os.path.basename(report) == "doc_001_anon_docx_report.txt"
+    txt = open(report, encoding="utf-8").read()
+    assert "[MANIFEST" in txt
+    assert "doc_001_anon.docx" in txt and "Novak_kupna_zmluva.docx" in txt
+
+
+def test_export_without_manifest_report_has_no_manifest_section(tmp_path):
+    src = _mk_named_docx(tmp_path, "Novak_kupna_zmluva.docx", "Jan Novak, DIC 2023456789.")
+    scan = scan_file(src, ["Jan Novak"])
+    checked = {r.group: (r.bucket == "auto") for r in scan.rows}
+    out, report = export_file(src, ["Jan Novak"], build_decisions(scan.rows, checked, ()))
+    assert os.path.basename(out) == "Novak_kupna_zmluva_anon.docx"
+    assert "MANIFEST" not in open(report, encoding="utf-8").read()
+
+
+# ---------------------------------------------------------------- filename-leak warning
+def test_filename_leak_hits_matches_folded_token(tmp_path):
+    """The filename carries the bare stem `Novak` while the detected surface is the full,
+    diacritic-bearing `Ján Novák` — a plain substring test would miss it."""
+    rows = [ReviewRow(group=("MENO", ("entity", 0)), type="MENO", text="Ján Novák",
+                      snippet="", locations=("body",), count=1, bucket="auto")]
+    assert filename_leak_hits(r"C:\x\Novak_kupna_zmluva.docx", rows) == ("Ján Novák",)
+
+
+def test_filename_leak_hits_empty_when_filename_is_clean(tmp_path):
+    rows = [ReviewRow(group=("MENO", ("entity", 0)), type="MENO", text="Ján Novák",
+                      snippet="", locations=("body",), count=1, bucket="auto")]
+    assert filename_leak_hits(r"C:\x\kupna_zmluva_2024.docx", rows) == ()
+
+
+def test_scan_flags_a_leaking_source_filename(tmp_path):
+    src = _mk_named_docx(tmp_path, "Novak_zmluva.docx", "Jan Novak, DIC 2023456789.")
+    assert "Jan Novak" in scan_file(src, ["Jan Novak"]).filename_hits
+
+
+def test_scan_of_a_clean_filename_has_no_hits(tmp_path):
+    src = _mk_named_docx(tmp_path, "zmluva_2024.docx", "Jan Novak, DIC 2023456789.")
+    assert scan_file(src, ["Jan Novak"]).filename_hits == ()
+
+
+def test_redact_all_dates_moves_a_plain_date_between_buckets(tmp_path):
+    """The successor to a TRIPWIRE that did its job.
+
+    The GUI round found that `redact_all_dates` was a DEAD FLAG: detect/datetime_amounts.py
+    took no config at all and emitted every DATUM with auto=True, so every date in every
+    document was auto-redacted while CONTRACTS_v11.md §2 claimed only a date of birth was. It
+    refused to ship a checkbox describing behaviour the engine did not have, and left a
+    tripwire asserting the broken state so that fixing the engine would force the GUI text to
+    be corrected in the same change. The engine is now fixed, the tripwire fired, and this is
+    what replaces it.
+
+    A contract date with no birth anchor is DETECTED either way -- the question is only which
+    bucket it lands in, and that is what a reviewer sees and decides."""
+    src = _mk_named_docx(tmp_path, "zmluva.docx", "Zmluva uzavreta dna 1.3.2024 medzi stranami.")
+
+    default = next(r for r in scan_file(src, None, config=DetectConfig()).rows if r.type == "DATUM")
+    assert default.bucket == "review", (
+        "a plain contract date must NOT be auto-redacted by default: a contract is a chain of "
+        "dates, and destroying all of them leaves a document nobody can use"
+    )
+
+    every = next(
+        r for r in scan_file(src, None, config=DetectConfig(redact_all_dates=True)).rows
+        if r.type == "DATUM"
+    )
+    assert every.bucket == "auto", "redact_all_dates=True must auto-redact a plain date"
+
+
+def test_a_date_of_birth_is_auto_redacted_by_default(tmp_path):
+    """The other half of the policy, and the half that matters for privacy: a date next to a
+    birth anchor identifies a person and is redacted without the reviewer having to notice."""
+    src = _mk_named_docx(tmp_path, "zmluva.docx", "Datum narodenia: 15.3.1985, miesto Kosice.")
+    datum = next(r for r in scan_file(src, None, config=DetectConfig()).rows if r.type == "DATUM")
+    assert datum.bucket == "auto"

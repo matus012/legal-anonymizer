@@ -8,7 +8,9 @@ with the export (docs/superpowers/specs/2026-07-21-gui-design.md).
 from __future__ import annotations
 
 import os
+import re
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 
 from detect.config import DetectConfig
@@ -26,6 +28,11 @@ MSG_NO_TEXT_LAYER = (
 MSG_INCOMPLETE = (
     "Dokument sa nedá úplne redigovať automaticky ({n} nájditeľných miest zlyhalo). "
     "Súbor je z dávky vylúčený — spracujte ho manuálne."
+)
+MSG_FILENAME_LEAK = (
+    "Pozor: názov tohto súboru obsahuje osobný údaj ({names}). Redigovaný dokument sa volá "
+    "rovnako, takže údaj uniká už v názve prílohy. Zapnite „Anonymizovať názvy súborov“ "
+    "v Rozšírených nastaveniach, alebo súbor pred odoslaním premenujte."
 )
 
 
@@ -48,10 +55,50 @@ class FileScan:
     src: str
     rows: list[ReviewRow]
     error: str | None = None
+    # v1.1 Phase F: representative surfaces that also occur in the SOURCE FILENAME. The
+    # redaction cleans the document body and then writes `Novak_zmluva_anon.docx` — the
+    # leak walks out in the attachment name. Carried here so the review screen can say so.
+    filename_hits: tuple[str, ...] = ()
 
 
-def out_path_for(src: str) -> str:
+# Tokens worth testing against a filename: ≥3 chars, letters/digits only after folding.
+# Shorter runs ("a", "ul") match half the filenames in a law office and would make the
+# warning noise, which is the only way to make a warning worse than not having one.
+_TOKEN_RE = re.compile(r"[0-9a-z]{3,}")
+
+
+def _fold(s: str) -> str:
+    """Lowercase + drop combining marks: `Ján Novák` -> `jan novak`. A filename is typed by a
+    human who almost never types the diacritics, so an unfolded comparison misses the case
+    the whole feature exists for."""
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", s.lower()) if not unicodedata.combining(ch)
+    )
+
+
+def filename_leak_hits(src: str, rows) -> tuple[str, ...]:
+    """Surfaces from ``rows`` whose folded tokens appear in ``src``'s stem, in row order.
+
+    Token-level, not substring-level: the document says `Ján Novák` and the file is called
+    `Novak_kupna_zmluva.docx`, so whole-surface containment finds nothing. Deliberately
+    over-matches (recall over precision, context.md §6) — a false warning costs one glance."""
+    stem = _fold(os.path.splitext(os.path.basename(src))[0])
+    return tuple(
+        r.text for r in rows
+        if any(tok in stem for tok in _TOKEN_RE.findall(_fold(r.text)))
+    )
+
+
+def out_path_for(src: str, index: int | None = None, anonymize_names: bool = False) -> str:
+    """The single place that decides an output path.
+
+    ``anonymize_names`` + a 1-based ``index`` replaces the stem entirely with ``doc_NNN``,
+    because `<stem>_anon.docx` faithfully preserves whatever PII the lawyer's own filename
+    carried. The mapping back to the original name lives in the report's MANIFEST section.
+    Flag off (the default) is the v1 rule, unchanged, index or no index."""
     root, ext = os.path.splitext(src)
+    if anonymize_names and index is not None:
+        return os.path.join(os.path.dirname(src), f"doc_{index:03d}_anon{ext}")
     return f"{root}_anon{ext}"
 
 
@@ -105,7 +152,8 @@ def scan_file(src: str, known_entities, extra_terms: tuple[str, ...] = (),
             return FileScan(src, [], MSG_NO_TEXT_LAYER)
         except RedactionIncompleteError as e:
             return FileScan(src, [], MSG_INCOMPLETE.format(n=len(e.surfaces)))
-        return FileScan(src, _rows_from(lm))
+        rows = _rows_from(lm)
+        return FileScan(src, rows, filename_hits=filename_leak_hits(src, rows))
 
 
 def build_decisions(rows, checked: dict[tuple, bool], extra_terms) -> RedactionDecisions:
@@ -115,16 +163,40 @@ def build_decisions(rows, checked: dict[tuple, bool], extra_terms) -> RedactionD
     return RedactionDecisions(extra_terms=tuple(extra_terms), suppress_groups=suppress, force_groups=force)
 
 
+MANIFEST_HEADER = "[MANIFEST — VÝSTUPNÝ NÁZOV -> PÔVODNÝ SÚBOR]"
+_MANIFEST_COLS = "výstup | pôvodný súbor"
+
+
+def _append_manifest(report: str, manifest) -> None:
+    """Append the batch's output-name -> original-name table to an ALREADY WRITTEN report.
+
+    Appended rather than passed into ``writer.report.build_report`` on purpose: the manifest
+    is a GUI-batch fact (it needs the other files in the batch), and build_report's output is
+    contractually byte-stable (CONTRACTS_v11.md §10). The report already lists un-redacted
+    low-confidence surfaces, so it was never a file to send anywhere — the original filenames
+    do not change that posture."""
+    lines = ["", MANIFEST_HEADER, _MANIFEST_COLS]
+    lines += [f"{out_name} | {original}" for out_name, original in manifest]
+    with open(report, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
 def export_file(src: str, known_entities, decisions: RedactionDecisions,
-                config: DetectConfig | None = None) -> tuple[str, str]:
+                config: DetectConfig | None = None, *, index: int | None = None,
+                anonymize_names: bool = False, manifest=None) -> tuple[str, str]:
     """Redact ``src`` next to itself as <stem>_anon.<ext>; returns (out_path, report_path).
+
+    ``index`` / ``anonymize_names`` are handed to ``out_path_for``; ``manifest`` (an iterable
+    of ``(output_name, original_name)``) is appended to the report. All three default to the
+    off value, so an unchanged call is byte-identical to v1.
+
     Raises the writer's own errors — the caller (worker) turns them into per-file messages.
 
     On RedactionIncompleteError the PDF writer has ALREADY saved a partially redacted
     output (+ report) before raising — a file a non-technical user must never find lying
     next to the source (context.md §3: never silently produce an unredacted file). Delete
     both, then re-raise so the UI shows the per-file failure."""
-    out = out_path_for(src)
+    out = out_path_for(src, index, anonymize_names)
     # The report path is the writer's OWN rule, called — not re-derived here. Duplicating it is
     # exactly how the v1.1 Phase F collision fix would have missed this cleanup path and left a
     # stale report from a failed export lying next to the source.
@@ -136,4 +208,6 @@ def export_file(src: str, known_entities, decisions: RedactionDecisions,
             if os.path.exists(p):
                 os.remove(p)
         raise
+    if manifest:
+        _append_manifest(report, manifest)
     return out, report

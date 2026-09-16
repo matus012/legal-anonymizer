@@ -260,7 +260,12 @@ class _StubPage:
 
 # The corpus renders some identifiers with U+00AD SOFT HYPHEN as the separator instead of '-'.
 _SH = chr(0xAD)
-_SOFT_HYPHEN_TEXT = f"datum 1953{_SH}11{_SH}27 , znacka V{_SH}237/2023 ."
+# "nar." is in this fixture on purpose. Under the v1.1 date policy a DATUM is only
+# auto-redacted when a birth anchor sits near it; without one it is detected but routed to the
+# review bucket, and an unredacted candidate mints no label. This test is about SOFT-HYPHEN
+# NORMALIZATION, not about the date policy, so the fixture carries the anchor that keeps the
+# date in the auto path and leaves the soft-hyphen behaviour as the only thing under test.
+_SOFT_HYPHEN_TEXT = f"nar. datum 1953{_SH}11{_SH}27 , znacka V{_SH}237/2023 ."
 
 
 def test_collect_normalizes_soft_hyphen_for_detect_and_locates_raw_glyphs():
