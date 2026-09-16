@@ -25,3 +25,8 @@ detect/gazetteer_data/_raw/
 # v1.1 demo artifacts: regenerate with `python -m tools.make_demo`. Never tracked --
 # the PII guard forbids committed .docx/.pdf, and these carry (synthetic) PII.
 demo/
+
+# trial PyInstaller output (overnight run). Named separately from dist/ and build/ so a
+# throwaway build can never be mistaken for the real one the owner ships.
+dist_trial/
+build_trial/

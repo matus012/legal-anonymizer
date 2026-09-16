@@ -65,9 +65,13 @@ explicitly. If that line is ever dropped, mistyped, or defeated by a path change
 app still starts, still scans, still writes a redacted document and a report — and silently
 stops matching every place name and personal name in the country. There is no crash and no
 empty output, so nothing about running the app tells you this happened. After every build,
-confirm by hand that `dist\Anonymizer\detect\gazetteer_data\` exists and holds the `.json`
-files (6 at last count: `obce.json`, `ulice.json`, `katastralne_uzemia.json`,
-`first_names.json`, `surnames.json`, `stoplist.json`). `detect/selfcheck.py` also checks this
+confirm by hand that the six `.json` files (`obce.json`, `ulice.json`,
+`katastralne_uzemia.json`, `first_names.json`, `surnames.json`, `stoplist.json`) are present
+under `dist\Anonymizer\_internal\detect\gazetteer_data\`. **Note the `_internal\`** —
+PyInstaller 6.x puts collected data there, not directly under `dist\Anonymizer\`. Verified
+against a real build; checking the path without `_internal\` finds nothing even when the
+build is perfectly good, which makes a working build look broken and a broken one
+indistinguishable from it. `detect/selfcheck.py` also checks this
 at startup and refuses to scan if the data is missing or suspiciously small — but that is the
 app protecting itself at runtime, not a substitute for checking the build.
 

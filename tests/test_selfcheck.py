@@ -145,6 +145,54 @@ def test_the_self_check_fails_on_the_wrong_json_shape(frozen):
     assert any("first_names.json" in p and "formát" in p for p in problems)
 
 
+# ------------------------------------------------- the REAL build, when one exists
+# PyInstaller 6.x puts collected data under <dist>/<name>/_internal/, NOT directly under
+# <dist>/<name>/. That matters beyond trivia: the human instruction "confirm
+# dist\\Anonymizer\\detect\\gazetteer_data\\ exists" sends the checker to a path that is
+# CORRECTLY ABSENT in a good build, so a working build looks broken and a broken one is
+# indistinguishable from it. Both layouts are accepted below and the real one is asserted.
+_BUILD_DIRS = (
+    os.path.join("dist", "Anonymizer", "_internal"),
+    os.path.join("dist", "Anonymizer"),
+    os.path.join("dist_trial", "Anonymizer", "_internal"),
+    os.path.join("dist_trial", "Anonymizer"),
+)
+
+
+def _built_meipass() -> str | None:
+    for candidate in _BUILD_DIRS:
+        if os.path.isdir(os.path.join(candidate, "detect", "gazetteer_data")):
+            return os.path.abspath(candidate)
+    return None
+
+
+def test_the_actual_frozen_build_detects_against_its_own_bundled_data(monkeypatch):
+    """Runs detection against the data files AS THEY WERE BUNDLED, not against the source tree.
+
+    Skips when no build is present, because the build is not produced by the test suite. When
+    a build IS present this is the only test in the repo that touches the real artefact, and it
+    asserts on HITS: the failure mode is not "the file is absent", it is "the gazetteer matches
+    nothing", and only a detection result distinguishes those.
+    """
+    meipass = _built_meipass()
+    if meipass is None:
+        pytest.skip("no PyInstaller build present; run: python -m PyInstaller anonymizer.spec")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", meipass, raising=False)
+    _clear_caches()
+    try:
+        assert verify_bundled_data() == [], "the built artefact fails its own startup self-check"
+        hits = [c for c in detect("Nehnuteľnosť sa nachádza v obci Košice, okres Košice I.")
+                if c.type in ("OBEC", "KATASTER")]
+        assert hits, (
+            "the frozen build's bundled gazetteer matched nothing — this is the silent "
+            "failure the self-check exists to prevent"
+        )
+    finally:
+        _clear_caches()
+
+
 def test_all_problems_are_reported_at_once(frozen):
     """A user told about one missing file, who fixes it and is then told about the next,
     learns to distrust the message."""
