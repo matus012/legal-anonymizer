@@ -37,7 +37,7 @@ textbox so the writers' surface coverage is exercised too, not just the detector
 from __future__ import annotations
 
 from ..groundtruth import PiiSpec
-from ..pii import addresses, documents, names_anchored, office_refs, orgs
+from ..pii import addresses, documents, names_anchored, office_refs, orgs, ulica
 from . import _common
 
 # Anchor prefixes for the anchor-required types. The anchor is NOT part of the ground-truth
@@ -143,6 +143,29 @@ def build(b, rng, bank, *, is_docx: bool) -> None:
         names_anchored.make_field_org,
     ):
         b.paragraph(_one(maker, rng) + ["."])
+
+    # ---- v1.1 ULICA (CONTRACTS_v11.md §12 ADDENDUM 1 R3; redteam/FINDINGS_ROUND2.md C-2) --
+    # Zero ground-truth ULICA occurrences existed anywhere in the corpus before this round —
+    # an excluded type is an untested type. Every shape the task asks for gets a real
+    # occurrence: the "ul." prefix, one of the other five keyword prefixes (spread across
+    # documents by rng.choice), a trailing house number, and the declined-form hard case,
+    # which corpus/pii/ulica.py documents as an EXPECTED miss — seeded anyway so the recall
+    # gate records the gap instead of the type staying silently untested for that shape too.
+    # Placed in the shared (non-format-branch) part of the template so it lands in both DOCX
+    # and PDF output, same as every other v1.1 block above.
+    b.heading("Článok VI — Adresa nehnuteľnosti (ulica)")
+    b.paragraph(["Nehnuteľnosť leží na "] + _one(ulica.make_ulica_ul, rng) + ["."])
+    b.paragraph(["Správca budovy sídli na "] + _one(ulica.make_ulica_keyword, rng) + ["."])
+    b.paragraph(["Vchod do budovy je na "] + _one(ulica.make_ulica_housenum, rng) + ["."])
+    # make_ulica_declined's ``placed`` already starts with "na " ("na Hlavnej ulici"), so the
+    # wrapping sentence must NOT prepend its own "na " too (that produced a doubled "na na" —
+    # caught by regenerating and reading the output, not assumed correct).
+    b.paragraph(["Zmluvné strany sa dostavili "] + _one(ulica.make_ulica_declined, rng) + ["."])
+    if is_docx:
+        # Split across multiple <w:r> runs (context.md §7/§10) — reuses the mechanism
+        # corpus/templates/_common.py already uses for a split surname.
+        _, split_spec = ulica.make_ulica_ul(rng)
+        b.split_run_paragraph("Poštová adresa je na ul. ", split_spec, ", v prízemí.")
 
     # ---- v1.1 ORG + NAZOV_BANKY ----------------------------------------------------------
     # NAZOV_BANKY had a detector and NO corpus occurrence, so no gate was asking about it —

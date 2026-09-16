@@ -169,3 +169,25 @@ against the same 0.95 threshold every run.
 **To reverse:** relax `detect/normalize.py:_is_identifier_run` (drop the lowercase test to
 join any alphanumeric pair, or extend `_WRAPPED_TOKEN_RE` to whitespace runs without a line
 break) and then re-measure per-type PRECISION — that is the number this choice is trading.
+
+## Q13 — ULICA corpus coverage: which street stands in for the declined-form hard case
+**Default chosen:** `corpus/pii/ulica.py::make_ulica_declined` always seeds the SAME
+fixture, `"Hlavná"` declined to `"Hlavnej"` ("na Hlavnej ulici"), rather than a random
+street from the pool.
+**Why:** the task asks for a deliberately hard, EXPECTED-miss fixture proving the
+declined-form gap rather than a representative sample. `Hlavná` is a plain adjective, whose
+oblique-case ending (`-ej`) is NOT in `detect/declension.py`'s closed suffix inventory (only
+the possessive `-ovej` is), so it is a genuine miss — a possessive-adjective street name like
+`Štúrova` would have declined to `Štúrovej`, which the stemmer DOES catch (`-ovej` is in the
+inventory), and picking one of those by chance would have made this fixture flaky (sometimes
+proving the gap, sometimes accidentally passing). One fixed, hand-picked fixture is
+deterministic and always exercises the real gap.
+**Cost:** this is the one shape of the four the task asked for that scores 0/N recall today
+(measured: 20/20 misses across the full regenerated corpus — 10 zmluva_v11 docs × 2
+formats). Overall ULICA recall on the current corpus is 70/90 = 0.778, entirely attributable
+to this one fixture; every other shape (`ul.` prefix, the other five keyword prefixes, a
+trailing house number, split across DOCX runs) scores 70/70 = 1.000.
+**To reverse:** extend `detect/declension.py`'s closed suffix inventory to include the plain
+adjectival `-ej` ending (off `-á`/`-a`), OR give `detect/gazetteer.py::_street_hits` a second,
+adjective-aware stem pass — either widens recall on this shape but needs re-checking against
+the discriminator `detect/declension.py` protects (`Kováč` vs `Kováčskej` must stay distinct).
