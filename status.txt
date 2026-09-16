@@ -7,7 +7,7 @@ READ THIS FIRST — what is green, what is not, what is yours
 
 GREEN, and I re-ran every one of these myself (never taken from a subagent report):
 
-  Full suite ............ 889 passed, 8 skipped, 0 FAILED
+  Full suite ............ 908 passed, 8 skipped, 0 FAILED
   Dual leak gate ........ PASS — 70 docx + 70 pdf, text_layer=0 scrub=0 other=0
                           (OBEC and KATASTER are now GATED, not excluded)
   DEMO .................. PASS — zero leaks in both formats, see DEMO READY below
@@ -25,7 +25,7 @@ YOUR ACTIONS TOMORROW (nothing is blocked on you tonight):
      the frozen app the gazetteer matches nothing, no test notices, and the .exe quietly
      stops redacting place names. After building, confirm that
      dist\Anonymizer\detect\gazetteer_data\ exists and holds 6 .json files.
-  2. Nothing has been pushed. Four commits are waiting. Say the word and I hand you the
+  2. Nothing has been pushed. 7 commits are waiting. Say the word and I hand you the
      push commands.
   3. Tell the office two things in writing (liability, not cosmetics):
      - Clause (i) of Vyhláška 482/2011 — utajované informácie / obchodné tajomstvo — is
@@ -46,9 +46,13 @@ the GUI's own functions (scan_file -> build_decisions -> export_file).
     kupna_zmluva_demo_anon_docx_report.txt     \ the Phase F collision fix — these two
     kupna_zmluva_demo_anon_pdf_report.txt      / no longer overwrite each other
 
-RESULT: 41 auto + 2 review rows (docx), 38 + 2 (pdf). ZERO leaks in either output,
-checked against 23 PII needles across every extracted surface. The two review rows are
-honest, not noise: an ORG (detector not built) and "Strana" from a page footer.
+RESULT: 40 auto + 3 review rows (docx), 38 + 2 (pdf). ZERO leaks in either output,
+checked against 24 PII needles across every extracted surface. The review rows are honest,
+not noise: an ORG (detector not built), "Strana" from a page footer, and — new, and
+deliberate — the CONTRACT DATE 1.1.2025, which the v1.1 date policy detects but does not
+auto-redact. The DATE OF BIRTH in the same document IS auto-redacted. That is the policy
+working: the date that identifies a person goes, the dates that make the contract readable
+stay, and the reviewer decides.
 
 Building the demo found FOUR real defects the 140-document corpus had not, one of them a
 genuine leak. That is the argument for keeping it in the loop.
@@ -88,8 +92,14 @@ PHASE D — red team ............................................ PARTIAL (see N
 PHASE E — metrics + gates ..................................... PARTIAL (see NOT DONE)
   The flag-survival gate had become unfireable and now guards a real population again.
 
-PHASE F — GUI + build + docs .................................. PARTIAL (see NOT DONE)
-  Report filename collision FIXED. PyInstaller spec bundles the gazetteer.
+PHASE F — GUI + build + docs .................................. DONE except the rebuild
+  Report filename collision FIXED. PyInstaller spec bundles the gazetteer. The review page
+  now has a COLLAPSED advanced panel with the three toggles (all off): strict_checksums,
+  redact_all_dates, anonymize_output_names. Toggling a detection option RE-SCANS, so the
+  review table can never disagree with what export will do. anonymize_output_names writes
+  doc_001_anon.docx and appends a manifest to the report. And a new warning fires when the
+  SOURCE FILENAME itself contains a detected surface — Novak_kupna_zmluva.docx leaks a
+  client's name in the very file the lawyer then emails.
 
 GAZETTEERS (your R3) — fetched, license-checked, bundled, ~330 KB:
   obce 2842 + ulice 12000 .... Register adries, MV SR ........ CC0 1.0
@@ -136,7 +146,15 @@ Each was invisible to every gate that existed at the time.
     while still recording it in ground truth, so GT claimed 30 surfaces that were not in
     the files — inflating recall for the vanished types. FIXED in the builder, so the
     invariant holds for every future template.
- 8. TWO OF MY OWN CONTRACT CLAUSES WERE WRONG, and a round refused to implement one of
+ 8. A CONFIG FLAG THAT DID NOTHING — so EVERY DATE was being redacted. redact_all_dates
+    had zero read sites: detect_datetime_amounts did not accept a config at all and emitted
+    every DATUM with auto=True, while the contract and the module's own docstring both said
+    only a date of birth was redacted. A contract is a chain of dates — signed on, effective
+    from, payable by — and destroying all of them leaves a document nobody can use. Found
+    because the GUI round REFUSED to ship a checkbox describing behaviour the engine did not
+    have, and left a tripwire that forced the text to be corrected when the engine was fixed.
+    FIXED: birth-anchored dates are auto, every other date goes to review, the flag works.
+ 9. TWO OF MY OWN CONTRACT CLAUSES WERE WRONG, and a round refused to implement one of
     them (deleting the BANKOVY_UCET suppressor would have made strict_checksums a silent
     no-op for every legacy account number). Both retracted — CONTRACTS_v11.md Am. 2, 3.
 
@@ -157,9 +175,6 @@ NOT DONE — read this before calling v1.1 finished
     (time/page, peak RSS) are NOT implemented as gates. Per-type RECALL exists.
   - ORG and NAZOV_BANKY detectors are not built. ORG is the last Class A exclusion left
     in the leak gate.
-  - GUI advanced toggles (redact_all_dates / anonymize_output_names / strict_checksums)
-    are NOT in gui/app.py. The config is threaded through the model and both writers, so
-    this is a panel, not plumbing. anonymize_output_names is not implemented at all.
   - R4 (realistic text from public court decisions, 6 new doc types) NOT started — the
     APIs returned 403/404 this session. R5 (keep_list) NOT started, as agreed.
   - Corpus is seed-deterministic and gitignored. Regenerate with:
@@ -178,8 +193,11 @@ WHERE THINGS ARE
 
 BLOCKERS: none.
 
-Four commits this session, NONE PUSHED:
-  7e480ad  Phase E: refill the flag-survival gate, fix a corpus GT bug and a PDF leak
-  cc83d21  NBSP-tolerant anchors, RC/gazetteer precision fixes, demo harness
-  0bc9f7f  Phases A-D: checksum policy, 16 new types, name recall, extractor hardening
-  d2e5708  infra: frozen contract, gazetteer data (license-checked), red-team findings
+7 commits this session, NONE PUSHED:
+  5acd27d v1.1 Phase F: GUI advanced panel, filename-leak warning, and a DEAD CONFIG FLAG fixed
+  c977063 v1.1: give Phase C's anchored names corpus coverage, and reject un-gradeable fixtures
+  1a72fbd v1.1 docs: context.md 4/6/10, checkpoints, and the owner-facing status
+  7e480ad v1.1 Phase E: refill the flag-survival gate, fix a corpus GT bug and a PDF line-break leak
+  cc83d21 v1.1: NBSP-tolerant anchors, RC/gazetteer precision fixes, demo harness
+  0bc9f7f v1.1 Phases A-D: checksum policy, 16 new types, name recall, extractor hardening
+  d2e5708 v1.1 infra: frozen contract, gazetteer data (license-checked), red-team findings
