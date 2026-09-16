@@ -7,7 +7,7 @@ READ THIS FIRST — what is green, what is not, what is yours
 
 GREEN, and I re-ran every one of these myself (never taken from a subagent report):
 
-  Full suite ............ 908 passed, 8 skipped, 0 FAILED
+  Full suite ............ 1142 passed, 8 skipped, 0 FAILED
   Dual leak gate ........ PASS — 70 docx + 70 pdf, text_layer=0 scrub=0 other=0
                           (OBEC and KATASTER are now GATED, not excluded)
   DEMO .................. PASS — zero leaks in both formats, see DEMO READY below
@@ -85,9 +85,25 @@ PHASE C — name recall without ML .............................. DONE
   expansion (female forms, declension stems, initials, diacritic-stripped, p./pán/pani)
   and the gazetteer. OBEC/KATASTER/ULICA are detected and now GATED.
 
-PHASE D — red team ............................................ PARTIAL (see NOT DONE)
-  One full round. 29 findings; the extractor was blind to 16 of 34 DOCX surfaces and 13
-  of 23 PDF surfaces probed. All now read. Detail in redteam/FINDINGS.md.
+PHASE D — red team ............................................ 2 rounds, NOT 3 (see NOT DONE)
+  ROUND 1 attacked the EXTRACTOR — the surfaces the leak test can READ. 29 findings; it was
+  blind to 16 of 34 DOCX and 13 of 23 PDF surfaces probed. All now read. redteam/FINDINGS.md.
+  ROUND 2 attacked the DETECTORS — whether a surface written slightly differently is still
+  FOUND. 11 mutations, 1 CLEAN, 10 DEFECT. redteam/FINDINGS_ROUND2.md.
+  There is now a MUTATION GATE (python -m eval.mutation_gate) and IT FAILS ON PURPOSE. It
+  measures recall(mutated)/recall(clean) per type and exits non-zero while any mutation is
+  below 0.95. Do not "fix" it by lowering the threshold.
+    nbsp 1.000 PASS | tabs 0.882 | double_spaces 0.808 | no_diacritics 0.759 | nfd 0.677
+    all_caps 0.446 | lowercase 0.391 | cyrillic 0.355 | line_break 0.117 | zero_width 0.070
+    soft_hyphen 0.070
+  MY OWN EXPECTATION WAS WRONG AND THAT WAS THE POINT: I expected line_break to be clean,
+  because I had widened the anchor separator after a wrapped PDF leaked a client number. It
+  scored 0.113, and CISLO_KLIENTA — the exact type that fix was for — was at 0.000. I had
+  widened the gap BETWEEN THE WORDS OF AN ANCHOR and not the gap between the ANCHOR AND ITS
+  VALUE, so a wrap one word later leaked the same number again. FIXED.
+  The gate also caught a CRASH I introduced while fixing it: a widened separator let a TAB
+  into an IBAN, and the mod-97 checksum does int(c, 36), which raises on a tab. An exception
+  in a shipped app is worse than a missed detection. FIXED.
 
 PHASE E — metrics + gates ..................................... PARTIAL (see NOT DONE)
   The flag-survival gate had become unfireable and now guards a real population again.
@@ -161,15 +177,35 @@ Each was invisible to every gate that existed at the time.
 =========================================================================
 NOT DONE — read this before calling v1.1 finished
 =========================================================================
-  - PHASE D IS NOT FINISHED. The brief asks for THREE CONSECUTIVE CLEAN red-team rounds;
-    one ran. The mutation matrix (zero-width chars, soft hyphen, Cyrillic homoglyphs,
-    NFC/NFD, ALL CAPS, missing diacritics) is NOT built as a corpus mutation suite. Two
-    attacks from that list were found by hand and fixed (NBSP, line break) — which is
-    evidence the rest of the list is worth running, not evidence it is clean.
-  - MISSING DIACRITICS: MEASURED, STILL OPEN (QUESTIONS.md Q7). Five anchor-required
-    types miss when a document is typed WITHOUT diacritics, which Slovak legal documents
-    frequently are. The NBSP and line-break fixes did NOT address this. HIGH severity for
-    recall. Needs one shared diacritic-folding anchor helper, not ten regex patches.
+  - PHASE D IS NOT FINISHED. The brief asks for THREE CONSECUTIVE CLEAN rounds; two ran and
+    NEITHER was clean. The mutation suite now exists and the gate FAILS — eight mutation
+    classes are still open, each with a named fix in redteam/FINDINGS_ROUND2.md:
+      * zero_width / soft_hyphen (0.070) — 34 of 36 types, every checksum-bearing identifier.
+        Invisible characters (Unicode category Cf) inside an identifier. Bank portals insert
+        U+200B into long numbers and a lawyer pastes them straight into a filing; U+00AD is
+        Word's own optional hyphen, and PyMuPDF already renders a PDF hyphen as one. THE
+        PIPELINE MEETS THIS CHARACTER TODAY. The fix is NOT the NBSP trick: that was safe
+        only because it is 1 character for 1 character and preserves the offsets both writers
+        slice by. Deleting a zero-width character shifts every later offset, so this needs an
+        OFFSET-MAPPED normalization in detect() (~15 lines, one place, fixes nfd too).
+      * nfd (0.677) — the cleanest defect in the set: NFC and NFD are canonically equivalent,
+        render identically, and lose no information, so there is NO precision trade-off at
+        all. RODNE_CISLO already scores 1.000 here because its anchor test folds; that is the
+        template.
+      * cyrillic_homoglyph (0.355) — and the sharpest single case in the whole round: an
+        email with one Cyrillic letter is not MISSED, it is SILENTLY TRUNCATED, so the tool
+        redacts ".novak@advokat.sk" and leaves "jan" standing beside it. The fix IS offset-
+        safe (each homoglyph is one character) — a str.translate next to the NBSP one.
+      * all_caps (0.446) / lowercase (0.391) — measured, NOT inherent: stubbing out the
+        bare-name heuristic moves clean recall by 0.13%, so the "capitalisation is the
+        evidence" excuse cannot explain it. Same document, same anchor word, same name: the
+        field-label anchor survives ALL CAPS and the title and role anchors die.
+      * no_diacritics (0.759) — Q7 confirmed AND INCOMPLETE. Q7 named the anchor-required
+        types; the gazetteer (OBEC 0.329, KATASTER 0.286) and the registry refs (LV, PARCELA,
+        ORSR_VLOZKA all 0.000) are also hit and an anchor helper will not touch them. Worse,
+        the realistic case is worse than the gated number: when the DOCUMENT is de-accented
+        but the lawyer still types "Novák" with the accent, 70 further names are missed.
+      * tabs (0.882) / double_spaces (0.808) — improved this session, still below gate.
   - PHASE E metrics incomplete: per-type PRECISION, mutation-robustness ratios,
     cross-format consistency (same doc as docx and pdf -> same hit set) and perf numbers
     (time/page, peak RSS) are NOT implemented as gates. Per-type RECALL exists.
