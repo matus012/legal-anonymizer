@@ -268,33 +268,62 @@ def detect(
         known_entities = []
     if config is None:
         config = DEFAULT
+
+    # ---------------------------------------------------------------- NBSP NORMALIZATION
+    # Every detector runs over a copy in which U+00A0 (NBSP) has been replaced by an ordinary
+    # space. The replacement is 1 character for 1 character, so EVERY OFFSET IS PRESERVED and
+    # the candidates' start/end still index the ORIGINAL text -- which is what both writers
+    # slice by. The surface is re-sliced from the original below, so a reported surface keeps
+    # the document's real bytes, NBSP included.
+    #
+    # Why this is needed: several detectors are ANCHOR-REQUIRED, and their anchors are
+    # multi-word Slovak phrases -- "cislo klienta", "nazov uctu", "kod banky", "trvale bytom",
+    # "so sidlom", "rodne cislo". Slovak typography routinely puts an NBSP between such words,
+    # and a PDF text layer produces them constantly. Measured on the demo contract: the PDF
+    # rendered "Cislo klienta:" with an NBSP INSIDE the phrase, the anchor did not match, and
+    # the client number KL-99321 survived into the redacted PDF while the DOCX of the same
+    # document was clean. Fixing it once here beats widening a dozen regexes by hand and then
+    # discovering the thirteenth.
+    #
+    # Note this is NOT the same as folding NBSP out of a SURFACE: a phone number's NBSPs are
+    # still matched, still part of its surface, and still redacted exactly as before.
+    norm = text.replace(" ", " ") if " " in text else text
+
     candidates: list[Candidate] = []
-    candidates.extend(_detect_rc(text, config))
-    candidates.extend(_detect_ico(text, config))
-    candidates.extend(_detect_ic_dph(text))
-    candidates.extend(_detect_dic(text))
-    candidates.extend(_detect_iban(text, config))
-    candidates.extend(_detect_bankovy_ucet(text, config))
-    candidates.extend(_detect_email(text))
-    candidates.extend(_detect_url(text))
-    candidates.extend(_detect_telefon(text))
-    candidates.extend(detect_datetime_amounts(text))
-    candidates.extend(detect_registry(text))
+    candidates.extend(_detect_rc(norm, config))
+    candidates.extend(_detect_ico(norm, config))
+    candidates.extend(_detect_ic_dph(norm))
+    candidates.extend(_detect_dic(norm))
+    candidates.extend(_detect_iban(norm, config))
+    candidates.extend(_detect_bankovy_ucet(norm, config))
+    candidates.extend(_detect_email(norm))
+    candidates.extend(_detect_url(norm))
+    candidates.extend(_detect_telefon(norm))
+    candidates.extend(detect_datetime_amounts(norm))
+    candidates.extend(detect_registry(norm))
     # v1.1 type modules (CONTRACTS_v11.md §8). Each is self-contained and emits only its own
     # types; every cross-type collision they create with each other or with the v1 detectors
     # is settled by the resolution stages below, never inside a detector module.
-    candidates.extend(detect_addresses(text, config))
-    candidates.extend(detect_documents(text, config))
-    candidates.extend(detect_office_refs(text, config))
-    candidates.extend(detect_name_anchors(text, config))
-    candidates.extend(detect_gazetteer(text, config))
-    candidates.extend(detect_known_entities(text, known_entities))
+    candidates.extend(detect_addresses(norm, config))
+    candidates.extend(detect_documents(norm, config))
+    candidates.extend(detect_office_refs(norm, config))
+    candidates.extend(detect_name_anchors(norm, config))
+    candidates.extend(detect_gazetteer(norm, config))
+    candidates.extend(detect_known_entities(norm, known_entities))
     candidates = _suppress_identifiers_inside_bankovy_ucet(candidates)
     candidates = _resolve_flag_survival(candidates)
     candidates = _resolve_type_precedence(candidates)
     candidates = _resolve_containment(candidates)
     candidates = _resolve_partial_overlaps(candidates)
     candidates.sort(key=lambda c: (c.start, c.end))
+
+    # Re-slice every surface from the ORIGINAL text so a reported surface carries the
+    # document's real characters (NBSP included), not the normalized stand-ins.
+    if norm is not text:
+        candidates = [
+            c if c.surface == text[c.start : c.end] else replace(c, surface=text[c.start : c.end])
+            for c in candidates
+        ]
 
     # post-conditions, CONTRACTS_v11.md §3 -- all five, every call
     assert candidates == sorted(candidates, key=lambda c: (c.start, c.end))

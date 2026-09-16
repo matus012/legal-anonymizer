@@ -52,7 +52,18 @@ def _checksum_verdict(ok: bool, config: DetectConfig) -> tuple[bool, str]:
 _D6 = rf"\d(?:[ {NBSP}]?\d){{5}}"
 _D4 = rf"\d(?:[ {NBSP}]?\d){{3}}"
 _D3 = rf"\d(?:[ {NBSP}]?\d){{2}}"
-_RC_SEP_RE = re.compile(rf"(?<!\d)({_D6})[/ {NBSP}](?:{_D4}|{_D3})(?!\d)")
+# The SLASH form is self-identifying: no other Slovak identifier is written 6 digits, slash,
+# 3-or-4 digits. The SPACE/NBSP-separated form is NOT -- it is the same shape as a phone
+# number. Measured on the demo contract: "Fax: 055 123 4567" parsed as 6 digits ("055 12"),
+# separator, 4 digits ("3 4567"), passed the month/day shape check (month 51 -> 51-50 = 1,
+# day 23) and was auto-redacted and reported as a RODNE_CISLO. It beat FAX and TELEFON to the
+# span. Nothing leaked -- it was redacted either way -- but a report that calls a fax number a
+# birth number is not checkable against the document, which is the whole point of the report.
+#
+# So the two forms are split: SLASH matches anywhere; SPACE/NBSP requires the same RC context
+# anchor the contiguous form already requires (CONTRACTS_v11.md 6a).
+_RC_SLASH_RE = re.compile(rf"(?<!\d)({_D6})/(?:{_D4}|{_D3})(?!\d)")
+_RC_SPACED_RE = re.compile(rf"(?<!\d)({_D6})[ {NBSP}](?:{_D4}|{_D3})(?!\d)")
 _RC_CONTIG_RE = re.compile(r"(?<!\d)\d{9,10}(?!\d)")
 
 # The contiguous form is only armed by an RČ context anchor within 40 characters before
@@ -65,6 +76,11 @@ _RC_ANCHOR_RE = re.compile(
     r"\br\.?[  ]?c\.?"  # r.č. / rč / r č
     r"|\brodne(?:ho)?[  ]+cisl[oa]"  # rodné číslo / rodného čísla
     r"|\bnar\."
+    # Spelled-out birth context. "Narodil sa 850315 0018" is ordinary Slovak phrasing and
+    # was NOT matched while the abbreviated "nar." was -- a recall gap with no
+    # justification, surfaced when the spaced form became anchor-gated. Matched against
+    # the diacritic-folded window, so "narodený"/"narodená" reduce to these skeletons.
+    r"|\bnaroden[yao]|\bnarodil|\bnarodila|\bdatum[  ]+narodenia|\bdat\.[  ]?nar\."
 )
 
 
@@ -74,8 +90,22 @@ def _ascii_fold(s: str) -> str:
     )
 
 
-def _rc_anchored(text: str, start: int) -> bool:
-    return _RC_ANCHOR_RE.search(_ascii_fold(text[max(0, start - _RC_ANCHOR_WINDOW) : start])) is not None
+def _rc_anchored(text: str, start: int, end: int | None = None) -> bool:
+    """Is there rodné-číslo context within the window on EITHER side?
+
+    Slovak puts the label on either side of the number with equal ease -- "rodné číslo
+    850315/001" and "850315/001 je rodné číslo" are both ordinary. Looking only backwards
+    missed the second, so the window is symmetric. Recall over precision (context.md 6): the
+    cost of the forward window is a phone number that happens to be followed within 40
+    characters by the words "rodné číslo", which in a legal document is vanishingly rare and
+    would in any case be redacted rather than leaked."""
+    before = text[max(0, start - _RC_ANCHOR_WINDOW) : start]
+    if _RC_ANCHOR_RE.search(_ascii_fold(before)) is not None:
+        return True
+    if end is None:
+        return False
+    after = text[end : end + _RC_ANCHOR_WINDOW]
+    return _RC_ANCHOR_RE.search(_ascii_fold(after)) is not None
 
 
 def _rc_shape_ok(digits: str) -> bool:
@@ -94,11 +124,16 @@ def _rc_checksum_ok(digits: str) -> bool:
 
 
 def _detect_rc(text: str, config: DetectConfig = DEFAULT) -> list[Candidate]:
-    spans = [(m.start(), m.end()) for m in _RC_SEP_RE.finditer(text)]
+    spans = [(m.start(), m.end()) for m in _RC_SLASH_RE.finditer(text)]
+    spans += [
+        (m.start(), m.end())
+        for m in _RC_SPACED_RE.finditer(text)
+        if _rc_anchored(text, m.start(), m.end())
+    ]
     spans += [
         (m.start(), m.end())
         for m in _RC_CONTIG_RE.finditer(text)
-        if _rc_anchored(text, m.start())
+        if _rc_anchored(text, m.start(), m.end())
     ]
     out = []
     for start, end in spans:

@@ -179,8 +179,18 @@ bare-name heuristic and for `strict_checksums=True`.
   or NOTHING (contiguous digits).
 * Internal whitespace (space or NBSP) inside either digit group is accepted and is part of
   the matched surface.
-* **The contiguous (separator-less) form is only matched when an RČ context anchor appears
-  within 40 characters before the match**: `r.č.`, `rč`, `rodné číslo`, `rodného čísla`,
+* **AMENDMENT 5 — both the contiguous AND the space/NBSP-separated forms require an RČ
+  context anchor. Only the SLASH form is self-identifying.** A space-separated 6+4 digit run is
+  the same shape as a phone number: the demo contract's `Fax: 055 123 4567` parsed as
+  `055 12` + separator + `3 4567`, passed the month/day shape check (month 51 → 51−50 = 1,
+  day 23) and was auto-redacted and REPORTED as a rodné číslo, beating FAX and TELEFON to the
+  span. Nothing leaked — it was redacted either way — but a report that calls a fax number a
+  birth number cannot be checked against the document, which is the report's entire purpose.
+* The anchor window is **symmetric**: 40 characters before OR after. Slovak places the label
+  on either side ("rodné číslo 850315/001" and "850315/001 je rodné číslo" are both ordinary).
+* Anchors: `r.č.`, `rč`, `rodné číslo`, `rodného čísla`, `nar.`, `narodený`, `narodená`,
+  `narodil`, `dátum narodenia`, `dát. nar.` — matched diacritic-folded.
+* The original clause, still true for the contiguous form:: `r.č.`, `rč`, `rodné číslo`, `rodného čísla`,
   `nar.` (case-insensitive, diacritic-tolerant). Without that anchor a bare 9/10-digit run
   stays owned by DIC (v1 behaviour, unchanged) — matching it unconditionally would claim
   every 10-digit number in every document.
@@ -336,3 +346,11 @@ matched ONLY when followed by a number or preceded by `ul.` / `ulica` / `nám.` 
   shape and collide on an exact span; FAX is anchor-required and is the stronger, more
   informative claim. Both are auto-redacted either way — this decides only which label the
   reviewer reads.
+* 2026-09-16 — AMENDMENT 5 (§6a): the SPACE/NBSP-separated RODNE_CISLO form now requires an RČ
+  context anchor, like the contiguous form; only the SLASH form is self-identifying. The
+  anchor window became symmetric and the anchor list gained the spelled-out birth forms.
+  Found by the demo document, where a fax number was being reported as a rodné číslo.
+* 2026-09-16 — AMENDMENT 6 (§8): a gazetteer token must be ≥3 characters, start with a capital
+  and contain a lowercase letter. Without it the register matched `VIN` as a street and the
+  Roman numerals `I` / `II` (from "Článok I") as cadastral areas — things a legal document
+  contains on every page.

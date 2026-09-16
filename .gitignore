@@ -21,3 +21,7 @@ handoff.md
 # v1.1 gazetteer: raw open-data downloads are regenerable (tools/build_gazetteer.py);
 # only the normalised JSON lists are committed. See LICENSES.md.
 detect/gazetteer_data/_raw/
+
+# v1.1 demo artifacts: regenerate with `python -m tools.make_demo`. Never tracked --
+# the PII guard forbids committed .docx/.pdf, and these carry (synthetic) PII.
+demo/

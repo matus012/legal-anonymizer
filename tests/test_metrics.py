@@ -136,9 +136,13 @@ def test_decoy_survival_per_type_zero_on_scorch(corpus):
 
 # --------------------------------------------------------------------------- flag survival gate (defect D5)
 def test_flag_survival_full_on_unredacted(corpus):
+    # v1.1 (CONTRACTS_v11.md §6/§7, policy A1): the review-bucket population is no longer
+    # checksum-invalid RC/ICO/IBAN — those are auto-redacted and merely tagged now. It is the
+    # bare, unanchored personal name seeded by corpus/pii/review_bucket.py, which is what the
+    # shipped bare-name heuristic actually emits with auto=False.
     m = evaluate(list(_graded(corpus, scorch=False)))
     flag_types = [t for t in m.per_type.values() if t.flag_total > 0]
-    assert flag_types, "corpus needs should_flag PII (checksum-invalid RC/ICO/IBAN)"
+    assert flag_types, "corpus needs should_flag PII (the bare-name review bucket)"
     for t in flag_types:
         assert t.flag_survival == 1.0
 
@@ -187,8 +191,13 @@ def test_flag_surface_only_inside_a_present_decoy_counts_as_not_retained():
     # "Kováčska dielňa". Its span is strictly inside the decoy's, so it did NOT survive as an
     # independent flag item -> flag_survival 0.0. Raw ``in`` wrongly reports it retained (1.0),
     # disagreeing with the leak gate's decoy-span exclusion for the very same string.
+    #
+    # Typed MENO, not RODNE_CISLO: under v1.1 policy A1 (CONTRACTS_v11.md §6/§7) an identifier
+    # can no longer be should_flag at all, so a RODNE_CISLO in the flag class is a population
+    # shape this harness will never see again. The predicate under test is type-agnostic — the
+    # conversion changes the fixture's label, not one character of what is asserted.
     gt = _one_doc_gt([
-        {"surface": "Kováč", "type": "RODNE_CISLO", "auto_redact": False, "should_flag": True,
+        {"surface": "Kováč", "type": "MENO", "auto_redact": False, "should_flag": True,
          "location": {"surface_part": "body"}},
         {"surface": "Kováčska dielňa", "type": "CAPITALISED_COMMON", "auto_redact": False,
          "should_flag": False, "location": {"surface_part": "body"}},
@@ -198,8 +207,8 @@ def test_flag_surface_only_inside_a_present_decoy_counts_as_not_retained():
         by_surface={"body": "Neďaleko je Kováčska dielňa."},
     )
     m = evaluate([(gt, res)])
-    assert m.per_type["RODNE_CISLO"].flag_total == 1
-    assert m.per_type["RODNE_CISLO"].flag_survival == 0.0, (
+    assert m.per_type["MENO"].flag_total == 1
+    assert m.per_type["MENO"].flag_survival == 0.0, (
         "flag surface present only inside a decoy span must not count as retained, got "
-        f"{m.per_type['RODNE_CISLO'].flag_survival}"
+        f"{m.per_type['MENO'].flag_survival}"
     )

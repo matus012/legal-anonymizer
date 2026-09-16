@@ -81,8 +81,21 @@ def test_mutation_headers_footers_removed_drives_extractor_grader_red(corpus):
 
 def test_mutation_headers_footers_removed_falsely_reports_perfect_recall_on_noop(corpus):
     # The exact bug found by hand: a blind extractor turns a do-nothing (null) redactor into
-    # an apparently perfect one for any type confined to headers/footers.
-    graded, originals, header_footer_types = [], [], set()
+    # an apparently perfect one for any type CONFINED to headers/footers.
+    #
+    # "Confined" is computed, not assumed. The earlier version of this test collected every
+    # type with an auto-redact surface *in* a header/footer and demanded recall 1.0 for all of
+    # them — which only ever held because no corpus document happened to put one of those
+    # types anywhere else as well. ``corpus/templates/zmluva_v11.py`` now seeds ADRESA in the
+    # footer AND in the body, so that type measured 0.5 and the test went red for a reason
+    # that has nothing to do with the bug it exists to reproduce. The REASON is unchanged: a
+    # surface the extractor cannot see reads as "removed", so a type whose ONLY auto-redact
+    # surfaces live in a header/footer scores a false 100%% recall against a redactor that did
+    # nothing. A type that also occurs in the body was never part of that claim — its body
+    # occurrence is still visible and still (correctly) drags recall down.
+    graded, originals = [], []
+    hf_types: set[str] = set()      # auto types seen in a header/footer
+    elsewhere_types: set[str] = set()  # auto types seen anywhere else, in any graded doc
     for gt in _gts(corpus, suffix=".docx"):
         types_here = {
             p["type"] for p in gt["pii"]
@@ -90,10 +103,15 @@ def test_mutation_headers_footers_removed_falsely_reports_perfect_recall_on_noop
         }
         if not types_here:
             continue
-        header_footer_types |= types_here
+        hf_types |= types_here
+        elsewhere_types |= {
+            p["type"] for p in gt["pii"]
+            if p["auto_redact"] and p["location"]["surface_part"] not in ("header", "footer")
+        }
         blind = _blind_headers_footers(corpus / gt["source_file"])  # "output" == the unredacted file
         graded.append((gt, blind))
         originals.append(blind)
+    header_footer_types = hf_types - elsewhere_types
     assert header_footer_types, "corpus needs auto-redact PII confined to header/footer"
 
     m = evaluate(graded, originals=originals)
@@ -102,13 +120,16 @@ def test_mutation_headers_footers_removed_falsely_reports_perfect_recall_on_noop
             f"reproduces the bug: {ptype} must falsely show perfect recall under a blind "
             "extractor even though the redactor did nothing"
         )
-    # And the real, non-blind extractor must NOT be fooled — leaks are visible.
+    # And the real, non-blind extractor must NOT be fooled — leaks are visible. Asserted for
+    # at least one document rather than per document: a confined type is seeded per template,
+    # so not every docx carries one.
+    caught = set()
     for gt in _gts(corpus, suffix=".docx"):
         real = extract(corpus / gt["source_file"])
-        leaked = {lk.type for lk in find_leaks(gt, real)}
-        if header_footer_types & {p["type"] for p in gt["pii"] if p["auto_redact"]
-                                   and p["location"]["surface_part"] in ("header", "footer")}:
-            assert leaked & header_footer_types, "the real extractor must catch what the blind one hides"
+        caught |= {lk.type for lk in find_leaks(gt, real)} & header_footer_types
+    assert caught == header_footer_types, (
+        f"the real extractor must catch what the blind one hides; missed {header_footer_types - caught}"
+    )
 
 
 # --------------------------------------------------------------- mutation 2: PDF metadata/XMP

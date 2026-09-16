@@ -270,8 +270,27 @@ def _surname_stop_stems() -> frozenset[str]:
 
 
 # -------------------------------------------------------------------------- token helpers
+# A gazetteer token must look like a Slovak proper noun: an initial capital, at least one
+# lowercase letter after it, and at least three characters. Measured on the demo contract,
+# without these three conditions the register matched:
+#   "VIN 1HGBH41JXMN109186"  -> ULICA "VIN"      (an ALL-CAPS abbreviation, and the register
+#                                                 really does contain a street "Vin")
+#   "Článok I" / "Článok II" -> KATASTER "I"/"II" (Roman numerals; the register contains
+#                                                 one- and two-letter place names)
+# None of these is a place in context, and all three are things a legal document contains on
+# every page. The rule is the same shape as the single-character guard in
+# detect/known_entities.py and exists for the same reason: a needle short or generic enough to
+# match everywhere is not evidence, it is noise, and noise in the review list is what makes a
+# reviewer start blind-approving (context.md 9).
+_MIN_GAZETTEER_TOKEN = 3
+
+
 def _capitalized(core: str) -> bool:
-    return core[:1].isupper()
+    return (
+        len(core) >= _MIN_GAZETTEER_TOKEN
+        and core[:1].isupper()
+        and any(ch.islower() for ch in core[1:])
+    )
 
 
 def _adjacent(text: str, end: int, next_start: int) -> bool:
