@@ -2,7 +2,16 @@
 # Build:  .\.venv\Scripts\python.exe -m PyInstaller anonymizer.spec --noconfirm
 # Output: dist/Anonymizer/Anonymizer.exe
 # NOTE: one-folder (not --onefile): faster start, simpler AV story, and the office
-# copies one folder to each laptop. Gazetteers are v2; nothing extra to bundle in v1.
+# copies one folder to each laptop.
+#
+# v1.1: the gazetteers are no longer deferred. detect/gazetteer_data/*.json (obce, ulice,
+# katastralne_uzemia, first_names, surnames, stoplist -- ~330 KB total, every source CC0 or
+# CC BY 4.0, see LICENSES.md) MUST be bundled: they are plain data files, so PyInstaller's
+# import analysis cannot see them and would ship an .exe whose gazetteer silently matches
+# nothing. That failure mode is invisible in testing on the dev machine, where the files are
+# found on disk next to the source -- which is exactly why it is called out here.
+# The loader in detect/gazetteer.py resolves its data directory through sys._MEIPASS when
+# frozen and falls back to the package directory otherwise.
 
 from PyInstaller.utils.hooks import collect_submodules
 
@@ -10,7 +19,7 @@ a = Analysis(
     ["gui\\__main__.py"],
     pathex=["."],
     binaries=[],
-    datas=[],
+    datas=[("detect/gazetteer_data/*.json", "detect/gazetteer_data")],
     hiddenimports=(
         collect_submodules("detect")
         + collect_submodules("writer")

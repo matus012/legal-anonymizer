@@ -18,3 +18,6 @@ check_*.py
 diff.txt
 review_baselines.diff
 handoff.md
+# v1.1 gazetteer: raw open-data downloads are regenerable (tools/build_gazetteer.py);
+# only the normalised JSON lists are committed. See LICENSES.md.
+detect/gazetteer_data/_raw/
