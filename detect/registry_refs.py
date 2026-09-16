@@ -33,7 +33,21 @@ NBSP = "\u00a0"
 # The class below is horizontal whitespace only -- space, NBSP, tab -- with line breaks
 # still EXCLUDED, because a separator INSIDE a surface must not join two lines into one
 # phone number. Anchor-to-value separators are widened to full whitespace separately.
-_SP = '[^\\S\\n\\r]'
+# v1.1 LINE-BREAK TOLERANCE INSIDE A VALUE (mutation class line_break_mid).
+# This class used to EXCLUDE the line break, with the reasoning that "a separator INSIDE a
+# surface must not join two lines into one phone number". That was the wrong trade and the
+# mutation gate priced it: line_break_mid measured 0.119 with the exclusion in place, and a
+# wrapped PDF text layer had already leaked a client number out of a corpus document.
+#
+# A PDF text layer wraps every page, so the break lands between the groups of a phone number,
+# an IBAN, a date or an amount as a matter of routine. Joining them can over-match; refusing
+# to join them demonstrably leaks, and the governing rule (context.md 6) is recall over
+# precision. Every separator in this module sits inside a value whose shape the pattern
+# already bounds, so a joined match cannot run away down the page -- which is exactly why the
+# free-text value patterns elsewhere (a field label's value, NAZOV_UCTU) keep the narrow
+# class: those BOUND THEMSELVES on a line break, and widening them would let a value swallow
+# the rest of the document.
+_SP = r'\s'
 
 # CASE / DIACRITICS (round-2 red-team, all_caps/lowercase/no_diacritics): every literal
 # below is a fixed registry PREFIX, never free-typed evidence, so it is folded on BOTH axes
@@ -44,7 +58,7 @@ _SP = '[^\\S\\n\\r]'
 
 # --------------------------------------------------------------------------- LV
 # "LV č. <1-4 digits>"; (?!\d) refuses to split a 5+ digit run mid-number.
-_LV_RE = re.compile(rf"\bLV {diacritic_pattern('č')}\.{_SP}\d{{1,4}}(?!\d)", re.IGNORECASE)
+_LV_RE = re.compile(rf"\bLV{_SP}{diacritic_pattern('č')}\.{_SP}\d{{1,4}}(?!\d)", re.IGNORECASE)
 
 # --------------------------------------------------------------------------- PARCELA
 # One detector over the four authored styles: plain "parc. č. 123", subdivided
@@ -53,17 +67,19 @@ _LV_RE = re.compile(rf"\bLV {diacritic_pattern('č')}\.{_SP}\d{{1,4}}(?!\d)", re
 # digit run is never split.
 _C = diacritic_pattern("č")
 _PARCELA_RE = re.compile(
-    rf"\bparc\. {_C}\.{_SP}\d{{1,4}}(?:/\d{{1,2}})?(?!\d)"  # plain / sub
+    rf"\bparc\.{_SP}{_C}\.{_SP}\d{{1,4}}(?:/\d{{1,2}})?(?!\d)"  # plain / sub
     rf"|"
-    rf"\bparcela registra „[CE]“ KN {_C}\.{_SP}\d{{1,4}}/\d{{1,2}}(?!\d)",  # kn_c / kn_e
+    rf"\bparcela{_SP}registra{_SP}„[CE]“{_SP}KN{_SP}{_C}\.{_SP}\d{{1,4}}/\d{{1,2}}(?!\d)",  # kn_c / kn_e
     re.IGNORECASE,
 )
 
 # --------------------------------------------------------------------------- ORSR_VLOZKA
 # The whole "Oddiel: <section>, Vložka č. <3-5 digits>/<court letter>" string is the
-# GT surface; the spaces after "Oddiel:" and after the comma are always plain spaces.
+# GT surface. Every space in it is {_SP}: the corpus authors them as plain spaces,
+# but a wrapped PDF text layer puts a line break at any one of them, and an anchor
+# this long makes that likely. Measured at 0.000 robustness while they were literal.
 _ORSR_VLOZKA_RE = re.compile(
-    rf"\bOddiel: (?:Sro|Sa|P{diacritic_pattern('š')}|Dr), Vlo{diacritic_pattern('ž')}ka {_C}\."
+    rf"\bOddiel:{_SP}(?:Sro|Sa|P{diacritic_pattern('š')}|Dr),{_SP}Vlo{diacritic_pattern('ž')}ka{_SP}{_C}\."
     rf"{_SP}\d{{3,5}}/[VBTNZ]\b",
     re.IGNORECASE,
 )

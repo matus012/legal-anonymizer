@@ -47,7 +47,21 @@ NBSP = " "
 # The class below is horizontal whitespace only -- space, NBSP, tab -- with line breaks
 # still EXCLUDED, because a separator INSIDE a surface must not join two lines into one
 # phone number. Anchor-to-value separators are widened to full whitespace separately.
-_SEP = '[^\\S\\n\\r]'
+# v1.1 LINE-BREAK TOLERANCE INSIDE A VALUE (mutation class line_break_mid).
+# This class used to EXCLUDE the line break, with the reasoning that "a separator INSIDE a
+# surface must not join two lines into one phone number". That was the wrong trade and the
+# mutation gate priced it: line_break_mid measured 0.119 with the exclusion in place, and a
+# wrapped PDF text layer had already leaked a client number out of a corpus document.
+#
+# A PDF text layer wraps every page, so the break lands between the groups of a phone number,
+# an IBAN, a date or an amount as a matter of routine. Joining them can over-match; refusing
+# to join them demonstrably leaks, and the governing rule (context.md 6) is recall over
+# precision. Every separator in this module sits inside a value whose shape the pattern
+# already bounds, so a joined match cannot run away down the page -- which is exactly why the
+# free-text value patterns elsewhere (a field label's value, NAZOV_UCTU) keep the narrow
+# class: those BOUND THEMSELVES on a line break, and widening them would let a value swallow
+# the rest of the document.
+_SEP = r'\s'
 
 
 def _checksum_verdict(ok: bool, config: DetectConfig) -> tuple[bool, str]:
