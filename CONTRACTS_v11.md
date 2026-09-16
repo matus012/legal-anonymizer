@@ -225,7 +225,8 @@ imports them all and calls them in `detect()`; the orchestrator writes that disp
 | `detect/addresses.py` **(new, B1)** | PSC ADRESA SUPISNE_CISLO CISLO_BYTU VCHOD POSCHODIE |
 | `detect/documents.py` **(new, B2)** | CISLO_OP CISLO_PASU VODICSKY_PREUKAZ ECV VIN BIC |
 | `detect/orgs.py` **(new, B3)** | ORG |
-| `detect/name_anchors.py` **(new, C1)** | MENO (title / role / field-label / bare-name anchors) |
+| `detect/name_anchors.py` **(new, C1)** | MENO (title / role / field-label / bare-name anchors) — **and also ORG and STATNA_PRISLUSNOST**, see below |
+| `detect/orgs.py` **(new, B3)** | ORG (legal-form suffix) and NAZOV_BANKY (closed list) |
 | `detect/gazetteer.py` **(new, C3)** | OBEC KATASTER |
 
 Every new module exposes exactly one public entry point:
@@ -354,3 +355,16 @@ matched ONLY when followed by a number or preceded by `ul.` / `ulica` / `nám.` 
   and contain a lowercase letter. Without it the register matched `VIN` as a street and the
   Roman numerals `I` / `II` (from "Článok I") as cadastral areas — things a legal document
   contains on every page.
+* 2026-09-16 — AMENDMENT 7 (§8): the ownership table was WRONG about `detect/name_anchors.py`.
+  It has emitted `ORG` (from the `Obchodné meno:` field label) and `STATNA_PRISLUSNOST` since
+  the Phase C round, while the table listed it as MENO-only and `eval/leak_gate.py` carried a
+  comment saying "ORG stays excluded until its detector exists". A PARTIAL ORG detector existed
+  the whole time, and the Class A exclusion was hiding a type that was already half-covered —
+  which is exactly the failure mode the exclusion list is most prone to. ORG is now owned
+  jointly and deliberately: `name_anchors` claims the field-label form, `orgs` claims the
+  legal-form-suffix form. They collide on the same exact span for `Obchodné meno: X`, same
+  type, so `_resolve_type_precedence` collapses it to one candidate — harmless, but recorded
+  here rather than left as a coincidence.
+* 2026-09-16 — AMENDMENT 8: `CLASS_A_TYPES` in `eval/leak_gate.py` is now EMPTY. Every type
+  the tool can emit is gated. The gate prints "(NO type exclusions)" rather than a fixed
+  "(Class A excluded)" string, so a future exclusion cannot hide behind stale text.

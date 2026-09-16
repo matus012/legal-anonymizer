@@ -38,6 +38,7 @@ from .documents import detect_documents  # noqa: E402
 from .office_refs import detect_office_refs  # noqa: E402
 from .name_anchors import detect_name_anchors  # noqa: E402
 from .gazetteer import detect_gazetteer  # noqa: E402
+from .orgs import detect_orgs  # noqa: E402
 from .identifiers import (  # noqa: E402
     _detect_bankovy_ucet,
     _detect_dic,
@@ -309,6 +310,7 @@ def detect(
     candidates.extend(detect_office_refs(norm, config))
     candidates.extend(detect_name_anchors(norm, config))
     candidates.extend(detect_gazetteer(norm, config))
+    candidates.extend(detect_orgs(norm, config))
     candidates.extend(detect_known_entities(norm, known_entities))
     candidates = _suppress_identifiers_inside_bankovy_ucet(candidates)
     candidates = _resolve_flag_survival(candidates)

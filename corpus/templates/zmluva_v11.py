@@ -37,7 +37,7 @@ textbox so the writers' surface coverage is exercised too, not just the detector
 from __future__ import annotations
 
 from ..groundtruth import PiiSpec
-from ..pii import addresses, documents, names_anchored, office_refs
+from ..pii import addresses, documents, names_anchored, office_refs, orgs
 from . import _common
 
 # Anchor prefixes for the anchor-required types. The anchor is NOT part of the ground-truth
@@ -143,6 +143,14 @@ def build(b, rng, bank, *, is_docx: bool) -> None:
         names_anchored.make_field_org,
     ):
         b.paragraph(_one(maker, rng) + ["."])
+
+    # ---- v1.1 ORG + NAZOV_BANKY ----------------------------------------------------------
+    # NAZOV_BANKY had a detector and NO corpus occurrence, so no gate was asking about it —
+    # the same vacuous-coverage trap this template exists to close. ORG already had corpus
+    # coverage (150 occurrences, mostly metadata) but no body occurrence carrying a legal-form
+    # suffix, which is the signal the detector actually keys on.
+    b.paragraph(["Účet je vedený v "] + _one(orgs.make_nazov_banky, rng) + ["."])
+    b.paragraph(["Zhotoviteľom je "] + _one(orgs.make_org, rng) + ["."])
 
     # ---- spread across the OTHER surfaces each format offers ----------------------------
     # The two builders expose DIFFERENT surface sets, and that asymmetry is the point: a

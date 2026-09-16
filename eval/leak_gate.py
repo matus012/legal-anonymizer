@@ -53,7 +53,18 @@ from writer.pdf_body import redact_pdf
 # is an UNTESTED type, and the exclusion list is the easiest place in this repo for a gate to
 # quietly stop testing something. ORG stays excluded until its detector exists; that is the
 # whole remaining content of Class A and it is tracked in status.txt.
-CLASS_A_TYPES = {"ORG"}
+# EMPTY as of v1.1. Class A was "types v1 genuinely could not detect" — OBEC and KATASTER
+# left when the gazetteer shipped, and ORG leaves now that detect/orgs.py exists. An excluded
+# type is an UNTESTED type, and this list is the easiest place in the repo for a gate to
+# quietly stop asking about something.
+#
+# Worth recording how long ORG sat here after it stopped being true: detect/name_anchors.py
+# has emitted ORG from the "Obchodné meno:" field label since the Phase C round, so a PARTIAL
+# ORG detector existed and the exclusion was hiding a type that was already half-covered.
+# Verified before emptying, on the corpus and with the set already empty: 150 ORG ground-truth
+# occurrences, 130 of them in metadata (blanked by POSITION by the writer, never detected at
+# all) and 20 in the body; ORG leaks measured text_layer=0 scrub=0 other=0.
+CLASS_A_TYPES: set[str] = set()
 _SCRUB_SURFACES = {"form_fields", "attachments", "info_metadata", "xmp", "annotations"}
 
 # ---------------------------------------------------------------- attributability
@@ -205,7 +216,9 @@ def run_gate(corpus_dir: Path) -> int:
     print(f"redacted: {n_docx} docx + {n_pdf} pdf")
     print(
         f"leaks: text_layer={counts['text_layer']} "
-        f"scrub={counts['scrub']} other={counts['other']} (Class A excluded)"
+        f"scrub={counts['scrub']} other={counts['other']} "
+        + (f"({len(CLASS_A_TYPES)} type(s) excluded: {', '.join(sorted(CLASS_A_TYPES))})"
+           if CLASS_A_TYPES else "(NO type exclusions)")
     )
     for name, leak, counted in failing:
         print(f"  LEAK {name}: type={leak.type} found_in={counted}")
