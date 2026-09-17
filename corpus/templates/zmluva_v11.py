@@ -71,7 +71,7 @@ def _one(maker, rng) -> list:
     return _items(*maker(rng))
 
 
-def build(b, rng, bank, *, is_docx: bool) -> None:
+def build(b, rng, bank) -> None:
     rec = b.rec
     p1 = _common.make_person(rng, bank, rec, "prenajimatel")
     p2 = _common.make_person(rng, bank, rec, "najomca")
@@ -87,7 +87,7 @@ def build(b, rng, bank, *, is_docx: bool) -> None:
 
     # ---- the shared v1 failure-mode seeding (identifiers, declension, decoys, metadata) ----
     ids = _common.identifier_specs(rng)
-    _common.seed_all(b, rng, bank, rec, is_docx=is_docx, ids=ids, people=people)
+    _common.seed_all(b, rng, bank, rec, ids=ids, people=people)
 
     # ---- v1.1 ADDRESS BLOCK -------------------------------------------------------------
     b.heading("Článok II — Predmet nájmu")  # PdfBuilder.heading takes no level; keep the call shape shared
@@ -161,11 +161,13 @@ def build(b, rng, bank, *, is_docx: bool) -> None:
     # wrapping sentence must NOT prepend its own "na " too (that produced a doubled "na na" —
     # caught by regenerating and reading the output, not assumed correct).
     b.paragraph(["Zmluvné strany sa dostavili "] + _one(ulica.make_ulica_declined, rng) + ["."])
-    if is_docx:
-        # Split across multiple <w:r> runs (context.md §7/§10) — reuses the mechanism
-        # corpus/templates/_common.py already uses for a split surname.
-        _, split_spec = ulica.make_ulica_ul(rng)
-        b.split_run_paragraph("Poštová adresa je na ul. ", split_spec, ", v prízemí.")
+    # Split across multiple <w:r> runs in DOCX (context.md §7/§10) — reuses the mechanism
+    # corpus/templates/_common.py already uses for a split surname. The PDF renders the same
+    # sentence as an ordinary paragraph: splitting is a DOCX STORAGE trap, not a difference in
+    # what the document says, so the surface must stay common to both formats (Q14). The draw
+    # is unconditional so the content stream cannot diverge by format.
+    _, split_spec = ulica.make_ulica_ul(rng)
+    b.split_run_paragraph("Poštová adresa je na ul. ", split_spec, ", v prízemí.")
 
     # ---- v1.1 ORG + NAZOV_BANKY ----------------------------------------------------------
     # NAZOV_BANKY had a detector and NO corpus occurrence, so no gate was asking about it —
@@ -180,19 +182,20 @@ def build(b, rng, bank, *, is_docx: bool) -> None:
     # DOCX hides text in headers/footers/notes/textboxes, a PDF hides it in annotations,
     # form fields and attachments. Seeding each format's own hiding places is what makes the
     # leak gate meaningful per format rather than testing the body twice.
-    if is_docx:
-        b.header(["Nájomná zmluva — "] + _one(office_refs.make_fax, rng))
-        b.footer(["Kontaktná adresa: "] + _one(addresses.make_adresa, rng))
-        b.footnote(
-            "Podrobnosti o vozidle sú uvedené nižšie.",
-            ["Evidenčné číslo: "] + _one(documents.make_ecv, rng),
-        )
-        b.textbox(["Byt: "] + _one(addresses.make_cislo_bytu, rng))
-    else:
-        b.annotation(["Kontaktný fax: "] + _one(office_refs.make_fax, rng))
-        b.attachment(
-            "poznamka.txt",
-            ["Evidenčné číslo vozidla: "] + _one(documents.make_ecv, rng),
-        )
+    # Both sets are seeded into the one content plan and each renderer keeps only its own
+    # (corpus/builders_plan.py) — branching here would make the two formats draw different
+    # numbers of values from the content RNG, which is the Q14 defect.
+    b.header(["Nájomná zmluva — "] + _one(office_refs.make_fax, rng))
+    b.footer(["Kontaktná adresa: "] + _one(addresses.make_adresa, rng))
+    b.footnote(
+        "Podrobnosti o vozidle sú uvedené nižšie.",
+        ["Evidenčné číslo: "] + _one(documents.make_ecv, rng),
+    )
+    b.textbox(["Byt: "] + _one(addresses.make_cislo_bytu, rng))
+    b.annotation(["Kontaktný fax: "] + _one(office_refs.make_fax, rng))
+    b.attachment(
+        "poznamka.txt",
+        ["Evidenčné číslo vozidla: "] + _one(documents.make_ecv, rng),
+    )
 
     b.paragraph(["Zmluvné strany vyhlasujú, že zmluvu uzavreli slobodne a vážne."])

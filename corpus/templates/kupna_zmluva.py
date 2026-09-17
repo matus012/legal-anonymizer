@@ -4,7 +4,7 @@ from __future__ import annotations
 from . import _common
 
 
-def build(b, rng, bank, *, is_docx: bool) -> None:
+def build(b, rng, bank) -> None:
     rec = b.rec
     p1 = _common.make_person(rng, bank, rec, "predavajuci")
     p2 = _common.make_person(rng, bank, rec, "kupujuci")
@@ -18,5 +18,5 @@ def build(b, rng, bank, *, is_docx: bool) -> None:
         _common.name_spec(p2, "ins", "kupujuci", "full"), ".",
     ])
     ids = _common.identifier_specs(rng)
-    _common.seed_all(b, rng, bank, rec, is_docx=is_docx, ids=ids, people=people)
+    _common.seed_all(b, rng, bank, rec, ids=ids, people=people)
     b.paragraph(["Zmluvné strany vyhlasujú, že zmluvu uzavreli slobodne a vážne."])

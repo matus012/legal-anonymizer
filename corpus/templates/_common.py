@@ -146,7 +146,7 @@ def seed_docx_failure_modes(b, rng, bank, ids: dict, p_extra: Person, e_extra: s
         [ids["suma"]],
         [PiiSpec(p_extra.full("nom"), "MENO", entity_id=e_extra)],
     )
-    b.set_metadata(
+    b.set_metadata_docx(
         PiiSpec(f"JUDr. {p_extra.canonical}", "MENO"),
         PiiSpec(f"Advokátska kancelária {p_extra.surname('nom')}", "ORG"),
     )
@@ -160,7 +160,7 @@ def seed_pdf_failure_modes(b, rng, bank, ids: dict, p_extra: Person, e_extra: st
     b.form_field("iban", PiiSpec(ids["iban"].surface, "IBAN", valid_checksum=True))
     b.attachment("priloha.txt", ["Telefón ", PiiSpec(ids["phone"].surface, "TELEFON"),
                                  ", DIČ ", PiiSpec(ids["dic"].surface, "DIC")])
-    b.set_metadata(
+    b.set_metadata_pdf(
         PiiSpec(f"JUDr. {p_extra.canonical}", "MENO"),
         PiiSpec(p_extra.full("nom"), "MENO"),
     )
@@ -183,8 +183,15 @@ def capitalised_common_decoys(b, rng: random.Random, person: Person, place) -> N
                                       should_flag=False), suffix])
 
 
-def seed_all(b, rng, bank, rec, *, is_docx: bool, ids: dict, people: list) -> None:
-    """Common failure-mode seeding shared by every template."""
+def seed_all(b, rng, bank, rec, *, ids: dict, people: list) -> None:
+    """Common failure-mode seeding shared by every template.
+
+    QUESTIONS.md Q14: there is no ``is_docx`` branch here any more. BOTH formats' hiding
+    places are seeded unconditionally into the single content plan; the renderer for each
+    format drops the ops its format cannot express (``corpus/builders_plan.py``). Branching
+    here consumed a different number of RNG draws per format, which desynchronised the
+    content stream for everything authored afterwards — the exact defect Q14 describes.
+    """
     p_main, e_main = people[0]
     p_extra, e_extra = people[1]
     declension_showcase(b, p_main, e_main)
@@ -212,7 +219,5 @@ def seed_all(b, rng, bank, rec, *, is_docx: bool, ids: dict, people: list) -> No
     b.paragraph(["Referencie (nie PII): ", ids["decoy_b"], "."])
     seed_review_bucket(b, rng)
     capitalised_common_decoys(b, rng, p_main, place)
-    if is_docx:
-        seed_docx_failure_modes(b, rng, bank, ids, p_extra, e_extra)
-    else:
-        seed_pdf_failure_modes(b, rng, bank, ids, p_extra, e_extra)
+    seed_docx_failure_modes(b, rng, bank, ids, p_extra, e_extra)
+    seed_pdf_failure_modes(b, rng, bank, ids, p_extra, e_extra)
