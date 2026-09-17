@@ -17,14 +17,14 @@ is re-implemented.
 
 W3 (context.md §10) closes the last <w:p> locations, the three note parts Word keeps OUTSIDE
 document.xml as separate OPC parts: footnotes.xml, endnotes.xml and comments.xml. They carry a
-part-type asymmetry (see _redact_notes_part) but every note is an ordinary <w:p> once located,
+part-type asymmetry (see _open_tree) but every note is an ordinary <w:p> once located,
 so the SAME core is reused again. W3 does NOT scrub the comment w:author attribute — that is
 W4 metadata scope. Labels are type-only ("[MENO]"); per-entity numbering ("[MENO_1]") is W5.
 The input file is never modified — output is a new file.
 
 W4b (context.md §10) scrubs document METADATA that carries PII: docProps/core.xml properties
 (dc:creator, cp:lastModifiedBy, ...), docProps/app.xml's Company/Manager free-text fields, and
-the comment w:author/w:initials attributes deferred from W3 (see _redact_notes_part). These are
+the comment w:author/w:initials attributes deferred from W3 (see _scrub_metadata). These are
 BLANKED UNCONDITIONALLY BY POSITION — detect() never runs over metadata, since an author or
 manager name is PII regardless of whether it matches a detector pattern, and the original value
 is never preserved (see _scrub_metadata).
@@ -565,7 +565,7 @@ def _scrub_metadata(doc) -> None:
       blob so every unrelated tag (HeadingPairs, TitlesOfParts, vt: vectors, the <?xml?>
       declaration) is byte-preserved; only a NON-EMPTY <Tag>...</Tag> is rewritten, so an
       already-empty <Tag/>/<Tag></Tag> is left as-is rather than needlessly touched.
-    * word/comments.xml <w:comment w:author=...>: deferred from W3's _redact_notes_part.
+    * word/comments.xml <w:comment w:author=...>: deferred from W3's paragraph pass.
       Same element-vs-blob asymmetry applies — a CommentsPart's .blob RE-SERIALIZES from its
       live .element, so the attribute is mutated ON THE ELEMENT, never via a ._blob reassign
       (which would be silently discarded on save). w:id/w:date are not PII and are untouched.

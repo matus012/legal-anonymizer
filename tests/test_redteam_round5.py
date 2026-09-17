@@ -202,9 +202,9 @@ def test_control_r5_01_needles_are_reachable_in_the_source(tmp_path):
     assert surfaces_with(src, "Ján Novák") == ["footer", "header"]
 
 
-@pytest.mark.xfail(strict=True, reason="R5-01: _redact_docx visits only section.header / "
-                                       "section.footer; the first-page and even-page header "
-                                       "and footer parts are never redacted")
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_r5_01_first_and_even_page_headers_and_footers_are_redacted(tmp_path):
     out, _ = _headers_fixture(tmp_path)
     survivors = []
@@ -322,22 +322,37 @@ def _glossary_fixture(tmp_path):
 
 def test_control_r5_03_the_cover_page_sdt_in_the_body_is_redacted(tmp_path):
     """CONTRAST CONTROL for R5-03: a `w:sdt` / `w:docPartObj` cover page IN THE BODY is
-    redacted, so the glossary miss is about the PART, not about content controls."""
+    redacted, so the glossary miss is about the PART, not about content controls.
+
+    AMENDED 2026-09-17 with the R5-03 fix. The occurrence list was pinned to exactly
+    ``[("body", ...)]``, which was only true while the glossary went unvisited; the same name is
+    now redacted in the glossary too and is recorded there under its own location. The body
+    occurrence is still pinned FIRST (traversal order is body before the glossary), which is
+    what this control is for."""
     out, lm = _glossary_fixture(tmp_path)
     assert "Mária Kováčová" not in part(out, "word/document.xml")
-    assert lm.occurrences["[MENO_1]"] == [("body", "Mária Kováčová")]
+    assert lm.occurrences["[MENO_1]"] == [("body", "Mária Kováčová"),
+                                          ("glossary", "Mária Kováčová")]
 
 
 def test_control_r5_03_the_glossary_part_is_reachable_by_the_extractor(tmp_path):
     """REACHABILITY CONTROL for R5-03: `other_xml_parts` is a TEXT surface, so a leak here is
-    one the gate would grade — it was simply never scrubbed."""
-    out, _ = _glossary_fixture(tmp_path)
-    assert surfaces_with(out, "855612/7788") == ["other_xml_parts"]
+    one the gate would grade — it was simply never scrubbed.
+
+    AMENDED 2026-09-17 with the R5-03 fix. As written this measured the REDACTED output, so it
+    asserted the leak was still there — it was a control that could only hold while the finding
+    was open. A reachability control measures the UNREDACTED SOURCE (as R5-01's does): the
+    needle is provably on a graded surface of the input, so "absent from the output" can only
+    mean "removed"."""
+    src = doc_with_body([_COVER_SDT], tmp_path / "r5_03_src.docx")
+    src = _patch_glossary(src, str(tmp_path / "r5_03_src_p.docx"))
+    assert reopens(src)
+    assert surfaces_with(src, "855612/7788") == ["other_xml_parts"]
 
 
-@pytest.mark.xfail(strict=True, reason="R5-03: no pass touches word/glossary/document.xml — "
-                                       "not redaction, not the tracked-change strip, not the "
-                                       "field-code scrub")
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_r5_03_the_building_block_glossary_is_redacted(tmp_path):
     out, _ = _glossary_fixture(tmp_path)
     gloss = part(out, "word/glossary/document.xml")
@@ -419,9 +434,9 @@ def test_control_r5_04_the_same_field_codes_in_the_body_are_scrubbed(tmp_path):
     assert "Jan-Novak" not in body
 
 
-@pytest.mark.xfail(strict=True, reason="R5-04: _scrub_field_codes and _strip_data_bindings run "
-                                       "on doc.element and the header/footer elements only — "
-                                       "never on the footnotes / endnotes / comments parts")
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_r5_04_field_instructions_in_note_parts_are_scrubbed(tmp_path):
     out, _ = _notes_fixture(tmp_path)
     survivors = []
