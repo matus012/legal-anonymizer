@@ -75,8 +75,13 @@ the word really is a surname: the given-name + Capitalized-token rule still emit
 name with ``auto=True``.
 
 This module never resolves overlaps against other detector modules, and emits both an OBEC
-and a KATASTER candidate where the two registers share a name — that is by design; contract
-§5's resolver in ``detect/core.py`` settles every cross-type collision.
+and a KATASTER candidate where the two registers share a name and the hit is unanchored —
+that is by design; contract §5's resolver in ``detect/core.py`` settles that collision (OBEC
+wins, the more likely reading). The one collision this module DOES settle itself is an
+anchored katastrálne-územie claim ("katastrálne územie Ružinov", "k. ú. Ružinov"): see
+"OBEC/KATASTER label precedence" below — ``detect/core.py``'s resolver has no access to the
+anchor, so the OBEC candidate is dropped here instead of being left for a precedence rule
+that cannot see the evidence.
 """
 from __future__ import annotations
 
@@ -291,6 +296,73 @@ def _place_anchored(text: str, start: int, end: int) -> bool:
         _PLACE_ANCHOR_RE.search(ascii_fold(text[max(0, start - _ANCHOR_WINDOW) : start]))
         or _PSC_AFTER_RE.match(text[end:])
     )
+
+
+# ------------------------------------------------------------ OBEC/KATASTER label precedence
+# A katastrálne územie is almost always named after the obec it sits in, so ``obce.json`` and
+# ``katastralne_uzemia.json`` collide on the same span constantly, and unanchored that is
+# correctly read as OBEC (contract precedence, detect/core.py's _TYPE_PRECEDENCE — the more
+# likely reading, and what the corpus ground truth says). But "katastrálne územie Ružinov" /
+# "k. ú. Ružinov" NAMES a cadastral area explicitly, and _TYPE_PRECEDENCE has no access to
+# that anchor (it only ever sees a bare type name on an exact-span tie) — same limit Amendment
+# 3 hit with FAX/TELEFON, except there both claims are independently anchor-checked inside
+# their own detector, so the stronger one already arrives able to win on rank alone. Here the
+# label is decided by which register matched, not by anchoring, so the tie survives all the
+# way to core.py's resolver with nothing to break it. The evidence has to be settled here, in
+# the gazetteer, before both candidates are handed to core.py: see ``detect_gazetteer`` below,
+# which drops the OBEC candidate on any span the KATASTER anchor confirms, leaving the
+# KATASTER candidate uncontested (and therefore automatically the survivor) instead of
+# reordering the shared registry.
+#
+# Phrase forms are matched case-INSENSITIVE / diacritic-folded like every other anchor here
+# (technique B, ``ascii_fold``): "katastrálne územie", "katastrálnom území", "katastrálneho
+# územia", "kat. územie", "k. ú." / "k.ú." all fold to plain-ascii lowercase and collide with
+# nothing else in running Slovak prose.
+#
+# "KÚ" is different: folded and lowercased it is "ku", the ordinary Slovak preposition
+# ("ku Košiciam" = "towards Košice") — folding it would manufacture a false anchor on every
+# directional phrase in the corpus. So the bare abbreviation is matched CASE-SENSITIVELY,
+# against the unfolded text, requiring the two capital letters exactly. This is the one place
+# in this module's anchor logic that deliberately skips the fold.
+_KATASTER_ANCHOR_WINDOW = 30
+_KATASTER_PHRASE_RE = re.compile(
+    rf"(?:"
+    rf"katastralne{_SEP_ANCHOR}+uzemie"
+    rf"|katastralnom{_SEP_ANCHOR}+uzemi"
+    rf"|katastralneho{_SEP_ANCHOR}+uzemia"
+    # "kat." abbreviates the adjective ("katastrálne"/"katastrálnom"/"katastrálneho") but a
+    # filing still declines "územie" after it — nominative "kat. územie", genitive "kat.
+    # územia", and (found missing here first: coordinator's anchor x place matrix, "v kat.
+    # území Levoči" — ordinary Slovak, and exactly the abbreviated-locative shape a filing
+    # uses) locative "kat. území", which folds to "uzemi" the same way the full-word locative
+    # above does. All three collapse into one alternative instead of three, mirroring the
+    # nominative/genitive/locative split spelled out above for the unabbreviated adjective.
+    rf"|kat\.{_SEP_ANCHOR}*uzemi[ae]?"
+    rf"|k\.{_SEP_ANCHOR}*u\."
+    rf"){_SEP_ANCHOR}*$"
+)
+_KATASTER_ABBR_RE = re.compile(rf"KÚ{_SEP_ANCHOR}*$")
+
+
+def _kataster_anchored(text: str, start: int) -> bool:
+    """Does a katastrálne-územie anchor immediately precede this place hit?
+
+    Only a KEYWORD/abbreviation directly before the name counts — same shape as
+    ``_STREET_KEYWORD_RE`` — so it cannot fire on "kataster" appearing somewhere earlier in
+    the sentence about an unrelated place.
+
+    NOT A BUG, checked directly against the data: "Košice" and "Bratislava" never come out
+    KATASTER under any anchor spelling here, and cannot — ``katastralne_uzemia.json``
+    (source: CL000026, the cadastral-area codelist) has no entry named after either city at
+    all, not even a hyphenated borough form (unlike ``obce.json``, whose 22 "Košice-*" / 17
+    "Bratislava-*" municipality-register rows are exactly why ``tools/build_gazetteer.py``
+    derives the bare head name for OBEC — see ``_with_head_city_names`` there; the
+    katastrálne-územia build has nothing to derive it FROM, because Bratislava's and
+    Košice's actual cadastral areas carry their own historic names, e.g. "Ružinov", "Nivy",
+    not "Bratislava-*"). So for these two cities OBEC is the only register with a matching
+    entry, anchor or not, and that is the correct answer, not a suppressed one."""
+    window = text[max(0, start - _KATASTER_ANCHOR_WINDOW) : start]
+    return bool(_KATASTER_PHRASE_RE.search(ascii_fold(window)) or _KATASTER_ABBR_RE.search(window))
 
 
 def _street_anchored(text: str, start: int, end: int, *, stoplisted: bool = False) -> bool:
@@ -654,10 +726,21 @@ def detect_gazetteer(text: str, config: DetectConfig) -> list[Candidate]:
     tstems_ascii = [ascii_fold(s) for s in tstems]
     relaxed = document_is_single_case(text)
     out: list[Candidate] = []
-    out.extend(_place_hits(text, toks, tstems, tstems_ascii, _OBCE, "OBEC", relaxed=relaxed))
-    out.extend(
-        _place_hits(text, toks, tstems, tstems_ascii, _KATASTER, "KATASTER", relaxed=relaxed)
+    obec_hits = _place_hits(text, toks, tstems, tstems_ascii, _OBCE, "OBEC", relaxed=relaxed)
+    kataster_hits = _place_hits(
+        text, toks, tstems, tstems_ascii, _KATASTER, "KATASTER", relaxed=relaxed
     )
+    # See "OBEC/KATASTER label precedence" above: an anchored katastrálne-územie claim
+    # settles the collision here, before core.py ever sees the tie. An unanchored span keeps
+    # both candidates and falls through to _TYPE_PRECEDENCE unchanged (OBEC wins there, as
+    # before).
+    anchored_spans = {
+        (c.start, c.end) for c in kataster_hits if _kataster_anchored(text, c.start)
+    }
+    if anchored_spans:
+        obec_hits = [c for c in obec_hits if (c.start, c.end) not in anchored_spans]
+    out.extend(obec_hits)
+    out.extend(kataster_hits)
     out.extend(_street_hits(text, toks, tstems, tstems_ascii, relaxed=relaxed))
     out.extend(_name_hits(text, toks, tstems, tstems_ascii, relaxed=relaxed))
     return out

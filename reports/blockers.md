@@ -128,3 +128,46 @@ runs all fifteen mutations with its instrument self-check passing, and the rest 
 **This is itself a round-3 finding** (recorded as R3-F1 in `redteam/FINDINGS_ROUND3.md`): a test
 whose stated purpose is "make sure nobody drops an attack" is implemented as an equality that
 makes the module append-only in name and frozen in fact. Every future red-team round hits it.
+
+## 2026-09-17 — `corpus/templates/_common.py:143` mislabels an anchored katastrálne-územie
+## occurrence as OBEC (found while fixing the KATASTER/OBEC precedence bug)
+
+**Status: OPEN, not fixed here.** `corpus/templates/_common.py` is outside this task's file
+ownership (owned files: `detect/gazetteer.py`, `detect/core.py` §`_TYPE_PRECEDENCE`,
+`eval/run.py`, `eval/metrics.py`, and tests) — reporting per the brief's own instruction
+("If one needs changing, report it instead").
+
+**What was asked:** make `detect/gazetteer.py` label a place as KATASTER instead of OBEC
+when the surface is preceded by an explicit katastrálne-územie anchor ("katastrálne územie",
+"k. ú.", "kat. územie", "KÚ", inflected forms), while an unanchored collision keeps reading
+as OBEC — the Amendment-3 pattern (anchored beats unanchored), settled in the gazetteer
+because `_TYPE_PRECEDENCE` has no access to the anchor. Implemented exactly that (see
+`detect/gazetteer.py`, "OBEC/KATASTER label precedence"), and it does the right thing on
+every case checked by hand.
+
+**What it exposed:** `seed_docx_failure_modes` (`corpus/templates/_common.py:143`) writes a
+textbox literally reading `"Nehnuteľnosť v k. ú. "` followed by a place — but tags that
+`PiiSpec` `"OBEC"`, not `"KATASTER"`. The text says katastrálne územie; the ground truth says
+OBEC. This is a *different* thing from the cross-document ambiguity the task brief already
+flagged (the same surface, e.g. "Michalovciach", legitimately being OBEC in one document and
+KATASTER in another, which the anchor is exactly built to disambiguate) — this is one single
+occurrence, in one document, where the anchor text and the ground-truth type disagree with
+each other. Confirmed by direct inspection: `kupna_zmluva_000.docx.gt.json` records
+`{"surface": "Michalovciach", "type": "OBEC", ...}` for the ONLY occurrence of that word in
+the document, and that occurrence's only context (both places it's extracted from) is
+`"Nehnuteľnosť v k. ú. Michalovciach"`.
+
+**Effect on the numbers reported for this task:** every doc that calls
+`seed_docx_failure_modes` contributes one such mislabeled occurrence. The fix correctly
+relabels it KATASTER (it IS anchored), so it now counts as an unbacked KATASTER candidate and
+a lost OBEC "backed" hit under `eval/precision_report.py`'s ground-truth-overlap definition —
+which is why OBEC's measured precision in the fix's own report went DOWN (44.9% -> 28.5%)
+instead of up as expected going in. KATASTER's number is genuinely fixed and moved the right
+way (0.0% -> 31.8%, candidates 8 -> 88) for the reason predicted; OBEC's number is depressed
+by this one template bug riding along on the same corpus. The dual leak gate is unaffected
+(`eval.leak_gate` still `VERDICT: PASS`, 0 leaks) because both labels redact the same span
+either way — this is a report-label accuracy issue, not a redaction issue.
+
+**Fix, for whoever owns `corpus/templates/_common.py`:** either change line 143's PiiSpec
+type from `"OBEC"` to `"KATASTER"` (the text already says katastrálne územie), or change the
+anchor text so it no longer reads as one. One-line change either way.

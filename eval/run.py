@@ -36,6 +36,16 @@ DECOY_SURVIVAL_MIN = 0.95
 # detect/name_anchors.py. The gate is unchanged; only its population moved.
 FLAG_SURVIVAL_MIN = 1.0
 
+# Per-type recall floors (daytime brief). Unlike DECOY_SURVIVAL_MIN/FLAG_SURVIVAL_MIN, this
+# is NOT a single corpus-wide constant applied to every type — only a type with an entry
+# below is gated at all. Adding an entry is a deliberate per-type decision (a number someone
+# asked for), not a blanket policy, so an ungated type prints its recall with no floor rather
+# than being silently held to one nobody asked for. THE FLOOR IS THE PINNED NUMBER; it never
+# moves to make a run pass.
+RECALL_FLOORS: dict[str, float] = {
+    "ULICA": 0.98,
+}
+
 
 @dataclass
 class EvalOutcome:
@@ -80,15 +90,55 @@ class EvalOutcome:
         )
 
     @property
+    def recall_floors_ok(self) -> bool:
+        """Per-type recall floor (``RECALL_FLOORS``). Only a type with an explicit entry is
+        gated; a type absent from the dict is unconstrained here regardless of its recall.
+
+        A pinned type with NO gradeable surfaces FAILS, and that is deliberate — see
+        ``_vacuous_recall_floors``."""
+        if self._vacuous_recall_floors:
+            return False
+        return all(
+            self.metrics.per_type[ptype].recall >= floor
+            for ptype, floor in RECALL_FLOORS.items()
+            if ptype in self.metrics.per_type
+            and self.metrics.per_type[ptype].recall is not None
+        )
+
+    @property
+    def _vacuous_recall_floors(self) -> list[str]:
+        """Pinned types with no gradeable surfaces in this run — a floor measuring NOTHING.
+
+        Treated as a FAILURE rather than waved through, because this project has already been
+        bitten by precisely this shape. Red-team round 2, finding C-2: "ULICA has a detector
+        and ZERO corpus coverage, so no gate grades it. A type nothing asks about is untested
+        whether it is excluded explicitly or simply absent, and the second is harder to see."
+        A floor of 0.98 over an empty population reports PASS forever while asking nothing.
+        An entry in RECALL_FLOORS is a request to WATCH that type; if the population vanishes,
+        the request is no longer being served and the run should say so out loud.
+        """
+        return sorted(
+            ptype for ptype in RECALL_FLOORS
+            if ptype not in self.metrics.per_type
+            or self.metrics.per_type[ptype].recall is None
+        )
+
+    @property
     def passed(self) -> bool:
         """§8.3 gates: zero leaks, full coverage, no corrupt outputs, no refused doc slipping
-        through, non-PII content retained, decoys preserved per type, and flag items (hard
-        negatives) preserved per type."""
+        through, non-PII content retained, decoys preserved per type, flag items (hard
+        negatives) preserved per type, and any pinned per-type recall floor met."""
         return not (
             self.leaks
             or self.integrity_failures
             or self.unexpected_outputs
-        ) and self.coverage_ok and self.retention_ok and self.decoy_survival_ok and self.flag_survival_ok
+        ) and (
+            self.coverage_ok
+            and self.retention_ok
+            and self.decoy_survival_ok
+            and self.flag_survival_ok
+            and self.recall_floors_ok
+        )
 
 
 def _resolve_output(redacted_dir: Path, source_file: str) -> Path | None:
@@ -200,6 +250,19 @@ def _format_report(outcome: EvalOutcome) -> str:
     )
     flag_verdict = "PASS" if outcome.flag_survival_ok else f"FAIL ({', '.join(failing_flag)})"
     lines.append(f"[FLAG SURVIVAL] should_flag items must survive 100% per type — {flag_verdict}")
+
+    # Per-type recall floors (RECALL_FLOORS) — only the types with a pinned floor are gated.
+    for ptype, floor in sorted(RECALL_FLOORS.items()):
+        t = m.per_type.get(ptype)
+        if t is None or t.recall is None:
+            # Not "n/a — PASS". A pinned floor with nothing to measure is a DEAD GATE.
+            lines.append(f"[RECALL FLOOR] {ptype} recall: NO GRADEABLE SURFACES "
+                         f"(gate >= {floor:.0%}) — FAIL (vacuous: this floor is measuring "
+                         f"nothing; either the corpus lost this type or the pin is stale)")
+            continue
+        rec_verdict = "PASS" if t.recall >= floor else f"FAIL (< {floor:.0%})"
+        lines.append(f"[RECALL FLOOR] {ptype} recall: {t.recall:.1%} "
+                     f"(gate >= {floor:.0%}) — {rec_verdict}")
 
     cov_verdict = "PASS" if outcome.coverage_ok else f"FAIL ({len(outcome.missing_outputs)} missing)"
     lines.append(f"[COVERAGE] {cov_verdict}")
