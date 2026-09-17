@@ -190,9 +190,23 @@ COMMON_WORD_STOPLIST = sorted({
     # Stoplisting does NOT delete them from the gazetteer: the same word preceded by an
     # address or cadastral anchor is still matched, because there the context makes it a place.
     # It only stops the bare word being auto-redacted out of running prose.
-    "Pondelok", "Utorok", "Streda", "Stvrtok", "Stvrtok", "Piatok", "Sobota", "Nedela",
+    # SPELLED WITH THEIR DIACRITICS, and that is not cosmetic. stem() casefolds and folds
+    # vowel LENGTH but does NOT strip diacritics, so "Stvrtok" and "Štvrtok" are different
+    # stems and only the second one stoplists the actual Slovak word. This line used to read
+    # "Stvrtok", "Stvrtok" (a duplicate) and "Nedela"; the committed artifact had the correct
+    # spellings, so source and artifact disagreed and the ARTIFACT was the one that was right.
+    # Regenerating from the source silently undid Amendment 17 for Thursday -- measured, not
+    # theorised. tests/test_gazetteer_stoplist_sync.py now compares the two.
+    "Pondelok", "Utorok", "Streda", "Štvrtok", "Piatok", "Sobota", "Nedeľa",
     "Banka", "Banky",
     # legal-document vocabulary that collides with place or street names
+    # "Bod" added 2026-09-17: a municipality, NOT in ulice.json, and not stoplisted, so a
+    # numbered-point heading ("Bod 7.") auto-redacted as a place in every numbered filing.
+    # Found by checking 26 legal-structure words against detect(); it was the only one that
+    # fired, and the other 25 are deliberately NOT added because they are not municipalities.
+    # One entry covers the declined forms: the stoplist is applied through stem(), and
+    # "Bodu"/"Bode" stem to the same string.
+    "Bod",
     "Článok", "Príloha", "Strana", "Zmluva", "Predmet", "Cena", "Doba", "Právo", "Súd",
     "Návrh", "Vklad", "List", "Konanie", "Rozhodnutie", "Uznesenie", "Rozsudok",
     "Republika", "Obec", "Mesto", "Okres", "Kraj", "Ulica", "Námestie", "Trieda", "Cesta",
