@@ -9,7 +9,7 @@ GATES
 =========================================================================
   gate                       value                                   pass/fail
   ------------------------------------------------------------------------
-  full suite                 1696 passed, 8 skipped, 13 xfailed      PASS
+  full suite                 1702 passed, 8 skipped, 12 xfailed      PASS
   dual leak gate             0 leaks, NO type exclusions             PASS
   mutation gate              15 of 17 arms pass, 1 report-only       FAIL (letterspaced only)
   cross-format consistency   0 unexplained asymmetries               PASS
@@ -108,10 +108,10 @@ THE EIGHT ITEMS YOU ASKED FOR
 [7] THE THREE-CLEAN-ROUNDS TARGET IS NOT MET, AND I DO NOT THINK IT CAN BE
 =========================================================================
 SIX rounds have now run and NONE has been clean. Two ran today, and between them they found
-TWENTY-ONE defects, of which TWENTY ARE FIXED AND IN THE TREE:
+TWENTY-ONE defects. ALL TWENTY-ONE ARE FIXED AND IN THE TREE:
   ROUND 5 attacked the shapes a Word TEMPLATE produces. 19 attacks, ELEVEN findings, ALL FIXED.
   ROUND 6 attacked the PDF CONTAINER -- the objects a reader renders, as opposed to the text
-  layer rounds 1-5 concentrated on. 28 attacks, TEN findings, NINE FIXED.
+  layer rounds 1-5 concentrated on. 28 attacks, TEN findings, ALL FIXED.
 
 Round 6 is the sharper result, because writer/pdf_body.py is 612 lines against the DOCX
 writer's 1536 and its entire non-page scrub was THREE KEYS, while a PDF catalogue has about a
@@ -212,11 +212,6 @@ ZERO across 2 468 372 characters.
 =========================================================================
 STILL OPEN
 =========================================================================
-  - ONE round-6 finding: when a Form XObject is SHARED BETWEEN PAGES, the tool's own save leaves
-    the PRE-REDACTION content stream in the output. The rendered page is correct and a one-page
-    document leaves nothing behind, so this is about object reuse -- but the original text is
-    recoverable from the delivered file with an ordinary PDF tool. Filed with a reproduction and
-    a strict test. It is the one thing on this list I would have fixed next.
   - letterspaced (0.120), mitigated by refusal.
   - "Zálesie 3" falls to the review bucket: a municipality with no street entry, so the street
     walk never sees it. Closing it means loosening the guard Amendment 17 protects. Pinned by a

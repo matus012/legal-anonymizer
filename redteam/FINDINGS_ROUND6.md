@@ -1,12 +1,12 @@
 # Red-team findings, round 6 — THE PDF CONTAINER
 
-> ## STATUS, end of the daytime run 2026-09-17: **TEN OF ELEVEN CLOSED, SAME DAY**
+> ## STATUS, end of the daytime run 2026-09-17: **ALL ELEVEN CLOSED, SAME DAY**
 >
 > | finding | state |
 > |---|---|
 > | R6-01 outlines · R6-02 link targets · R6-05 hidden layer · R6-06 CropBox · R6-09 degenerate rect · R6-10 silent report | **FIXED** |
 > | R6-03 catalogue · R6-03b short needle on `pdf_objects` · R6-04 `/AF` attachment · R6-04b its gate verdict · R6-07 page XMP · R6-07b its gate verdict | **FIXED** |
-> | **R6-08** shared Form XObject residue | **OPEN**, marker intact |
+> | **R6-08** shared Form XObject residue | **FIXED** — but NOT by the proposed `clean=True`, which was measured and does not collect the orphan: the redacted copy inherits the original's `/Resources`, which references the original XObject, so the graph genuinely leads there and garbage collection is right to keep it. Fixed as a content scrub plus a POST-SAVE post-condition on the file. |
 >
 > The prose below is the round AS WRITTEN, before any fix — it is the record of what was true
 > when it was found, and the "suggested fix" sections are what was proposed, not always what
