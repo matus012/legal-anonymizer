@@ -37,6 +37,7 @@ import unicodedata
 import urllib.parse
 import zipfile
 from copy import deepcopy
+from typing import NamedTuple
 
 from docx import Document
 from docx.oxml import parse_xml
@@ -130,19 +131,6 @@ def _strip_tracked_changes(root) -> None:
         for attr in (qn("w:author"), qn("w:initials")):
             if elem.get(attr) is not None:
                 elem.set(attr, "")
-
-
-def _strip_notes_tracked_changes(part) -> None:
-    """Accept all tracked revisions in a footnotes/endnotes/comments OPC part, honouring the SAME
-    element-vs-blob asymmetry as _redact_notes_part: a CommentsPart exposes a live ``.element``
-    that re-serialises into ``.blob`` (mutate it in place); generic footnote/endnote Parts are
-    blob-backed with no ``.element`` (parse, strip, reassign ``._blob``)."""
-    if hasattr(part, "element") and part.element is not None:
-        _strip_tracked_changes(part.element)  # live tree; mutate in place
-        return
-    tree = parse_xml(part._blob)
-    _strip_tracked_changes(tree)
-    part._blob = etree.tostring(tree, encoding="UTF-8", standalone=True)
 
 
 # The <w:r> children that CONTRIBUTE CHARACTERS to run.text, and therefore to the offsets
@@ -437,38 +425,129 @@ def _redact_textboxes(
             _redact_paragraph(Paragraph(p_elem, parent), known_entities, labelmap, location, decisions=decisions, config=config)
 
 
-def _redact_notes_part(
-    part, known_entities, labelmap, location: str = "footnote",
-    decisions: RedactionDecisions | None = None,
-    config: DetectConfig | None = None,
-) -> None:
-    """Redact every <w:p> in a footnotes/endnotes/comments OPC part, honouring the part-type
-    asymmetry python-docx exposes on reopen (verified by probe):
+# ------------------------------------------------------------- THE TREES A DOCUMENT HAS
+# ONE enumeration of the trees this document holds, iterated by EVERY pass. It replaces four
+# separate enumerations -- _strip_tracked_changes's, the field-code loop's, the paragraph walk's
+# ``roots``, and the note-part loop -- that each knew a DIFFERENT subset of the document. That
+# divergence, not any one missing call, is what shipped the first-page header unredacted while
+# the default header in the same file was clean (R5-01), left the note parts' field codes
+# unscrubbed while the same field codes in the body were scrubbed (R5-04), and left
+# word/glossary/document.xml touched by no pass at all (R5-03). A container added here once is
+# now covered by every pass; there is no longer a place to add a fifth divergent loop.
+class _Tree(NamedTuple):
+    """One XML tree the passes run over.
+
+    ``element``   root to walk: w:document, w:hdr/w:ftr, w:footnotes/w:endnotes/w:comments or
+                  w:glossaryDocument.
+    ``parent``    what ``Paragraph()`` is anchored to, so ``paragraph.part`` resolves.
+    ``location``  default report location for the paragraphs in it.
+    ``part``      blob-backed part to re-serialise into once the passes are done, or None for a
+                  live tree that ``doc.save()`` already picks up (see ``_open_tree``).
+    """
+    element: object
+    parent: object
+    location: str
+    part: object | None
+
+
+def _open_tree(part, location: str) -> _Tree:
+    """A note or glossary OPC part as a ``_Tree``, honouring the part-type asymmetry python-docx
+    exposes on reopen (verified by probe):
 
     * comments.xml maps to a registered CommentsPart (an XmlPart): its ``.element`` is a live
       tree and its ``.blob`` RE-SERIALIZES from that tree, so a ``._blob`` reassignment would be
       silently discarded. The tree is mutated IN PLACE and doc.save() picks it up.
-    * footnotes.xml / endnotes.xml have no registered class and come back as generic blob-backed
-      Parts with no ``.element``. Their bytes are parsed, the parsed tree is mutated, and the
-      serialized result is written back to ``._blob`` (generic ``Part.blob`` returns ``_blob``,
-      so doc.save() persists it).
+    * footnotes.xml, endnotes.xml and word/glossary/document.xml have no registered class and
+      come back as generic blob-backed Parts with no ``.element``. Their bytes are parsed HERE,
+      every pass mutates that one parsed tree, and ``_close_tree`` writes the result back to
+      ``._blob`` (generic ``Part.blob`` returns ``_blob``, so doc.save() persists it).
 
-    Branch on element-vs-blob, never on part name or note id. Each <w:p> — including the
-    separator / continuationSeparator entries that carry no <w:t> — is wrapped as a Paragraph so
-    ``.runs`` exposes the inner runs, then pushed through the same _redact_paragraph core; an
-    empty separator paragraph no-ops (detect() over "" yields nothing)."""
-    if hasattr(part, "element") and part.element is not None:
-        tree = part.element  # live tree; mutate in place
-        for p_elem in tree.findall(".//" + qn("w:p")):
-            _redact_paragraph(Paragraph(p_elem, part), known_entities, labelmap, location, decisions=decisions, config=config)
-        return
+    Branch on element-vs-blob, never on part name or note id -- and parse ONCE for all passes
+    rather than once per pass, so two passes can never disagree about a part's bytes.
+    """
+    if getattr(part, "element", None) is not None:
+        return _Tree(part.element, part, location, None)
+    return _Tree(parse_xml(part._blob), part, location, part)
 
-    tree = parse_xml(part._blob)
-    for p_elem in tree.findall(".//" + qn("w:p")):
-        _redact_paragraph(Paragraph(p_elem, part), known_entities, labelmap, location,
-                          decisions=decisions, config=config)
-    # Mirror python-docx's own part serialization (UTF-8, standalone declaration).
-    part._blob = etree.tostring(tree, encoding="UTF-8", standalone=True)
+
+def _close_tree(tree: _Tree) -> None:
+    """Serialise a blob-backed tree back into its part, mirroring python-docx's own part
+    serialization (UTF-8, standalone declaration). A no-op for a live tree."""
+    if tree.part is not None:
+        tree.part._blob = etree.tostring(tree.element, encoding="UTF-8", standalone=True)
+
+
+# python-docx's Section exposes SIX header/footer parts, not the two this used to visit. Word
+# builds EVERY law-office letterhead out of the first-page pair (w:titlePg, "Different first
+# page"), which is exactly where the firm name, IČO, fee-earner and client/matter line sit --
+# and header2.xml / header3.xml / footer2.xml were the parts no pass ever opened (R5-01).
+#
+# The report location stays "header"/"footer": that is the physical OPC surface eval/extract.py
+# grades and the GT ``surface_part`` vocabulary names, and WHICH page a header prints on is not
+# a distinction a reviewer can act on differently.
+_HDRFTR_PROPERTIES = (
+    ("header", "header"), ("footer", "footer"),
+    ("first_page_header", "header"), ("first_page_footer", "footer"),
+    ("even_page_header", "header"), ("even_page_footer", "footer"),
+)
+
+# Relationship-type suffix -> report location, for the OPC parts that hold <w:p> outside
+# document.xml. ``glossaryDocument`` is a Word TEMPLATE's building-block store: "save selection
+# to the cover page gallery" on a real filing puts a real client in there permanently, and it
+# then rides into every future document made from that template.
+#
+# "glossary" is a NEW location string, deliberately distinct from "body" -- a reviewer needs to
+# know the hit is in the TEMPLATE, not on the page. Checked before adding it: nothing validates
+# the writer's location strings against a vocabulary. They are free text through
+# LabelMap.record_occurrence into the report's ``locations`` column. eval/extract.py's
+# _GT_PART_TO_SURFACE and eval/cross_format_gate.py's DOCX_ONLY_PARTS are the two fixed
+# vocabularies, and both are GROUND-TRUTH ``surface_part`` maps consulted only for corpus
+# fixtures the generator builds -- neither is ever handed a writer location, and no corpus
+# document has a glossary part.
+_PART_LOCATIONS = (
+    ("footnotes", "footnote"), ("endnotes", "endnote"), ("comments", "comment"),
+    ("glossaryDocument", "glossary"),
+)
+
+
+def _document_trees(doc) -> list[_Tree]:
+    """Every tree in ``doc``, in the fixed order the passes traverse it. That order IS the label
+    numbering (LabelMap groups in first-seen order), so it is body, then each section's
+    header/footer parts, then the note parts, then the glossary.
+
+    DE-DUPLICATED BY PART IDENTITY, which enumerating more trees makes load-bearing. A header
+    that ``is_linked_to_previous`` has no definition of its own: python-docx resolves it to an
+    earlier section's part, so a three-section document sharing one letterhead would hand the
+    same element to the passes three times and the report would say a name occurs three times on
+    the one page it occurs on. Skipping linked header/footers also stops python-docx's
+    ``_element`` accessor from MINTING an empty header part for a document that has none (its
+    _get_or_add_definition ADDS a definition when there is no prior section to inherit from).
+    """
+    trees = [_Tree(doc.element, doc, "body", None)]
+    seen = {id(doc.element)}
+
+    for section in doc.sections:
+        for prop, location in _HDRFTR_PROPERTIES:
+            hdrftr = getattr(section, prop)
+            if hdrftr.is_linked_to_previous:
+                continue  # inherits an earlier section's part, which is visited on its own
+            element = hdrftr._element
+            if id(element) in seen:
+                continue
+            seen.add(id(element))
+            # Header/footer parts are element-backed (HeaderPart/FooterPart are XmlParts), so
+            # doc.save() re-serialises them from the live tree -- no write-back needed.
+            trees.append(_Tree(element, hdrftr, location, None))
+
+    for rel in doc.part.rels.values():
+        location = next((loc for suffix, loc in _PART_LOCATIONS
+                         if rel.reltype.endswith(suffix)), None)
+        if location is None or id(rel.target_part) in seen:
+            continue
+        seen.add(id(rel.target_part))
+        trees.append(_open_tree(rel.target_part, location))
+
+    return trees
 
 
 _APP_XML_PII_TAGS = ("Company", "Manager")
@@ -802,6 +881,13 @@ _FIELD_TYPES_WITH_PII_ARGS = frozenset({
 })
 
 
+# Word's own bookmark namespace: _Toc… (table of contents), _Ref… (cross-reference),
+# _GoBack (the resume-reading mark), _Hlk… (an autosave artefact). These are TARGETS INSIDE THE
+# DOCUMENT, never destinations, and rewriting one breaks the navigation rather than redacting
+# anything. Red-team round 5, R5-08.
+_WORD_BOOKMARK_RE = re.compile(r"^_(?:Toc|Ref|GoBack|Hlk)\w*$")
+
+
 def _scrub_field_instruction(instr: str, known_entities, config) -> str | None:
     """Return ``instr`` with every PII-bearing argument replaced, or None if nothing changed.
 
@@ -828,13 +914,29 @@ def _scrub_field_instruction(instr: str, known_entities, config) -> str | None:
         if not state["keyword"]:
             state["keyword"] = True
             return m.group(0)
-        # Both exemptions apply to BARE tokens only. A switch is always written bare
-        # (``\* MERGEFORMAT``) and so is a bookmark name (``_Ref53871234``), whereas a QUOTED
-        # argument beginning with a backslash is a UNC path -- ``INCLUDETEXT "\\\\fileserver\\
-        # users\\jan.novak\\..."`` -- which is exactly the kind of destination this examines.
-        # Testing the value rather than the bare token exempted that path; the survival test
-        # in tests/test_docx_field_codes.py is what caught it.
-        if bare is not None and (bare.startswith("\\") or bare.startswith("_")):
+        # THE TWO EXEMPTIONS ARE NOT SYMMETRIC, and getting that wrong has now cost a round
+        # each way.
+        #
+        # A SWITCH is always written BARE (``\* MERGEFORMAT``). A quoted argument beginning
+        # with a backslash is a UNC path -- ``INCLUDETEXT "\\\\fileserver\\users\\jan.novak\\..."``
+        # -- which is exactly the kind of destination this function exists to examine. So the
+        # backslash test must apply to the BARE token only. Testing the value instead exempted
+        # that path; tests/test_docx_field_codes.py's survival list caught it.
+        #
+        # A BOOKMARK NAME is written BOTH WAYS, and this is red-team round 5, R5-08. ``REF``
+        # and ``PAGEREF`` write it bare, and neither is in _FIELD_TYPES_WITH_PII_ARGS -- so
+        # the bare spelling never needed the exemption at all. Word writes every TOC entry and
+        # every ``\h`` cross-reference as ``HYPERLINK \l "_Toc53871234"``, QUOTED, and
+        # HYPERLINK *is* examined. Eight digits is the ICO shape, ten is a rodne cislo shape,
+        # so the very cross-references the morning's fix was written to protect were still
+        # being rewritten to https://removed.invalid/ on the same coin flip of the digit count.
+        # The value is what carries a bookmark name, so the value is what is tested.
+        #
+        # Matched against Word's ACTUAL bookmark namespace rather than any leading underscore,
+        # so an argument that merely happens to start with one is still examined.
+        if bare is not None and bare.startswith("\\"):
+            return m.group(0)
+        if _WORD_BOOKMARK_RE.match(value):
             return m.group(0)
         if not _target_carries_pii(value, known_entities, config):
             return m.group(0)
@@ -1062,59 +1164,52 @@ def _redact_docx(
     # order of the passes below, so the numbering is deterministic (W5a, context.md §10).
     labelmap = LabelMap(known_entities)
 
+    # THE trees this document has — body, all six header/footer parts of every section, the
+    # three note parts and the glossary document — enumerated ONCE and iterated by every pass
+    # below. See _document_trees: the passes used to enumerate this for themselves, four times,
+    # and each of the four knew a different subset (R5-01 / R5-03 / R5-04).
+    trees = _document_trees(doc)
+
     # 0) W4a: accept ALL tracked revisions FIRST, before any _redact_paragraph call. Deleted
     #    text is then physically gone (it must never reach detect() as a redaction candidate);
     #    inserted text, once unwrapped, is ordinary body text that the passes below still redact
     #    (so an insertion carrying PII is caught by the existing W1-W3 code — no special-casing).
-    #    Covers the document element, every section header/footer element, and each note part
-    #    (same discovery + blob-vs-element asymmetry as the W3 pass below).
-    _strip_tracked_changes(doc.element)
-    for section in doc.sections:
-        for hf in (section.header, section.footer):
-            _strip_tracked_changes(hf._element)
-    for rel in doc.part.rels.values():
-        rt = rel.reltype
-        if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
-            _strip_notes_tracked_changes(rel.target_part)
+    for tree in trees:
+        _strip_tracked_changes(tree.element)
 
-    # 0b) Field instructions and data bindings, on the same trees and for the same reason the
-    #     tracked-change strip runs first: both carry PII that is not text detect() can see,
-    #     and both must be settled before the paragraph passes rewrite the runs around them.
-    for tree in [doc.element] + [hf._element for s in doc.sections
-                                 for hf in (s.header, s.footer)]:
-        _scrub_field_codes(tree, known_entities, config)
-        _strip_data_bindings(tree)
+    # 0b) Field instructions and data bindings, for the same reason the tracked-change strip
+    #     runs first: both carry PII that is not text detect() can see, and both must be settled
+    #     before the paragraph passes rewrite the runs around them.
+    for tree in trees:
+        _scrub_field_codes(tree.element, known_entities, config)
+        _strip_data_bindings(tree.element)
 
-    # ONE descendant walk per part, replacing the four direct-child walks this used to do
+    # ONE descendant walk per tree, replacing the four direct-child walks this used to do
     # (body paragraphs, body tables' cells, header/footer paragraphs and tables, textboxes).
     # Each <w:p> is visited exactly once and tags itself by where it sits, so a nested table,
     # a content control and a table inside a textbox are all covered without a special case
     # for each -- and adding one more container shape needs no new traversal at all.
-    roots = [(doc.element.body, doc, "body")]
-    for section in doc.sections:
-        roots.append((section.header._element, section.header, "header"))
-        roots.append((section.footer._element, section.footer, "footer"))
-
-    for root, parent, default_location in roots:
-        for p_elem in _all_paragraph_elements(root):
+    #
+    # The note parts arrive here too: every <w:p> in them — including the separator /
+    # continuationSeparator entries that carry no <w:t> — is wrapped as a Paragraph so ``.runs``
+    # exposes the inner runs, and an empty separator paragraph no-ops (detect() over "" yields
+    # nothing).
+    for tree in trees:
+        for p_elem in _all_paragraph_elements(tree.element):
             _redact_paragraph(
-                Paragraph(p_elem, parent),
+                Paragraph(p_elem, tree.parent),
                 known_entities,
                 labelmap,
-                _paragraph_location(p_elem, default_location),
+                _paragraph_location(p_elem, tree.location),
                 decisions=decisions,
                 config=config,
                 record=not _is_alternate_fallback(p_elem),
             )
 
-    # 5) footnotes / endnotes / comments — each a SEPARATE OPC part, not in document.xml (W3).
-    #    The location tag follows the note part type.
-    _NOTE_LOCATIONS = (("footnotes", "footnote"), ("endnotes", "endnote"), ("comments", "comment"))
-    for rel in doc.part.rels.values():
-        rt = rel.reltype
-        loc = next((location for suffix, location in _NOTE_LOCATIONS if rt.endswith(suffix)), None)
-        if loc is not None:
-            _redact_notes_part(rel.target_part, known_entities, labelmap, loc, decisions=decisions, config=config)
+    # 5) Blob-backed trees (footnotes, endnotes, glossary) are serialised back into their parts
+    #    now that every pass has run over them. Live trees no-op.
+    for tree in trees:
+        _close_tree(tree)
 
     # 6) W4b: blank PII-bearing metadata (core.xml properties, app.xml Company/Manager, and
     #    the comment w:author/w:initials deferred from W3) LAST, unconditionally by position.
