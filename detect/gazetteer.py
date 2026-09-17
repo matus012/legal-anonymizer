@@ -93,6 +93,7 @@ import sys
 
 from .config import DetectConfig
 from .core import Candidate
+from .datetime_amounts import _MONTH_WORDS
 from .declension import _tokens, stem
 from .identifiers import ascii_fold, document_is_single_case
 
@@ -365,20 +366,87 @@ def _kataster_anchored(text: str, start: int) -> bool:
     return bool(_KATASTER_PHRASE_RE.search(ascii_fold(window)) or _KATASTER_ABBR_RE.search(window))
 
 
-def _street_anchored(text: str, start: int, end: int, *, stoplisted: bool = False) -> bool:
+# --------------------------------------------------- stoplisted street + a house number
+# A STREET NAMED AFTER A MUNICIPALITY (round-5 leak). "na Polom 453", "Býva na Banke 7":
+# ``Polom`` and ``Banka`` are real Slovak municipalities AND real street names, so the
+# stoplist demotes them; no street keyword is present, so the street walk emitted NOTHING and
+# the only survivor was the place walk's review-bucket OBEC. Nothing auto-redacted the span
+# and the street reached the exported document. Reproduced on ``zmluva_v11_069`` in both
+# formats once the corpus drew ``Polom`` for the address slot.
+#
+# The stoplist exists to reject "Zmluva je krátka" — an ordinary word that happens to sit in
+# the register. A HOUSE NUMBER AFTER THE NAME rules that out, so it is exactly the independent
+# evidence the stoplist demands, and it is thrown away today. It is re-admitted here, in the
+# STREET walk only, behind two guards that carve out the cases the old blanket refusal was
+# really protecting:
+#
+# 1. ENUMERATORS. The legal-document structure words genuinely take a bare following ordinal:
+#    "Strana 3 z 12" (page footer), "Príloha 2", "List 4". ``Strana``/``Príloha``/``List`` are
+#    all in ``ulice.json``, so without this list the fix would re-create precisely the footer
+#    regression the stoplist was written for. Listed independently of ``stoplist.json``
+#    (machine-generated, and about PLACE names) and matched by STEM, on both axes.
+# 2. DATE SHAPE. CONTRACTS_v11.md Amendment 17 stoplisted the weekday names because the tool
+#    was auto-redacting "Pondelok" out of contracts. "vo štvrtok 5. mája 2026" puts a day
+#    number right where a house number goes. Amendment 17 is NOT undone — a weekday is still
+#    stoplisted; what is added is that a following DATE (a day number plus a month word, or a
+#    second dotted number) is not house-number evidence at all. ``Streda`` stems to ``stred``,
+#    which IS in ``ulice.json``, so this guard is load-bearing, not theoretical.
+#
+# The place walk is deliberately NOT touched: ``_place_anchored`` still refuses a bare house
+# number, because ``Štvrtok`` and ``Pondelok`` are in ``obce.json``/``katastralne_uzemia.json``
+# and NOT in ``ulice.json`` — loosening there would reopen Amendment 17 head-on with no street
+# evidence to justify it. And the label this produces is ULICA, which is what the ground truth
+# says when the evidence is a house number. An AUTO ULICA on the same span beats the
+# review-bucket OBEC/KATASTER in ``core.py``'s ``_resolve_flag_survival``, which runs BEFORE
+# ``_TYPE_PRECEDENCE`` — so the weaker ULICA rank cannot re-demote the span.
+_ENUMERATOR_WORDS = (
+    "Strana", "Článok", "Príloha", "Bod", "Odsek", "Odstavec", "List", "Vložka", "Časť",
+    "Oddiel", "Písmeno", "Veta", "Kapitola", "Hlava", "Diel", "Poznámka", "Tabuľka",
+    "Obrázok", "Riadok", "Stĺpec", "Strany",
+)
+_DATE_AFTER_WINDOW = 40
+
+
+@functools.lru_cache(maxsize=None)
+def _enumerator_stems() -> frozenset[str]:
+    stems = {stem(w) for w in _ENUMERATOR_WORDS}
+    return frozenset(stems | {ascii_fold(s) for s in stems})
+
+
+def _date_after_re() -> re.Pattern[str]:
+    months = "|".join(sorted({ascii_fold(w) for w in _MONTH_WORDS}))
+    return re.compile(rf"^{_SEP}+\d{{1,2}}\.{_SEP}*(?:\d{{1,2}}\.|(?:{months})\b)")
+
+
+_DATE_AFTER_RE = _date_after_re()
+
+
+def _housenumber_is_address(text: str, end: int, stems: tuple[str, ...]) -> bool:
+    """Does a house number follow, in a position where it can only be an address?
+
+    A trailing sentence period is fine ("na Polom 453.") — only a day-number-plus-date
+    continuation disqualifies it."""
+    if not _HOUSENUM_AFTER_RE.match(text[end:]):
+        return False
+    if any(s in _enumerator_stems() for s in stems):
+        return False
+    return not _DATE_AFTER_RE.match(ascii_fold(text[end : end + _DATE_AFTER_WINDOW]))
+
+
+def _street_anchored(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    stoplisted: bool = False,
+    stems: tuple[str, ...] = (),
+) -> bool:
     """Is this token anchored strongly enough to call it a street?
 
     Normally either signal will do: an explicit street KEYWORD before it, or a house NUMBER
-    after it. For a STOPLISTED word the trailing number is not good enough, and the corpus
-    says why: "Strana" is a real street name in the Register adries and also the Slovak word
-    for "page"/"party", so "Strana 3 z 12" — an ordinary page footer — matched the
-    number-after rule and was auto-redacted as an address. "Článok 5" and "Príloha 2" are the
-    same shape. A number after an ordinary word carries no address meaning whatsoever.
-
-    So a stoplisted word must be confirmed by the street KEYWORD specifically. This is the one
-    place in the gazetteer where precision beats recall, and it is narrow on purpose: it
-    applies only to the 79 hand-listed collision words, and only to the weaker of the two
-    anchors. "ul. Strana 3" still matches."""
+    after it. For a STOPLISTED word the trailing number is accepted only through
+    ``_housenumber_is_address`` — see the block above for the two guards and why the blanket
+    refusal that used to live here leaked a street named after a municipality."""
     keyword = _STREET_KEYWORD_RE.search(ascii_fold(text[max(0, start - _ANCHOR_WINDOW) : start]))
     # ... or an INFLECTED keyword AFTER the name. "na Hlavnej ulici" is how an address reads
     # when the street name is declined, and it puts the keyword on the other side and in the
@@ -387,7 +455,7 @@ def _street_anchored(text: str, start: int, end: int, *, stoplisted: bool = Fals
     if not keyword:
         keyword = _STREET_KEYWORD_AFTER_RE.match(ascii_fold(text[end : end + _ANCHOR_WINDOW]))
     if stoplisted:
-        return bool(keyword)
+        return bool(keyword) or _housenumber_is_address(text, end, stems)
     return bool(keyword or _HOUSENUM_AFTER_RE.match(text[end:]))
 
 
@@ -668,7 +736,7 @@ def _street_hits(
         declined, declined_a = _street_declined_index()
         if s in single or s_a in single_a or s in declined or s_a in declined_a:
             stoplisted = s in _stoplist_stems() or s_a in _stoplist_stems_ascii()
-            if _street_anchored(text, start, end, stoplisted=stoplisted):
+            if _street_anchored(text, start, end, stoplisted=stoplisted, stems=(s, s_a)):
                 out.append(Candidate("ULICA", text[start:end], start, end, True, "n/a"))
         i += 1
     return out
