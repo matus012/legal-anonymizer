@@ -139,3 +139,100 @@ truncated** — the tool redacts `.novak@advokat.sk` and leaves `jan` standing b
 **What this session did not finish:** Phase D wants three consecutive clean rounds and got two
 non-clean ones; per-type precision, cross-format consistency and perf are not gates; ULICA has
 a detector and no corpus coverage; `dist\Anonymizer` was not rebuilt.
+
+
+=========================================================================
+DAYTIME RUN — 2026-09-17. THE CORPUS SWAP (Q14), before / after
+=========================================================================
+
+corpus/generate.py derived a PER-FORMAT seed, so the .docx and .pdf of one index were two
+unrelated documents: the corpus was 140 different documents named as though it were 70 in two
+formats, and every cross-format claim made against such a pair was meaningless. The generator
+now authors a content PLAN once per (doc_type, index) and renders it to each format.
+
+THE CONTROL THAT MAKES THESE NUMBERS READABLE. Every gate below was re-run on the OLD corpus
+with TODAY'S detect/ and writer/ before the swap, so the only variable between the two columns
+is the CORPUS. Without that control, today's detector work (surname_caps, the mojibake fold,
+the KATASTER anchor, the street/place collision fix) would be indistinguishable from corpus
+drift and the two would be credited to each other.
+
+  PAIRING PROPERTY                        before          after
+  ---------------------------------------------------------------------
+  one-sided GT surfaces, unexplained      5285            0
+  surfaces common to both formats         136             3039
+  kupna_zmluva_000 (docx / pdf / common)  46 / 40 / 3     46 / 42 / 41
+
+  GATE                                    before          after
+  ---------------------------------------------------------------------
+  dual leak gate                          PASS, 0 leaks   PASS, 0 leaks
+  cross-format consistency                PASS            PASS
+  demo (end to end)                       PASSED          PASSED
+  mutation: wrap_at_space                 0.971           0.971
+  mutation: surname_caps                  0.994           0.994
+  mutation: no_diacritics                 0.996           0.996
+  mutation: lowercase                     0.968           0.968
+  mutation: all_caps                      0.961           0.964   (up)
+  mutation: letterspaced                  0.113 FAIL      0.120 FAIL
+  mutation: cyrillic_homoglyph            0.976           0.975   (DOWN)
+  mutation: mojibake_cp1250               0.996           0.994   (DOWN)
+  mutation: break_in_token (report-only)  0.469           0.464   (DOWN)
+  precision ULICA                         92.2% (47/51)   100%  (48/48)   (up)
+  precision ECV                           95.2% (20/21)   100%  (20/20)   (up)
+  precision KATASTER                      31.8% (28/88)   35.8% (38/106)  (up)
+  precision ADRESA                        100%            100%
+  precision MENO                          99.1% (1480/1494) 98.9% (1480/1496)  (DOWN)
+  precision OBEC                          28.5% (77/270)  24.0% (64/267)  (DOWN)
+  precision ORG                           100%  (20/20)   95.2% (20/21)   (DOWN)
+
+SIX NUMBERS MOVED DOWN. Each was investigated before this was committed, as the brief requires,
+and each was verified by the orchestrator rather than accepted from the agent that made the
+change. NONE is a leak; the leak gate is 0 on the new corpus.
+
+  cyrillic_homoglyph, mojibake, break_in_token — all three are VALUE-MIX effects. The corpus
+  contains the same defect populations; the refactor changed WHICH random values are drawn into
+  them. mojibake's five extra lost surfaces are newly-drawn ORG and ULICA values; break_in_token
+  picks its break offset from the surface value itself, so it is pure value mix.
+
+  MENO 99.1% -> 98.9% is exactly TWO more unbacked candidates. Every unbacked MENO candidate in
+  both corpora has the same shape: a place name that is also a Slovak surname ("Michalovciach")
+  claimed as MENO. Two documents newly draw Michalovce.
+
+  OBEC 28.5% -> 24.0% is NOT a detection defect and the number is not measuring what it looks
+  like it measures. Verified directly against ground truth: the SAME surface is ground-truthed
+  as BOTH types in different documents --
+
+      'Košiciach'     GT {OBEC: 20, KATASTER: 48}
+      'Levoči'        GT {KATASTER: 43, OBEC: 27}
+      'Michaloviec'   GT {KATASTER: 50}   (detect() says OBEC)
+
+  -- because a Slovak cadastral area is usually named after its obec. An UNANCHORED place
+  defaults to OBEC, so OBEC collects every place the ground truth happens to call KATASTER. The
+  anchored-KATASTER fix landed today closes this only where an anchor is present. Both types
+  are auto-redacted, so this is a label split, not a leak. OBEC has 70 GT surfaces against 267
+  candidates; KATASTER has 282 GT surfaces against 106 candidates; the TOTAL place population
+  is roughly right and the split is not.
+
+  ORG 100% -> 95.2% is ONE candidate, and it is a genuine type collision worth recording:
+
+      detect('Účet vedený v ČSOB, a. s.')  ->  [('ORG', 'ČSOB, a. s.')]
+      corpus ground truth for that bank    ->  {'NAZOV_BANKY'} on the bare 'ČSOB'
+
+  ORG keys on the legal-form suffix ("a. s.", "s.r.o.") because a company name is otherwise
+  arbitrary; NAZOV_BANKY is a closed list. "Tatra banka, a. s." resolves correctly because
+  "banka" is in the list, but "ČSOB" is an acronym without it, so once the legal form is
+  attached ORG wins the span. Redacted either way; the label is wrong. Recorded, not fixed.
+
+WHAT THE REBUILT CORPUS FOUND ON ITS FIRST RUN, which is the argument for doing this at all: a
+street named after a municipality ("na Polom 453") produced NO ULICA candidate and only a
+review-bucket OBEC, so nothing auto-redacted it and the street survived into BOTH outputs of the
+same document. The old corpus drew "Paulenova" in that slot, which the -ova suffix rule catches,
+so the leak gate was green BY LUCK OF THE DRAW. Fixed in the street walk with an enumerator
+guard and a date guard, both measured load-bearing. The leak appeared in the .docx AND the .pdf
+of the same document — precisely the property Q14 wanted back.
+
+ALSO REGENERATED: data/holdout with its manifest, using its own recorded command
+(--n 60 --seed 1337). AND A MISTAKE CAUGHT WHILE DOING IT: the generator does not clean its
+output directory, so regenerating over the old holdout left 192 STALE FILES from an earlier
+6-document-type generator, and the first manifest I wrote covered all 434 — baking drift into
+the very file whose job is to DETECT drift. Removed the orphans, re-manifested at 242 files,
+acceptance tests green. data/synthetic was checked for the same and was clean.
