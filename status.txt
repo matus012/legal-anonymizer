@@ -1,132 +1,140 @@
 <<<MORNING BRIEF — overnight run, 2026-09-16 → 2026-09-17>>>
 
-Run still in progress when this line was written. Every number below was measured by me,
-never taken from a subagent's report.
-
-=========================================================================
-THE ONE THING TO READ IF YOU READ NOTHING ELSE
-=========================================================================
-data/synthetic's kupna_zmluva_000.docx and kupna_zmluva_000.pdf ARE NOT THE SAME DOCUMENT.
-corpus/generate.py gives each FORMAT its own seed, so the two files at the same index come
-from different random streams. I verified it directly: seeds 42000 and 42001, 46 vs 40
-ground-truth surfaces, 3 in common — and those 3 are coincidences, not shared content. The
-corpus is 140 DIFFERENT documents named as though it were 70 documents in two formats.
-
-  WHAT THIS DOES NOT BREAK: every gate that treats the corpus as 140 independent documents.
-  The leak gate, per-type recall and the mutation gate are all still valid.
-
-  WHAT IT DOES BREAK: any sentence of the form "the PDF leaked while the DOCX of the same
-  document was clean". Last night's notes contain two of those. The DEFECTS were real and
-  were reproduced independently (an NBSP and a line break inside a multi-word anchor, both
-  fixed) — but the DOCX-was-clean half of that argument was comparing different documents
-  and was never evidence of anything. I have corrected it wherever it appears.
-
-  NOT FIXED TONIGHT, on purpose. Making both formats render one shared content plan changes
-  every .gt.json and therefore every number in the project. That is the one change that
-  moves all measurements at once, and it should not land at 3am with nobody to confirm the
-  new baselines. QUESTIONS.md Q14 has the exact reversal steps.
+Every number below I measured myself on the committed tree. None is taken from a subagent's
+report. 29 commits, NOTHING PUSHED.
 
 =========================================================================
 GATES
 =========================================================================
-  gate                       value                              pass/fail
-  ---------------------------------------------------------------------
-  full suite                 1272 passed, 8 skipped             PASS *
-  dual leak gate             9 leaks, ALL type=ULICA            FAIL  (see note)
-  mutation gate              8 arms below 0.95                  FAIL  (by design)
-  cross-format consistency   0 unexplained asymmetries          PASS  (see caveat)
-  per-type precision         report only, never gates           n/a
-  perf                       report only                        n/a
-  R0 regression (your bug)   20 tests                           PASS
+  gate                       value                                  pass/fail
+  -----------------------------------------------------------------------
+  full suite                 1482 passed, 8 skipped, 22 xfailed     PASS
+  dual leak gate             20 leaks, ALL type=ULICA               FAIL  (see note)
+  mutation gate              12 of 16 classes pass                  FAIL  (by design)
+  cross-format consistency   0 unexplained asymmetries              PASS
+  per-type precision         report only, never gates               n/a
+  demo (end to end)          0 of 36 PII needles survive, both fmts PASS
+  frozen build               rebuilt, 6/6 data files bundled        PASS
+  R0 regression (your bug)   20 tests                               PASS
 
-  * measured before the last round landed; a detector round was still in flight at that
-    moment and its own tests were mid-refactor. Re-run at the end of the run.
-
-  LEAK GATE — READ BEFORE PANICKING. All 9 are ULICA, and they appeared because ULICA was
-  GIVEN GROUND TRUTH FOR THE FIRST TIME tonight. Last night it had a detector and zero
-  corpus occurrences, so nothing graded it and the gate read zero. Those street names were
-  being missed then too; the gate simply had no way to say so. Every other type is at zero.
-
-  CROSS-FORMAT CAVEAT: because of the finding above, this gate authors its own matched
-  docx/pdf fixtures instead of using the corpus, and says so in its own output. It is a
-  real gate on 6 pairs / 90 surfaces, not on 70 documents.
+  THE LEAK GATE NUMBER IS NOT A NEW LEAK. All 20 are ULICA, and they exist because ULICA was
+  GIVEN GROUND TRUTH FOR THE FIRST TIME last night. It had a detector and zero corpus
+  occurrences, so nothing graded it and the gate read zero. Those street names were being
+  missed before too; the gate simply had no way to say so. Every other type is at zero.
+  The cause is one thing: a Slovak street name that is an ADJECTIVE declines adjectivally
+  (Hlavná -> Hlavnej), and the shared stemmer deliberately excludes that ending to keep the
+  surname-versus-adjective discriminator working. The fix belongs in the gazetteer, not the
+  stemmer. CONTRACTS_v11.md Amendment 12.
 
 =========================================================================
-MUTATION ROBUSTNESS PER CLASS (blind arm, threshold 0.95)
+MUTATION ROBUSTNESS (threshold 0.95, blind arm)
 =========================================================================
-  class                 last night     now
-  nbsp                       1.000     1.000  PASS
-  zero_width                 0.070     1.000  PASS
-  soft_hyphen                0.070     1.000  PASS
-  tabs                       0.887     1.000  PASS
-  double_spaces              0.813     1.000  PASS
-  cyrillic_homoglyph         0.356     1.000  PASS
-  nfd                        0.675     1.000  PASS
-  line_break_mid             0.119     0.376  FAIL
-  no_diacritics              0.759         ?  in flight
-  all_caps                   0.451         ?  in flight
-  lowercase                  0.393         ?  in flight
+  class                 at 23:00     now
+  nbsp                     1.000     1.000  PASS
+  zero_width               0.070     1.000  PASS
+  soft_hyphen              0.070     1.000  PASS
+  tabs                     0.887     1.000  PASS
+  double_spaces            0.813     1.000  PASS
+  nfd                      0.675     1.000  PASS
+  no_diacritics            0.759     0.996  PASS
+  cyrillic_homoglyph       0.356     0.976  PASS
+  lowercase                0.393     0.967  PASS
+  all_caps                 0.451     0.959  PASS
+  line_break_mid           0.119     0.466  FAIL
+  nb_hyphen                    -     1.000  PASS   (new, found by red team)
+  narrow_nbsp                  -     1.000  PASS   (new)
+  mojibake_cp1250              -     0.843  FAIL   (new)
+  surname_caps                 -     0.649  FAIL   (new)
+  letterspaced                 -     0.113  FAIL   (new, but see below)
+
+  Ten of the eleven original classes now pass; the red team added five more and two of those
+  pass too. line_break_mid cannot reach 0.95 and the reason is measured, not guessed: the
+  mutation applies TWO deformations at once, and I measured them separately --
+      break BETWEEN words (what a real PDF wrap is)  0.839
+      break INSIDE a token (synthetic)               0.471
+  The second has no real-world producer I could find: a PDF renderer breaks lines at spaces,
+  and a DOCX run boundary inserts no character at all. Chasing it means welding ordinary words
+  together, which I measured doing real damage. QUESTIONS.md Q12.
+  letterspaced scores 0.113 as a DETECTION number, but a letter-spaced PDF is now REFUSED
+  rather than silently half-redacted, so the leak it represents is closed by a different door.
 
 =========================================================================
-WHAT CHANGED (6 commits tonight, none pushed)
+WHAT I FIXED, GROUPED BY WHY IT MATTERED
 =========================================================================
-1. THE NORMALIZATION LAYER (d063cfe). detect() now runs over a normalized view of the text
-   and maps every candidate back to ORIGINAL offsets through an index map. Invisible
-   characters deleted, homoglyphs folded, whitespace runs collapsed, NFD recomposed.
-   WHY IT COULD NOT BE ONE LINE LIKE THE NBSP FIX: a 1:1 substitution preserves every
-   offset, and both writers CUT THE DOCUMENT at those offsets. Deleting a character shifts
-   every later offset, so the same trick on a zero-width space would not mislabel the
-   output, it would CORRUPT it. Six mutation classes closed at once.
-   Two things are deliberately NOT folded — CASE (some detectors use capitalisation as
-   their only evidence; folding it would turn every capitalized-token rule into a
-   match-everything rule) and DIACRITICS (folding č→c silently widens every Slovak-word
-   pattern at once). Both are being fixed per anchor site instead.
-2. ULICA COVERAGE (ed6fee8). 90 seeded occurrences. Anchored nominative shapes score 1.000;
-   the declined form scores 0.000, and that is a real gap, not a fixture bug — a Slovak
-   street name that is an adjective declines adjectivally (Hlavná → Hlavnej), and the shared
-   stemmer deliberately excludes that ending to keep the surname-vs-adjective discriminator
-   working. The fix belongs in the gazetteer, not the stemmer. Amendment 12.
-3. DETECTOR ISOLATION (26e23d9). Every detector runs in a guard; one that raises loses its
-   own candidates for that unit and nothing else. It is REPORTED, not swallowed — a warning
-   block above the report tables and a red banner in the GUI, because a detector that
-   silently stops producing rows is indistinguishable from a clean document. Fuzzed with
-   control characters, format characters, other-script digits and lone surrogates: zero
-   exceptions. This fired for real within the hour, on a detector another round was
-   mid-refactor on — the app degraded with a warning instead of crashing.
-4. BUNDLED-DATA SELF-CHECK (389bfb3). The .exe now REFUSES TO SCAN if the gazetteer data
-   did not make it into the build, instead of starting normally and silently not redacting
-   any place name or surname. Emptiness is checked, not just existence. Tested by simulating
-   the frozen layout, which is the code path the suite otherwise never runs.
-5. PHASE E GATES (34bfa7c). Per-type precision (report only — the governing rule is recall
-   over precision, and an invented threshold here would start trading away the thing the
-   tool exists for), cross-format consistency (gated), perf (report only).
+LEAKS WHERE THE GATE ITSELF SAID "CLEAN" -- the worst class, because nothing would have told
+you. A PDF whose text cannot be decoded (a subset font with no character map) and one whose
+text is shredded into single characters were both ACCEPTED, produced an unredacted output, and
+the leak gate agreed it was clean -- because the extractor reads the same mangled text the
+detector does. Both are now REFUSED, with their own messages, and both thresholds were tuned
+against the corpus for ZERO false refusals.
 
-A DEFECT I INTRODUCED AND CAUGHT: an intermediate version of the normalization layer
-collapsed line breaks to spaces. That removed the literal \n that a NAZOV_UCTU value regex
-bounds itself on, so the value ran on and produced a surface the PDF writer could not
-locate — and it made the bare-name heuristic weld the last word of one line to the first
-word of the next. Two detectors, opposite failures, one cause. Fixed; verified by running
-the PDF writer over all 71 corpus PDFs with zero failures. reports/blockers.md records it.
+LEAKS IN PLACES NOTHING EVER LOOKED. Four DOCX locations were never visited at all: a run
+inside a hyperlink (Word auto-hyperlinks every address you type), a paragraph in a nested
+table, a paragraph in a content control (every Word TEMPLATE), and a table inside a textbox.
+Also: a hyperlink's DESTINATION, which lives outside the paragraph -- the document read
+[EMAIL_1] while the package still held mailto:jan.novak@advokat.sk. Also: a tracked MOVE kept
+its original text verbatim. Also: three OPC parts (settings.xml, custom.xml, people.xml)
+copied through untouched. None of these can occur in our corpus, because the corpus is built
+by python-docx, which cannot emit them -- which is exactly why every gate was green.
+
+THE ARCHITECTURAL ONE. detect() now runs over normalized text and maps every hit back to
+original offsets. That closed six mutation classes at once. It could not have been done as a
+one-line replace like the NBSP fix: a 1:1 substitution preserves offsets, and the writers CUT
+THE DOCUMENT at those offsets, so deleting a character would have corrupted files rather than
+mislabelled them.
+
+CRASH SAFETY. A detector that raises can no longer reach the GUI; it is reported instead. This
+fired for real within the hour, on a detector another round was mid-refactor on. And a file
+that cannot be opened at all -- a damaged .docx, a password-protected PDF -- is now refused by
+name, with a message that says NO FILE WAS WRITTEN, instead of showing you lxml's own words.
 
 =========================================================================
-OWNER ACTIONS
+WHAT I BROKE AND CAUGHT -- read this, it is the honest part
 =========================================================================
-  1. REBUILD dist\Anonymizer:  python -m PyInstaller anonymizer.spec --noconfirm
-     I RAN THIS BUILD TONIGHT and it works -- and the check I gave you last night was WRONG.
-     PyInstaller 6 collects data under _internal\, so the path to confirm is
+Four defects tonight were MINE, introduced while fixing something else, and all four were
+caught by measurement rather than by review:
 
-         dist\Anonymizer\_internal\detect\gazetteer_data\        (6 .json files)
+ 1. Fixing the Cyrillic-name damage left IDENTIFIERS unprotected -- an IBAN in confusable
+    capitals has no Latin letter, so nothing folded. cyrillic_homoglyph 1.000 -> 0.973.
+ 2. The new whole-tree traversal welded an anchored textbox's text onto its paragraph and
+    DELETED the other party's role label. Document corruption.
+ 3. My first undecodable-text guard used isprintable(), which is also false for SOFT HYPHENS --
+    and PyMuPDF renders every hyphen in an account number as one. It would have refused most
+    real documents.
+ 4. My hyperlink scrub destroyed working links to the Slovak statute book. Twice: once in its
+    first form, and again after I narrowed it.
+Every one of those is now pinned by a test, and the real Slovak legal links are in the repo so
+the next narrowing is measured rather than guessed.
 
-     NOT dist\Anonymizer\detect\gazetteer_data\, which is CORRECTLY ABSENT in a GOOD build.
-     Had you checked last night's path you would have found nothing and concluded the build
-     was broken -- and a genuinely broken build fails that same check identically, so it
-     could not have told you anything either way. A check that gives the same answer in both
-     cases is not a check.
-     The app now also self-checks its bundled data at startup and REFUSES TO SCAN without it,
-     so a broken build announces itself instead of silently redacting nothing.
-     CLEAN-MACHINE TEST IS STILL YOURS -- nothing here substitutes for running the real .exe.
-  2. PUSH APPROVAL. Nothing has been pushed. Say the word and I hand you the commands.
-  3. OFFICE COMMUNICATION — draft ready to send, in Slovak, in office_note.md.
+I also CORRECTED two numbers rather than repeating them: the claim that a leak appeared in a
+PDF "while the DOCX of the same document was clean" (those are different documents -- different
+seeds), and a reported 3.19s detect() hang that does not reproduce (it is 0.13s at that size).
+
+=========================================================================
+STILL OPEN -- nothing here is a known leak in a shape our corpus contains
+=========================================================================
+  - ULICA declined forms: the 20 leaks above. Fix belongs in the gazetteer.
+  - letterspaced / mojibake / surname_caps mutation classes, all measured and documented.
+  - Word field-code hyperlinks, mc:AlternateContent textbox copies, and data-bound content
+    controls (Word re-populates those from customXml on open). All in redteam/FINDINGS_ROUND4.md
+    with reproductions, and each has a strict-xfail test that will go red the day it is fixed.
+  - KATASTER is labelled OBEC in the report (both are redacted; only the label is wrong).
+  - corpus/generate.py gives each FORMAT its own seed, so docx/pdf pairs are NOT the same
+    document. QUESTIONS.md Q14 has the reversal steps. Not touched: it moves every number in
+    the project at once and should not land unwatched.
+
+=========================================================================
+YOUR ACTIONS
+=========================================================================
+  1. REBUILD:  python -m PyInstaller anonymizer.spec --noconfirm
+     I ran this build tonight against the final code and it works. Confirm the six .json files
+     at  dist\Anonymizer\_internal\detect\gazetteer_data\
+     NOTE THE _internal\ -- PyInstaller 6 puts data there. The path I gave you last night was
+     wrong and would have made a GOOD build look broken. The app now also self-checks this at
+     startup and REFUSES TO SCAN if the data is missing, instead of silently redacting nothing.
+     CLEAN-MACHINE TEST IS STILL YOURS; nothing here substitutes for running the real .exe.
+  2. PUSH APPROVAL. 29 commits, none pushed. Say the word and I hand you the commands.
+  3. OFFICE NOTE: office_note.md, Slovak, ready to send.
 <<<END MORNING BRIEF — everything below is the previous session's record>>>
 
 STATUS — legal-anonymizer
