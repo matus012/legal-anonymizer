@@ -84,6 +84,16 @@ uprostred — medzi štvrtou a piatou číslicou je znak, ktorý sa nedá vidie�
 číslo program NÁJDE a odstráni; overené meraním 17.9.2026. Patrí teda do zoznamu vyššie: ak po
 exporte v súbore ostane, je to chyba.
 
+## Priečinok `ocakavany_vystup/`
+
+Obsahuje správu (`*_report.txt`), ktorú pre každý z troch dokumentov vytvoril tento zdrojový
+strom. Slúži na POROVNANIE: po exporte si otvorte svoju správu a porovnajte ju s tou v tomto
+priečinku. Ak vaša správa obsahuje MENEJ riadkov alebo iné riadky, niečo je inak — najčastejšie
+to znamená, že zabudnuté súbory s údajmi (gazetteer) nie sú v zostavenej aplikácii.
+
+POZOR: tieto správy vytvoril ten istý program, takže NIE SÚ nezávislým dôkazom správnosti.
+Nezávislou kontrolou je ručne napísaný zoznam reťazcov vyššie.
+
 ## Čo sa NEMÁ odstrániť (a je to správne, nie chyba)
 
 Všetky ostatné dátumy (napríklad dátum podpisu zmluvy, dnešný dátum) idú do zoznamu "na

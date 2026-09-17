@@ -406,7 +406,8 @@ def _positive_control_ok(out_path: str, control: str) -> bool:
     return _flatten(control) in _flatten(result.full_text)
 
 
-def _run_one(src: Path, needles: list[str], control: str, known_entities: list[str]) -> list[str]:
+def _run_one(src: Path, needles: list[str], control: str, known_entities: list[str],
+             expected_dir: Path | None = None) -> list[str]:
     print(f"\n{'=' * 78}\n  {src.name}\n{'=' * 78}")
     scan = scan_file(str(src), known_entities)
     if scan.error:
@@ -433,6 +434,17 @@ def _run_one(src: Path, needles: list[str], control: str, known_entities: list[s
             print(f"        {needle!r}")
     else:
         print(f"  verified: 0 of {len(needles)} needles survive in {Path(out).name}")
+
+    if expected_dir is not None:
+        # The EXPECTED REPORT, shipped so the owner has something to compare a run against.
+        # It is the report this tree produced, so it is not an independent oracle and must not
+        # be read as one -- the independent check is the hand-written checklist in CITAJ_MA.md.
+        # What this catches is a DIFFERENCE: a build that finds fewer rows, or different ones,
+        # than the tree it was built from.
+        expected_dir.mkdir(parents=True, exist_ok=True)
+        dest = expected_dir / f"{src.stem}_report.txt"
+        shutil.copyfile(report, dest)
+        print(f"  expected report -> {dest.parent.name}/{dest.name}")
     return leaked
 
 
@@ -460,7 +472,8 @@ def verify(out_dir: Path) -> int:
         for name, needles, control, known in cases:
             src = tmp_dir / name
             shutil.copyfile(out_dir / name, src)
-            leaked = _run_one(src, needles, control, known)
+            leaked = _run_one(src, needles, control, known,
+                              expected_dir=out_dir / "ocakavany_vystup")
             total += len(leaked)
     return total
 
@@ -552,6 +565,16 @@ POZNÁMKA: IČO `44000006` je v tomto dokumente zapísané s neviditeľným "mä
 uprostred — medzi štvrtou a piatou číslicou je znak, ktorý sa nedá vidieť ani vytlačiť. Toto
 číslo program NÁJDE a odstráni; overené meraním 17.9.2026. Patrí teda do zoznamu vyššie: ak po
 exporte v súbore ostane, je to chyba.
+
+## Priečinok `ocakavany_vystup/`
+
+Obsahuje správu (`*_report.txt`), ktorú pre každý z troch dokumentov vytvoril tento zdrojový
+strom. Slúži na POROVNANIE: po exporte si otvorte svoju správu a porovnajte ju s tou v tomto
+priečinku. Ak vaša správa obsahuje MENEJ riadkov alebo iné riadky, niečo je inak — najčastejšie
+to znamená, že zabudnuté súbory s údajmi (gazetteer) nie sú v zostavenej aplikácii.
+
+POZOR: tieto správy vytvoril ten istý program, takže NIE SÚ nezávislým dôkazom správnosti.
+Nezávislou kontrolou je ručne napísaný zoznam reťazcov vyššie.
 
 ## Čo sa NEMÁ odstrániť (a je to správne, nie chyba)
 

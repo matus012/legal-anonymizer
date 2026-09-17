@@ -1,0 +1,36 @@
+=== LEGAL ANONYMIZER — REDACTION REPORT ===
+
+This report records what the tool CHANGED and what it was UNSURE about.
+It does NOT certify that the document is clean. A human must review the
+redacted document before it is shared or filed.
+
+[REDACTED]
+TYPE | label | count | locations | checksum
+ADRESA | [ADRESA_1] | 1 | body | n/a
+ADRESA | [ADRESA_2] | 1 | body | n/a
+DATUM | [DATUM_1] | 1 | body | n/a
+DATUM | [DATUM_2] | 1 | body | n/a
+DIC | [DIC_1] | 1 | body | n/a
+EMAIL | [EMAIL_1] | 1 | body | n/a
+EMAIL | [EMAIL_2] | 2 | body, footer | n/a
+IBAN | [IBAN_1] | 1 | body | valid
+ICO | [ICO_1] | 1 | body | valid
+IC_DPH | [IC_DPH_1] | 1 | body | n/a
+KATASTER | [KATASTER_1] | 1 | body | n/a
+LV | [LV_1] | 1 | body | n/a
+MENO | [MENO_1] | 1 | body | n/a
+MENO | [MENO_2] | 2 | body, header | n/a
+MENO | [MENO_3] | 1 | body | n/a
+MENO | [MENO_4] | 1 | body | n/a
+OBEC | [OBEC_1] | 1 | body | n/a
+ORG | [ORG_1] | 1 | body | n/a
+PARCELA | [PARCELA_1] | 1 | body | n/a
+RODNE_CISLO | [RODNE_CISLO_1] | 2 | body, table_cell | valid
+RODNE_CISLO | [RODNE_CISLO_2] | 1 | body | valid
+SUMA | [SUMA_1] | 1 | body | n/a
+TELEFON | [TELEFON_1] | 1 | body | n/a
+TELEFON | [TELEFON_2] | 2 | body, table_cell | n/a
+
+[LOW CONFIDENCE / NOT REDACTED]
+type | surface | location | checksum
+(none)
