@@ -69,7 +69,8 @@ from writer.decisions import RedactionDecisions
 from writer.docx_body import _target_carries_pii
 from writer.errors import PasswordProtectedError, UnreadableDocumentError
 from writer.labelmap import LabelMap, make_snippet
-from writer.pdf_view import rehide, unhide
+from writer.pdf_view import (associated_filespecs, embedded_file_streams, rehide,
+                             unhide)
 from writer.report import write_report
 
 
@@ -537,6 +538,193 @@ def _scrub_document_surfaces(doc: "fitz.Document") -> None:
     # every heading a bookmark points at is still on its page, where the reader can search for
     # it. This module already makes exactly that trade for embedded attachments above.
     doc.set_toc([])
+    _scrub_associated_files(doc)
+    _scrub_metadata_streams(doc)
+    _scrub_catalogue(doc)
+
+
+def _scrub_associated_files(doc: "fitz.Document") -> None:
+    """Delete every ASSOCIATED FILE -- the attachments ``embfile_names()`` does not list (R6-04).
+
+    The loop above enumerates the /Names /EmbeddedFiles name tree. An associated file (PDF 2.0
+    §14.13, what PDF/A-3 is built on and what a hybrid cadastre export or an e-invoice uses)
+    hangs off /AF instead, is in no name tree, and is kept by garbage=4 because it is reachable.
+    A .docx attached that way shipped with the client's name, rodne cislo, PSC and bank code in
+    it while the page was correctly redacted and the report said the document was processed.
+
+    DELETING is not a new decision -- it is the policy this module already applies to every
+    attachment three lines above. Both halves go: the /EF stream BODIES are emptied (so the
+    payload cannot come back even from an object dump) and the file spec is reduced to its type,
+    which takes the file NAME and /Desc with it -- a description reading "Priloha ku spisu Maria
+    Kovacova" is PII in its own right.
+
+    The walk itself is ``writer.pdf_view.associated_filespecs``, shared with ``eval/extract.py``:
+    a writer that enumerates attachments differently from the grader is how R6-04 stayed
+    invisible to every surface at once."""
+    for filespec in associated_filespecs(doc):
+        for stream in embedded_file_streams(doc, filespec):
+            doc.update_object(stream, "<<>>")
+            doc.update_stream(stream, b"", new=True)
+        doc.update_object(filespec, "<< /Type /Filespec >>")
+    doc.xref_set_key(doc.pdf_catalog(), "AF", "null")
+    for page in doc:
+        doc.xref_set_key(page.xref, "AF", "null")
+
+
+def _scrub_metadata_streams(doc: "fitz.Document") -> None:
+    """Empty EVERY /Metadata XMP packet in the file, not only the catalogue's (R6-07).
+
+    ``del_xml_metadata()`` clears the catalogue's /Metadata. A /Metadata on a PAGE, on an
+    XObject or on an embedded file stream is a different object and survived it verbatim --
+    a full XMP packet with dc:creator and dc:title, which any reader displays.
+
+    By POSITION: every object in the xref is asked for the key, rather than the writer
+    enumerating the levels it happened to think of. That is the discipline the round asked for,
+    and it is what makes the XObject and embedded-file levels (§7, suspected but unconfirmed)
+    closed by the same four lines as the page level."""
+    for xref in range(1, doc.xref_length()):
+        try:
+            kind, value = doc.xref_get_key(xref, "Metadata")
+        except Exception:  # noqa: BLE001 -- a free or malformed object owns no keys
+            continue
+        if kind == "null":
+            continue
+        if kind == "xref":
+            packet = int(value.split()[0])
+            doc.update_object(packet, "<<>>")
+            doc.update_stream(packet, b"", new=True)
+        doc.xref_set_key(xref, "Metadata", "null")
+
+
+# The catalogue keys that are NAVIGATION or SCRIPTING and are deleted whole. Each is a door
+# onto the same kind of payload -- a name, a label, a script -- and none of them is document
+# content: deleting costs the reader a jump target, exactly the trade /Outlines and the
+# attachments already make, and unlike a rewrite it cannot half-succeed.
+#
+# /Names goes ENTIRELY, not just its /Dests and /JavaScript sub-trees (§7's two unconfirmed
+# doors). What is left in it -- /AP, /Pages, /Templates, /IDS, /URLS, /Renditions,
+# /EmbeddedFiles -- is navigation and scripting too, and /EmbeddedFiles has already been
+# emptied above.
+_CATALOGUE_DOORS = ("Dests", "PageLabels", "OpenAction", "AA", "Names", "Collection")
+_PAGE_DOORS = ("AA",)
+
+
+def _string_spans(source: str) -> list[tuple[int, int]]:
+    """(start, end) of the CONTENT of every PDF string in one object's source.
+
+    Both spellings, because Acrobat writes either: a literal ``(Podpis Marie Kovacovej)`` --
+    with nesting and backslash escapes, so this is a scanner and not a regex -- and a hex
+    string ``<FEFF0050...>``, which is how anything with a diacritic is stored. ``<<`` and
+    ``>>`` are dictionary delimiters and are never strings.
+
+    An unbalanced ``(`` means the source is not something this can rewrite safely, so the scan
+    STOPS there and leaves the remainder alone: a half-blanked object is a corrupt object, and
+    a corrupt output is worse than the surface it would have cleared."""
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(source)
+    while i < n:
+        ch = source[i]
+        if ch == "(":
+            depth, j = 1, i + 1
+            while j < n and depth:
+                if source[j] == "\\":
+                    j += 2
+                    continue
+                depth += 1 if source[j] == "(" else -1 if source[j] == ")" else 0
+                j += 1
+            if depth:
+                break
+            spans.append((i + 1, j - 1))
+            i = j
+            continue
+        if ch == "<" and source[i + 1 : i + 2] != "<":
+            j = source.find(">", i + 1)
+            if j != -1 and all(c in "0123456789abcdefABCDEF \t\r\n" for c in source[i + 1 : j]):
+                spans.append((i + 1, j))
+                i = j + 1
+                continue
+        i += 1
+    return spans
+
+
+def _blank_strings(doc: "fitz.Document", xref: int) -> None:
+    """Empty every string VALUE in this object's dictionary, whatever key it sits under."""
+    source = doc.xref_object(xref, compressed=False) or ""
+    spans = _string_spans(source)
+    if not spans:
+        return
+    out, pos = [], 0
+    for start, end in spans:
+        out.append(source[pos:start])
+        pos = end
+    out.append(source[pos:])
+    doc.update_object(xref, "".join(out))
+
+
+def _reachable(doc: "fitz.Document", roots: list[int]) -> set[int]:
+    seen: set[int] = set()
+    stack = list(roots)
+    while stack:
+        xref = stack.pop()
+        if xref in seen or not 0 < xref < doc.xref_length():
+            continue
+        seen.add(xref)
+        try:
+            stack.extend(int(x) for x in re.findall(r"(\d+) 0 R",
+                                                    doc.xref_object(xref, compressed=False) or ""))
+        except Exception:  # noqa: BLE001 -- a free object has no source to walk
+            continue
+    return seen
+
+
+def _scrub_catalogue(doc: "fitz.Document") -> None:
+    """Clear the document catalogue plane (R6-03): named destinations, page labels,
+    JavaScript, optional-content group names, and the structure tree.
+
+    Five mechanisms, one root cause: ``_scrub_document_surfaces`` knew three keys and a PDF
+    catalogue has about a dozen. Measured survivors were a destination NAME
+    (``Kovacova_Maria_zmluva``, what Word's "Insert bookmark" exports), a page-label prefix
+    (``Kovacova-Maria-``, what Bates stamping writes), a string literal inside /OpenAction
+    JavaScript, an OCG /Name (``Vrstva klienta Peter Horvath``), and a structure element's
+    /Alt -- **what a screen reader speaks over a scanned signature**, invisible on the page, in
+    documents Slovak public administration is required to make accessible.
+
+    TWO POLICIES, because the five constructs are not alike:
+
+      * the navigation and scripting doors in ``_CATALOGUE_DOORS`` (and /AA on each page) are
+        DELETED whole, like /Outlines;
+      * everything else still reachable from the catalogue is blanked BY POSITION -- every
+        string value in every object, whatever key holds it. Enumerating "the keys we thought
+        of" is what produced this finding, so /OCProperties and /StructTreeRoot are not
+        enumerated either: they are simply objects on the catalogue plane, and so is the next
+        construct nobody has thought of.
+
+    THE PAGE TREE IS EXCLUDED, and that boundary is load-bearing rather than cosmetic. Page
+    content is the plane the redaction loop owns, and the objects under it include font
+    dictionaries whose /Registry and /Ordering strings are how a CID font maps glyphs --
+    blanking those would turn the output's own text into garbage. /StructTreeRoot reaches back
+    into the page tree through each element's /Pg, so without the exclusion this walk arrives
+    there by the back door.
+
+    Runs AFTER rehide(), so the /OCProperties it walks is the one that will be saved rather
+    than the null the reading view leaves behind."""
+    catalogue = doc.pdf_catalog()
+    for page in doc:
+        for key in _PAGE_DOORS:
+            doc.xref_set_key(page.xref, key, "null")
+    kind, value = doc.xref_get_key(catalogue, "Pages")
+    pages = _reachable(doc, [int(value.split()[0])] if kind == "xref" else [])
+    for key in _CATALOGUE_DOORS:
+        if doc.xref_get_key(catalogue, key)[0] != "null":
+            doc.xref_set_key(catalogue, key, "null")
+    plane = (_reachable(doc, [catalogue]) - pages) | {catalogue}
+    for xref in sorted(plane):
+        if doc.xref_is_stream(xref):
+            # A stream's BODY is not rewritable through update_object, and the two stream
+            # planes that carry text of their own are already handled: /Metadata packets are
+            # emptied above and embedded files are deleted with their file spec.
+            continue
+        _blank_strings(doc, xref)
 
 
 # The link-dictionary keys eval/extract.py reads into its ``links`` surface. Deciding on
@@ -684,8 +872,13 @@ def _redact_pdf(
             _draw_label(page, rect, label)
 
     _scrub_link_targets(doc, known_entities, config)
-    _scrub_document_surfaces(doc)
+    # rehide BEFORE the doc-level scrub, not after (R6-03). unhide() sets /OCProperties to
+    # null so MuPDF's text device emits an OFF layer's text; the catalogue scrub has to walk
+    # the /OCProperties that will actually be SAVED, or the optional-content group whose name
+    # is "Vrstva klienta Peter Horvath" is unreachable at exactly the moment we go looking for
+    # it -- and rehide would then put it back, unscrubbed, after the scrub had finished.
     rehide(doc, view)
+    _scrub_document_surfaces(doc)
 
     doc.save(out_path, garbage=4, deflate=True)
     doc.close()

@@ -249,8 +249,9 @@ def test_control_r6_03_every_catalogue_needle_is_reachable(tmp_path):
     assert missing == {}
 
 
-@pytest.mark.xfail(strict=True, reason="R6-03: the document catalogue is never scrubbed")
 def test_r6_03_the_document_catalogue_is_scrubbed(tmp_path):
+    """FIXED: ``_scrub_catalogue`` deletes the navigation/scripting doors whole and blanks
+    every string value on the rest of the catalogue plane BY POSITION."""
     src = _catalogue_pdf(tmp_path)
     out = tmp_path / "out.pdf"
     _redact(src, out, known=[NAME])
@@ -258,14 +259,14 @@ def test_r6_03_the_document_catalogue_is_scrubbed(tmp_path):
     assert survivors == [], f"catalogue plane shipped unredacted: {survivors}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R6-03b: a short needle on the catalogue plane is graded CLEAN by the leak gate",
-)
 def test_r6_03b_a_short_needle_in_the_catalogue_is_graded_by_the_gate(tmp_path):
     """The gate's own verdict, not the extractor's. ``pdf_objects`` is an OPAQUE surface, so a
     Slovak PSC (5) and a bank code (4) fall under the attributability floor of 7 characters and
-    are SET ASIDE as structural noise — on a plane that holds nothing but document metadata."""
+    are SET ASIDE as structural noise — on a plane that holds nothing but document metadata.
+
+    FIXED at both ends, and this test alone would not prove the second one: the writer now
+    removes these needles, so nothing is left to grade here. The gate half is measured on its
+    own in ``test_r6_03b_the_gate_counts_a_short_needle_inside_a_pdf_string`` below."""
     src = _catalogue_pdf(tmp_path)
     out = tmp_path / "out.pdf"
     _redact(src, out, known=[NAME])
@@ -290,6 +291,78 @@ def test_control_r6_03_contrast_the_same_name_in_the_body_is_redacted(tmp_path):
     assert NAME not in text
     assert RC not in text
     assert "[MENO_" in text
+
+
+def _script_doors_pdf(tmp_path: Path) -> Path:
+    """The SAME payload behind all three doors onto document JavaScript. §7 of the findings
+    listed two of them as suspected-not-confirmed: only the /OpenAction spelling was measured,
+    so a fix that closed /OpenAction alone would have looked complete and shipped the other
+    two."""
+    src = tmp_path / "js.pdf"
+    _page_pdf(src)
+    doc = fitz.open(str(src))
+    cat = doc.pdf_catalog()
+    for door, payload in (("OpenAction", NAME), ("Names", RC), ("AA", PSC)):
+        js = doc.get_new_xref()
+        doc.update_object(js, f"<< /S /JavaScript /JS (var x = '{payload}';) >>")
+        if door == "Names":
+            names = doc.get_new_xref()
+            doc.update_object(names, f"<< /JavaScript << /Names [ (spis) {js} 0 R ] >> >>")
+            doc.xref_set_key(cat, "Names", f"{names} 0 R")
+        elif door == "AA":
+            # PAGE-level /AA: an additional-action dictionary that fires on page open.
+            aa = doc.get_new_xref()
+            doc.update_object(aa, f"<< /O {js} 0 R >>")
+            doc.xref_set_key(doc[0].xref, "AA", f"{aa} 0 R")
+        else:
+            doc.xref_set_key(cat, door, f"{js} 0 R")
+    return _resave(doc, src)
+
+
+_SCRIPT_DOORS = {"OpenAction": NAME, "Names /JavaScript": RC, "page /AA": PSC}
+
+
+def test_control_r6_03_all_three_script_doors_are_reachable(tmp_path):
+    """CONTROL (reachability): each door's payload is on ``pdf_objects`` of the input, so an
+    absence in the output is the scrub and not a fixture that never carried it."""
+    src = _script_doors_pdf(tmp_path)
+    missing = [k for k, v in _SCRIPT_DOORS.items() if "pdf_objects" not in _surfaces(src, v)]
+    assert missing == []
+
+
+def test_r6_03_all_three_script_doors_are_closed(tmp_path):
+    """FIXED: /OpenAction, /Names (whose remaining sub-trees are navigation and scripting too)
+    and each page's /AA are deleted whole."""
+    src = _script_doors_pdf(tmp_path)
+    out = tmp_path / "out.pdf"
+    _redact(src, out, known=[NAME])
+    survivors = sorted(k for k, v in _SCRIPT_DOORS.items() if _surfaces(out, v))
+    assert survivors == [], f"document JavaScript shipped unredacted: {survivors}"
+
+
+def test_r6_03b_the_gate_counts_a_short_needle_inside_a_pdf_string(tmp_path):
+    """R6-03b's own half, measured on the GATE rather than on the writer.
+
+    ``pdf_objects`` is ``doc.xref_object()`` — the source of every dictionary in the file — so
+    the opaque premise that a short match there is a font table or an xref offset is false for
+    it. A four-digit bank code inside a string LITERAL is a value; the same four digits inside
+    a CID font's /W widths array are exactly the noise the rule exists to discount, and the
+    second half of this test is the measurement that kept ``pdf_objects`` opaque instead of
+    removing it outright: dropping it from ``_OPAQUE_SURFACES`` turned the corpus gate red on
+    zmluva_v11_020.pdf for precisely this shape."""
+    from eval.leak_gate import is_attributable
+
+    literal = "<< /Type /StructElem /ActualText (ucet 1100) /T (Spis 04001) >>"
+    widths = "<< /W [ 1046 1099 750 1100 1102 318 1103 1126 750 ] >>"
+    assert is_attributable(literal, KOD_BANKY, "pdf_objects")
+    assert is_attributable(literal, PSC, "pdf_objects")
+    assert not is_attributable(widths, KOD_BANKY, "pdf_objects")
+    # Acrobat stores anything with a diacritic as a hex string, which is just as much a value.
+    hexs = "<< /Alt <" + "PSC 04001".encode("utf-16-be").hex() + "> >>"
+    assert is_attributable(hexs, PSC, "pdf_objects")
+    # And the carve-out is scoped: raw_bytes is deduplicated printable runs of the whole file,
+    # where a parenthesis on either side of four digits is evidence of nothing.
+    assert not is_attributable(literal, KOD_BANKY, "raw_bytes")
 
 
 # =================================================================================== R6-04
@@ -337,14 +410,18 @@ def test_control_r6_04_the_attachment_is_readable_from_the_input(tmp_path):
     assert NAME in text and RC in text and PSC in text and KOD_BANKY in text
 
 
-def test_control_r6_04_the_gate_cannot_see_the_attachment_at_all(tmp_path):
-    """CONTROL (extractor blindness), and the reason R6-04 is this round's headline: the
-    needles are readable from the file but present on ZERO extractor surfaces, on the INPUT.
-    This is not the gate discounting a short needle — it is the gate never seeing it."""
+def test_control_r6_04_the_gate_can_now_see_the_attachment(tmp_path):
+    """AMENDED, and the amendment IS the second half of the fix.
+
+    As filed this control asserted the opposite — that on the INPUT the needles are readable
+    from the file and present on ZERO extractor surfaces — because that blindness was the
+    reason R6-04 was the round's headline: not the gate discounting a short needle, the gate
+    never seeing it. It is an assertion that cannot survive its own finding being closed, so it
+    is inverted rather than deleted: the same measurement, now stating the property that must
+    hold. ``attachments`` is a TEXT surface, so every needle counts at every length."""
     src = _af_pdf(tmp_path)
-    assert _surfaces(src, RC) == ()
-    assert _surfaces(src, PSC) == ()
-    assert _surfaces(src, KOD_BANKY) == ()
+    for needle in (NAME, RC, PSC, KOD_BANKY):
+        assert "attachments" in _surfaces(src, needle), needle
 
 
 def test_control_r6_04_the_name_tree_is_empty_so_the_writer_never_looks(tmp_path):
@@ -356,11 +433,9 @@ def test_control_r6_04_the_name_tree_is_empty_so_the_writer_never_looks(tmp_path
     assert names == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R6-04: an /AF associated file survives the redaction, unseen by every surface",
-)
 def test_r6_04_associated_files_are_removed(tmp_path):
+    """FIXED: ``_scrub_associated_files`` walks /AF at the catalogue and the page plus every
+    /Filespec reached from /Annots, empties the /EF stream bodies and blanks the file specs."""
     src = _af_pdf(tmp_path)
     out = tmp_path / "out.pdf"
     _redact(src, out, known=[NAME])
@@ -373,16 +448,51 @@ def test_r6_04_associated_files_are_removed(tmp_path):
     assert leaked == [], f"embedded client document shipped unredacted: {leaked}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R6-04b: the leak gate scores the output CLEAN although the attachment survived",
-)
-def test_r6_04b_the_leak_gate_sees_the_surviving_attachment(tmp_path):
+def test_r6_04b_the_leak_gate_sees_a_surviving_af_attachment(tmp_path):
+    """AMENDED: graded on a document where the attachment SURVIVES, which after the writer fix
+    is no longer the output.
+
+    As filed, this ran the writer and then asked the gate about the output — a formulation that
+    is satisfiable only while R6-04 is open, because once the attachment is deleted there is
+    nothing left for the gate to count and ``counted=()`` means "clean" and "blind" alike. That
+    is the one thing this sub-finding must never conflate, so the fixture it grades is the
+    INPUT: an /AF associated file that is really there, whose payload is a ZIP whose
+    ``word/document.xml`` is itself deflated.
+
+    This is what keeps the writer fix GATED. Without it, ``raw_bytes`` inflates the PDF stream,
+    gets the ZIP's bytes, and still contains not one character of the name inside it — and the
+    next way in (a portfolio, a page-level /AF, an attachment relationship nobody has thought
+    of) would be just as invisible."""
     src = _af_pdf(tmp_path)
+    blind = [n for n in (NAME, RC, PSC, KOD_BANKY) if not _gate_verdict(src, n)[0]]
+    assert blind == [], f"the attachment is in the file and the gate graded it CLEAN: {blind}"
+
+
+def test_r6_04_the_page_and_annotation_doors_are_closed_too(tmp_path):
+    """/AF hangs off a PAGE as readily as off the catalogue, and a /Filespec is reachable from
+    an annotation's /FS. A fix that walked only the catalogue would pass every test above."""
+    src = tmp_path / "afpage.pdf"
+    _page_pdf(src)
+    doc = fitz.open(str(src))
+    for door in ("page", "annot"):
+        payload = f"Kupujuci: {NAME}, rodne cislo {RC}, PSC {PSC}, kod banky {KOD_BANKY}"
+        ef = _new_stream(doc, "<< /Type /EmbeddedFile >>", _docx_bytes(payload))
+        fs = doc.get_new_xref()
+        doc.update_object(fs, f"<< /Type /Filespec /F (p_{door}.docx) /UF (p_{door}.docx) "
+                              f"/EF << /F {ef} 0 R >> /AFRelationship /Data >>")
+        if door == "page":
+            doc.xref_set_key(doc[0].xref, "AF", f"[ {fs} 0 R ]")
+        else:
+            ax = doc.get_new_xref()
+            doc.update_object(ax, f"<< /Type /Annot /Subtype /FileAttachment /FS {fs} 0 R "
+                                  f"/Rect [300 200 320 220] /F 4 >>")
+            doc.xref_set_key(doc[0].xref, "Annots", f"[ {ax} 0 R ]")
+    src2 = _resave(doc, src)
+    assert "attachments" in _surfaces(src2, RC), "fixture carries no readable attachment"
     out = tmp_path / "out.pdf"
-    _redact(src, out, known=[NAME])
-    blind = [n for n in (NAME, RC, PSC, KOD_BANKY) if not _gate_verdict(out, n)[0]]
-    assert blind == [], f"survived the redaction and the gate graded it CLEAN: {blind}"
+    _redact(src2, out, known=[NAME])
+    survivors = [n for n in (NAME, RC, PSC, KOD_BANKY) if _surfaces(out, n)]
+    assert survivors == [], f"a page-/annotation-level /AF shipped unredacted: {survivors}"
 
 
 # =================================================================================== R6-05
@@ -491,9 +601,9 @@ def test_control_r6_07_the_document_level_xmp_is_deleted(tmp_path):
     assert _surfaces(out, NAME) == ()
 
 
-@pytest.mark.xfail(
-    strict=True, reason="R6-07: a page-level /Metadata XMP stream is never deleted")
 def test_r6_07_page_level_xmp_is_deleted(tmp_path):
+    """FIXED: ``_scrub_metadata_streams`` asks EVERY object in the xref for a /Metadata key
+    instead of only the catalogue."""
     src = _page_xmp_pdf(tmp_path)
     out = tmp_path / "out.pdf"
     _redact(src, out, known=[NAME])
@@ -501,17 +611,38 @@ def test_r6_07_page_level_xmp_is_deleted(tmp_path):
     assert survivors == [], f"page-level XMP shipped unredacted: {survivors}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R6-07b: the short needle in the page-level XMP is graded CLEAN by the leak gate",
-)
-def test_r6_07b_the_gate_grades_the_short_needle_in_a_page_xmp(tmp_path):
-    src = _page_xmp_pdf(tmp_path)
+def test_r6_07_an_xobject_level_xmp_is_deleted(tmp_path):
+    """§7's "suspected, not confirmed": R6-07's mechanism one level further down. Sweeping by
+    POSITION rather than by level is what closes it with the same four lines."""
+    src = tmp_path / "xobjxmp.pdf"
+    _page_pdf(src)
+    doc = fitz.open(str(src))
+    xo = _new_stream(doc, "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] >>", b"\n")
+    mx = _new_stream(doc, "<< /Type /Metadata /Subtype /XML >>",
+                     f"<x><dc:creator>{NAME}</dc:creator><dc:title>PSC {PSC}</dc:title></x>"
+                     .encode())
+    doc.xref_set_key(xo, "Metadata", f"{mx} 0 R")
+    rx, key = _resources_xref(doc, doc[0])
+    doc.xref_set_key(rx, key, f"<< /Fm9 {xo} 0 R >>")
+    src2 = _resave(doc, src)
+    assert "xmp" in _surfaces(src2, NAME), "fixture carries no reachable XObject XMP"
     out = tmp_path / "out.pdf"
-    _redact(src, out, known=[NAME])
-    counted, aside = _gate_verdict(out, PSC)
-    assert counted, (f"PSC {PSC} survived on {aside} and the gate counted nothing "
-                     f"-- verdict CLEAN")
+    _redact(src2, out, known=[NAME])
+    survivors = [n for n in (NAME, PSC) if _surfaces(out, n)]
+    assert survivors == [], f"XObject-level XMP shipped unredacted: {survivors}"
+
+
+def test_r6_07b_the_gate_grades_a_short_needle_in_a_page_xmp(tmp_path):
+    """AMENDED for the same reason as R6-04b, and graded on the INPUT.
+
+    As filed this redacted the document first and then required the gate to COUNT the PSC —
+    satisfiable only while R6-07 is open. The property that has to hold once it is closed is
+    the one this asserts: a page-level XMP packet is on the ``xmp`` TEXT surface, where a
+    five-digit PSC in ``<dc:title>PSC 04001</dc:title>`` counts, and not on ``raw_bytes`` only,
+    where it fell under the seven-character attributability floor and the gate said CLEAN."""
+    counted, aside = _gate_verdict(_page_xmp_pdf(tmp_path), PSC)
+    assert "xmp" in counted, (f"PSC {PSC} is in a page XMP packet, counted={counted} "
+                              f"set_aside={aside}")
 
 
 # =================================================================================== R6-08

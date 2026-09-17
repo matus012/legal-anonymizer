@@ -25,6 +25,7 @@ rather than an unrequested edit of the document.
 """
 from __future__ import annotations
 
+import re
 from typing import NamedTuple
 
 import fitz
@@ -102,3 +103,60 @@ def rehide(doc: "fitz.Document", view: HiddenView) -> None:
             doc.xref_set_key(doc.pdf_catalog(), "OCProperties", view.ocproperties)
         except Exception:
             pass
+
+
+# --------------------------------------------------------------- associated files (R6-04)
+# The SECOND way a PDF carries an attachment, and the one nothing in this project looked at.
+# ``doc.embfile_names()`` lists the /Names /EmbeddedFiles name tree ONLY; an ASSOCIATED FILE
+# (PDF 2.0 §14.13, the mechanism PDF/A-3 is built on -- an e-invoice's XML, a hybrid cadastre
+# export's source data) hangs off /AF at the catalogue or the page, or off a /Filespec reached
+# from an annotation, and is in no name tree at all. The writer's delete loop therefore never
+# ran and garbage=4 kept the stream because it is reachable.
+#
+# This lives beside unhide/rehide for the same reason unhide does: the WRITER deletes these
+# files and ``eval/extract.py`` grades whether they are gone, and a writer that enumerates
+# attachments differently from the grader is exactly the shape that produced R6-04 (and, an
+# hour earlier, R6-05 and R6-06). One walk, called from both.
+_REF_RE = re.compile(r"(\d+) 0 R")
+
+
+def _refs(source: str) -> list[int]:
+    return [int(x) for x in _REF_RE.findall(source or "")]
+
+
+def _resolve(doc: "fitz.Document", xref: int, key: str) -> list[int]:
+    """Xrefs named by ``xref``'s ``key``, whether it is written as an array, a single indirect
+    reference, or an indirect reference TO an array."""
+    kind, value = doc.xref_get_key(xref, key)
+    if kind == "array":
+        return _refs(value)
+    if kind != "xref":
+        return []
+    target = int(value.split()[0])
+    source = doc.xref_object(target, compressed=False) or ""
+    return _refs(source) if source.lstrip().startswith("[") else [target]
+
+
+def associated_filespecs(doc: "fitz.Document") -> list[int]:
+    """Every /Filespec xref reachable OUTSIDE the /Names /EmbeddedFiles tree.
+
+    Three doors, all of which a reader's attachment pane opens: the catalogue's /AF, each
+    page's /AF, and the /FS of every annotation on every page. Returned in traversal order
+    with duplicates removed, because one file spec is routinely referenced from several.
+    """
+    out: list[int] = list(_resolve(doc, doc.pdf_catalog(), "AF"))
+    for page in doc:
+        out += _resolve(doc, page.xref, "AF")
+        for annot in _resolve(doc, page.xref, "Annots"):
+            out += _resolve(doc, annot, "FS")
+    return list(dict.fromkeys(out))
+
+
+def embedded_file_streams(doc: "fitz.Document", filespec: int) -> list[int]:
+    """The stream xrefs of one file spec's /EF dictionary (/F, /UF, /DOS, /Mac, /Unix)."""
+    kind, value = doc.xref_get_key(filespec, "EF")
+    if kind == "xref":
+        value = doc.xref_object(int(value.split()[0]), compressed=False) or ""
+    elif kind == "null":
+        return []
+    return _refs(value)

@@ -88,7 +88,7 @@ from pathlib import Path
 import fitz
 from lxml import etree
 
-from writer.pdf_view import unhide
+from writer.pdf_view import associated_filespecs, embedded_file_streams, unhide
 
 # ---------------------------------------------------------------- physical surfaces
 # DOCX
@@ -295,13 +295,20 @@ def _alt_chunk_names(z: zipfile.ZipFile) -> set[str]:
     return out
 
 
-def _alt_chunk_text(data: bytes) -> str:
-    """The readable text of one altChunk part, in every plausible encoding.
+def _nested_document_text(data: bytes) -> str:
+    """The readable text of one EMBEDDED DOCUMENT, in every plausible encoding.
 
-    A nested ``.docx`` chunk is a ZIP, so its ``document.xml`` is DEFLATED and no decoding of
-    the outer bytes can see a word of it; its entries are therefore read out one level. The
-    whole decoding is kept rather than printable runs: this is document text, and a needle as
-    short as four digits has to be findable in it.
+    A nested ``.docx`` is a ZIP, so its ``document.xml`` is DEFLATED and no decoding of the
+    outer bytes can see a word of it; its entries are therefore read out one level. The whole
+    decoding is kept rather than printable runs: this is document text, and a needle as short
+    as four digits has to be findable in it.
+
+    Called from BOTH format paths, deliberately. It was written for round 5's ``w:altChunk``
+    and round 6 found the identical blind spot on the PDF side (R6-04b): an /AF associated file
+    carrying a .docx, whose needles the ``attachments`` surface could not see, ``raw_bytes``
+    could not see -- its single ``zlib.decompress`` yields the ZIP, whose member is deflated
+    again -- and ``pdf_objects`` could not see. A fourteen-character name scored ``counted=()``.
+    A third copy of "unzip one level" is how the next format would get the same hole.
     """
     if data[:4] == b"PK\x03\x04":
         with zipfile.ZipFile(io.BytesIO(data)) as inner:
@@ -384,7 +391,7 @@ def _extract_docx(path: Path) -> dict[str, str]:
             S_RELS: "\n".join(rels),
             S_BINARY_PARTS: "\n".join(binaries),
             S_ALT_CHUNKS: "\n".join(
-                sorted(alt_chunks) + [_alt_chunk_text(z.read(n)) for n in sorted(alt_chunks)]
+                sorted(alt_chunks) + [_nested_document_text(z.read(n)) for n in sorted(alt_chunks)]
             ),
         }
 
@@ -476,6 +483,73 @@ def _pdf_raw_text(path: Path) -> str:
     return "\n".join(out)
 
 
+def _attachment_text(data: bytes) -> str:
+    """One PDF attachment's payload as text.
+
+    A ZIP payload (a .docx, a .zip, an ODF) goes through ``_nested_document_text``, which is
+    the whole of R6-04b: its members are deflated, so no decoding of the outer bytes holds a
+    character of them. ANYTHING ELSE keeps the single UTF-8 reading this surface has always
+    used, deliberately — ``eval/retention.py`` counts ``attachments`` as CONTENT, and running a
+    plain-text attachment through all five of ``_decode_all``'s codepages puts thousands of junk
+    tokens into retention's denominator. Measured: the corpus's own ``priloha.txt`` dropped the
+    greedy baseline from its pinned vector to retention 0.9538. The extra codepages buy nothing
+    here either — a non-deflated attachment stream is already read under all five by
+    ``raw_bytes``."""
+    return _nested_document_text(data) if data[:4] == b"PK\x03\x04" else data.decode("utf-8", "replace")
+
+
+def _pdf_attachments(doc: fitz.Document) -> str:
+    """Every attachment this file carries, through BOTH doors, read one level in (R6-04b).
+
+    ``doc.embfile_names()`` lists the /Names /EmbeddedFiles name tree only. The other door is
+    /AF -- an ASSOCIATED FILE (PDF 2.0 §14.13, the mechanism PDF/A-3 is built on), reachable
+    from the catalogue, from a page, or from an annotation's /FS, and in no name tree at all.
+    The walk is ``writer.pdf_view.associated_filespecs``, the SAME one the writer deletes
+    through, because R6-04 is precisely what happens when the grader and the writer enumerate
+    attachments differently.
+
+    And the payload is decoded with ``_nested_document_text``, not with ``_decode_all``: the
+    thing a cadastre export or an e-invoice attaches is a .docx or a .zip, whose members are
+    themselves deflated. Before this, ``attachments``, ``raw_bytes`` and ``pdf_objects`` between
+    them held not one character of an attached client document, and the gate reported
+    ``counted=()`` for a fourteen-character name."""
+    out: list[str] = []
+    for name in doc.embfile_names():
+        out.append(name)
+        out.extend(str(v) for v in (doc.embfile_info(name) or {}).values())
+        out.append(_attachment_text(doc.embfile_get(name)))
+    for filespec in associated_filespecs(doc):
+        # The file spec's OWN strings -- /F, /UF and above all /Desc, where "Priloha ku spisu
+        # Maria Kovacova" is the natural thing to write -- are a different surface from the
+        # bytes inside the attachment, and each has leaked without the other.
+        out.append(doc.xref_object(filespec, compressed=False) or "")
+        for stream in embedded_file_streams(doc, filespec):
+            try:
+                out.append(_attachment_text(doc.xref_stream(stream)))
+            except Exception:  # noqa: BLE001 -- an unreadable stream must not cost the rest
+                continue
+    return " ".join(out)
+
+
+def _pdf_xmp(doc: fitz.Document) -> str:
+    """EVERY XMP packet in the file, not only the catalogue's (R6-07b).
+
+    ``get_xml_metadata()`` reads the catalogue's /Metadata. A /Metadata on a page, an XObject
+    or an embedded file stream is a different object, and it used to reach only ``raw_bytes``
+    -- an OPAQUE surface -- so ``<dc:title>PSC 04001</dc:title>``, plain XML text in a packet a
+    reader displays, was discounted as structural noise and the document scored CLEAN. Sweeping
+    the whole xref by POSITION puts it on a TEXT surface, where a short needle counts."""
+    out = [doc.get_xml_metadata() or ""]
+    for xref in range(1, doc.xref_length()):
+        try:
+            kind, value = doc.xref_get_key(xref, "Metadata")
+            if kind == "xref":
+                out.append(doc.xref_stream(int(value.split()[0])).decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001 -- a free or malformed object owns no packet
+            continue
+    return "\n".join(out)
+
+
 def _extract_pdf(path: Path) -> dict[str, str]:
     doc = fitz.open(path)
     try:
@@ -504,17 +578,9 @@ def _extract_pdf(path: Path) -> dict[str, str]:
                 getattr(w, "choice_values", None),
             )
         )
-        attachments = " ".join(
-            doc.embfile_get(n).decode("utf-8", "replace") for n in doc.embfile_names()
-        )
-        # ... and the attachment's own name/description, which live in the file spec, not
-        # in its bytes.
-        attachments += " " + " ".join(
-            f"{n} " + " ".join(str(v) for v in (doc.embfile_info(n) or {}).values())
-            for n in doc.embfile_names()
-        )
+        attachments = _pdf_attachments(doc)
         info = " ".join(str(v) for v in (doc.metadata or {}).values())
-        xmp = doc.get_xml_metadata() or ""
+        xmp = _pdf_xmp(doc)
         outline = " ".join(str(item[1]) for item in (doc.get_toc(simple=True) or []))
         links = " ".join(
             str(v)

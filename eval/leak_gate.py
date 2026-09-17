@@ -37,6 +37,7 @@ must exercise detection only through the writers, exactly as production does.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -100,6 +101,70 @@ _OPAQUE_SURFACES = {"raw_bytes", "pdf_objects", "xml_attributes", "binary_parts"
 _ATTRIBUTABLE_MIN_LEN = 7
 _HEX_CHARS = frozenset("0123456789abcdefABCDEF")
 
+# ---------------------------------------------------------------- the pdf_objects carve-out
+# R6-03b. ``pdf_objects`` is ``doc.xref_object()`` -- THE SOURCE OF EVERY DICTIONARY IN THE
+# FILE, which is where a PDF keeps its titles, labels, destination names, JavaScript and the
+# alt text a screen reader speaks. The opaque premise ("this surface cannot hold document text,
+# so a short match is a font table or an xref offset") is simply false for it, exactly as round
+# 5 showed it was false for ``binary_parts``: a five-digit Slovak PSC and a four-digit bank
+# code in the catalogue -- both AUTO-REDACT types -- were set aside as structural noise.
+#
+# BOTH REMEDIES THE FINDING OFFERS WERE MEASURED against the 71-document corpus before choosing.
+#
+#   * Taking ``pdf_objects`` out of ``_OPAQUE_SURFACES`` outright turns the gate RED:
+#         leaks: text_layer=0 scrub=0 other=1   VERDICT: FAIL
+#         LEAK zmluva_v11_020.pdf: type=KOD_BANKY found_in=('pdf_objects',)
+#     and the match is this, in a CID font's /W widths array:
+#         ' 1046 1099 750 1100 1102 318 1103 1126 750 '
+#     i.e. the premise IS true for the part of ``pdf_objects`` that is font machinery. That is
+#     a genuine false red on a correctly redacted document, so option A is unusable as it
+#     stands -- it would train the office to ignore the gate.
+#   * The carve-out below counts a match that lies inside a PDF **string** -- a literal
+#     ``(Kovacova-Maria-)`` or a hex string ``<FEFF0050...>``, which is how Acrobat stores
+#     anything with a diacritic. A string is a VALUE, never an offset, a length or a glyph
+#     width, so length and hex-delimiting stop being the only evidence available. The /W array
+#     above contains no parentheses and stays discounted; the PSC in ``/T (Spis 04001)`` and
+#     the bank code in ``/ActualText (ucet 1100)`` are counted at four and five characters.
+#
+# Scoped to ``pdf_objects`` alone, and not extended to ``raw_bytes``, on purpose: raw_bytes is
+# deduplicated printable RUNS of the whole file, where a parenthesis on either side of a needle
+# means nothing in particular. Widening the carve-out there would have counted the second
+# corpus set-aside ('1111' in zmluva_v11_034.pdf) on no evidence at all.
+_STRING_CARVE_OUT_SURFACES = {"pdf_objects"}
+_HEX_STRING_RE = re.compile(r"(?<!<)<([0-9A-Fa-f \t\r\n]{2,})>(?!>)")
+
+
+def _pdf_string_values(text: str) -> list[str]:
+    """Every PDF string VALUE in this object source: literals ``(...)`` with nesting and
+    backslash escapes, and hex strings ``<...>`` decoded (``<<``/``>>`` are dictionaries)."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "(":
+            depth, j = 1, i + 1
+            while j < n and depth:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                depth += 1 if text[j] == "(" else -1 if text[j] == ")" else 0
+                j += 1
+            if depth:
+                break  # unbalanced source: nothing further can be read as a string
+            out.append(text[i + 1 : j - 1])
+            i = j
+            continue
+        i += 1
+    for m in _HEX_STRING_RE.finditer(text):
+        digits = re.sub(r"\s", "", m.group(1))
+        if len(digits) % 2 == 0:
+            raw = bytes.fromhex(digits)
+            out += [raw.decode(enc, "ignore") for enc in ("utf-16-be", "latin-1")]
+    return out
+
+
+def _inside_pdf_string(text: str, needle: str) -> bool:
+    return any(needle in value for value in _pdf_string_values(text))
+
 
 def _has_delimited_occurrence(text: str, needle: str) -> bool:
     """True if ``needle`` occurs somewhere with a non-hex character on BOTH sides.
@@ -122,11 +187,17 @@ def _has_delimited_occurrence(text: str, needle: str) -> bool:
         start = idx + 1
 
 
-def is_attributable(text: str, needle: str) -> bool:
+def is_attributable(text: str, needle: str, surface: str | None = None) -> bool:
     """Does a match of ``needle`` in this OPAQUE surface mean anything?
 
     See the measurement above. Never called for a text surface.
+
+    ``surface`` is optional so every existing two-argument caller keeps the length+delimiter
+    rule verbatim; naming ``pdf_objects`` adds the R6-03b carve-out, under which a match inside
+    a PDF string literal or hex string counts at any length.
     """
+    if surface in _STRING_CARVE_OUT_SURFACES and _inside_pdf_string(text, needle):
+        return True
     return len(needle) >= _ATTRIBUTABLE_MIN_LEN and _has_delimited_occurrence(text, needle)
 
 
@@ -141,7 +212,7 @@ def split_found_in(leak: Leak, by_surface: dict[str, str]) -> tuple[tuple[str, .
     for surface in leak.found_in:
         if surface not in _OPAQUE_SURFACES:
             continue
-        if is_attributable(by_surface.get(surface, ""), leak.surface):
+        if is_attributable(by_surface.get(surface, ""), leak.surface, surface):
             counted += (surface,)
         else:
             set_aside.append(surface)
@@ -233,7 +304,9 @@ def run_gate(corpus_dir: Path) -> int:
         f"set aside (opaque-surface matches below the attributability rule): "
         f"{len(set_aside)} match(es) in {len({n for n, _, _ in set_aside})} doc(s); {where}; "
         f"rule: needle >= {_ATTRIBUTABLE_MIN_LEN} chars AND one occurrence with a non-hex "
-        f"character on both sides (redteam/FINDINGS.md, KNOWN BLIND SPOTS)"
+        f"character on both sides -- OR, on {'/'.join(sorted(_STRING_CARVE_OUT_SURFACES))}, "
+        f"any occurrence inside a PDF string literal or hex string, which is a value and not "
+        f"an offset (redteam/FINDINGS.md, KNOWN BLIND SPOTS; R6-03b)"
     )
     for name, leak, surfaces in set_aside[:20]:
         print(f"  set-aside {name}: type={leak.type} surface={leak.surface!r} in {surfaces}")
