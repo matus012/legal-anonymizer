@@ -261,3 +261,30 @@ CONTRACTS_v11.md restricts it. Recorded as R3-A7.
 should be removed from §4.1 and from `_TYPE_PRECEDENCE` rather than left half-implemented —
 a type that matches one spelling of four is worse than no type, because the report claims the
 category is covered.
+
+---
+
+## Q17 — the five WinAnsi-undefined bytes in `mutate_mojibake_cp1250` (red-team round 4, 2026-09-17)
+
+**Question.** `corpus/mutations.py::mutate_mojibake_cp1250` models a cp1250 text layer drawn
+with `/WinAnsiEncoding`. Five cp1250 characters (`ť ‘ ’ “ ”`-adjacent bytes 0x81, 0x8D, 0x8F,
+0x90, 0x9D) map to bytes that are UNDEFINED in WinAnsi. What should the mutation emit for them?
+
+**Default taken (reversible in one line).** `U+FFFD REPLACEMENT CHARACTER`. It keeps the
+rewrite 1 character for 1 character, so the homomorphism requirement `s in t => mutate(s) in
+mutate(t)` still holds unconditionally, and U+FFFD is Unicode category `So` — so it does NOT
+trip `writer/pdf_body.page_has_unreadable_text`, which is the honest model of the accepted-
+and-leaking state the mutation is measuring.
+
+**The alternative and why it was not taken.** Leaving the character unchanged would be the
+conservative choice, but it UNDER-states the damage: a real extractor does not hand back the
+correct Slovak letter for a byte the encoding does not define. It would also make the mutation
+silently weaker on exactly `ť`, which is a common Slovak letter.
+
+**Reversal.** In `_build_cp1250_as_winansi`, replace `seen = "�"` in the
+`except UnicodeDecodeError` branch with `continue`. The corpus-scale number
+(`mojibake_cp1250` blind 0.843 / known 0.850) will move up slightly; nothing else depends on it.
+
+**Who should decide.** Whoever owns the PDF refusal thresholds, because the choice interacts
+with `_UNDECODABLE_CATEGORIES`: if U+FFFD were added to that set, this mutation class would
+become partly self-refusing and the number would stop measuring the detectors.

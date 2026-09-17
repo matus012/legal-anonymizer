@@ -54,7 +54,14 @@ def test_page_text_is_readable(text, readable):
     ("", False),                              # an image page: nothing drawn for us to miss
     (CONTROL_RC, True),
     (f"Predávajúci: Ján Novák\nRodné číslo: {CONTROL_RC}", True),   # THE REAL SHAPE
-    ("Ordinary text with one stray \x01 artefact", False),
+    # CONTRACT CHANGED, deliberately, 2026-09-17. This used to assert False: the threshold was
+    # an absolute THREE, on the reasoning that the slack left room for a stray artefact.
+    # Red-team round 4 (R4-I2) walked straight through that slack -- a subset font failing on
+    # just the two diacritics of a Slovak surname yields two undecodable characters, which the
+    # old threshold accepted, and the name was then undetected, still drawn on the page, and
+    # invisible to the leak gate. Measured against the corpus after tightening to one: 0 of 71
+    # PDFs are refused, so the slack was never protecting a real document -- only the attack.
+    ("Ordinary text with one stray \x01 artefact", True),
 ])
 def test_page_has_unreadable_text(text, refuse):
     assert page_has_unreadable_text(text) is refuse

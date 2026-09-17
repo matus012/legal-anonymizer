@@ -238,10 +238,9 @@ def test_r3_a5_uppercase_surname_in_a_mixed_case_document() -> None:
     )
 
 
-@pytest.mark.xfail(
-    reason="R3-A6: NFKC(U+2011) is U+2010, not ASCII '-', so no identifier pattern matches",
-    strict=True,
-)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 @pytest.mark.parametrize(
     "text,needle",
     [

@@ -414,6 +414,63 @@ def mutate_letterspaced(text: str) -> str:
     return _edit_runs(text, edit)
 
 
+# --------------------------------------------------------------------------- round 4
+# The cp1250 -> cp1252 confusion table, built once. A character that encodes to a single byte
+# in cp1250 is re-read as cp1252 (WinAnsi); a character that does not is left alone. Every
+# entry is therefore 1 character for 1 character, which makes this the same CHARACTER-LOCAL
+# class as mutate_nbsp and the homomorphism property holds unconditionally.
+def _build_cp1250_as_winansi() -> dict[int, str]:
+    table: dict[int, str] = {}
+    for code in range(0x20, 0x2500):
+        ch = chr(code)
+        try:
+            raw = ch.encode("cp1250")
+        except UnicodeEncodeError:
+            continue
+        if len(raw) != 1:
+            continue
+        try:
+            seen = raw.decode("cp1252")
+        except UnicodeDecodeError:
+            # 0x81/0x8D/0x8F/0x90/0x9D are UNDEFINED in WinAnsi. A reader that meets one has
+            # nothing to show for it; U+FFFD is what a decoder produces and keeps the rewrite
+            # 1:1. Choosing to leave the character alone instead would UNDER-state the damage.
+            seen = "�"
+        if seen != ch:
+            table[code] = seen
+    return table
+
+
+_CP1250_AS_WINANSI = _build_cp1250_as_winansi()
+
+
+def mutate_mojibake_cp1250(text: str) -> str:
+    """Re-read every character as if cp1250 bytes had been drawn with ``/WinAnsiEncoding``.
+
+    THE CLASSIC CENTRAL-EUROPEAN ENCODING FAILURE, and — unlike the round-2 and round-3
+    classes — one that arrives through a door the two new PDF refusals do not watch:
+
+    * ``č`` (0xE8 in cp1250) is ``è`` in cp1252, ``ď`` (0xEF) is ``ï``, ``ň`` (0xF2) is ``ò``,
+      ``ĺ`` (0xE5) is ``å``, ``ľ`` (0xBE) is ``¾``, ``Ľ`` (0xBC) is ``¼``, ``ř`` (0xF8) is
+      ``ø``. ``á í é ó ú ý ô š ž`` are IDENTICAL in both code pages and come through untouched,
+      which is what makes the damage partial and invisible: most of the page reads perfectly.
+    * every replacement is a LETTER (Unicode ``Ll``/``Lu``) or a punctuation sign, never a
+      control character, so ``writer/pdf_body.page_has_unreadable_text`` is False;
+    * the token structure is unchanged, so ``page_is_shredded`` is False.
+
+    So a PDF deformed this way is ACCEPTED, and ``eval/extract.py`` reads the same deformed
+    text the detector does — the same double-blind R3-C1 and R3-C4 describe, reached by a
+    third route. Red-team round 4, finding R4-I3.
+
+    Real-world source: legacy Slovak court, land-registry and DMS systems, older Ghostscript
+    paths and RTF->PDF converters that write a WinAnsi ``/Encoding`` over Central-European
+    bytes. A Slovak law office receives PDFs from all of them.
+
+    Character-local and 1:1 -- the homomorphism requirement holds unconditionally.
+    """
+    return text.translate(_CP1250_AS_WINANSI)
+
+
 # --------------------------------------------------------------------------- registry
 MUTATIONS: dict[str, Callable[[str], str]] = {
     "nbsp": mutate_nbsp,
@@ -432,6 +489,8 @@ MUTATIONS: dict[str, Callable[[str], str]] = {
     "narrow_nbsp": mutate_narrow_nbsp,
     "surname_caps": mutate_surname_caps,
     "letterspaced": mutate_letterspaced,
+    # red-team round 4
+    "mojibake_cp1250": mutate_mojibake_cp1250,
 }
 
 # Mutations whose loss on a CAPITALISATION-dependent population is inherent rather than a

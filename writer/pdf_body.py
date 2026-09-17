@@ -140,7 +140,12 @@ def shredded_pages(doc: "fitz.Document") -> list[int]:
 # eval/extract.py already normalises. The first version of this guard would have refused them
 # all. A false refusal is not the safe direction here; it is the tool declining ordinary work,
 # which ends with the office switching it off.
-_UNDECODABLE_CATEGORIES = frozenset({"Cc", "Co", "Cn"})
+# PRIVATE USE (Co) is NOT undecodable, and including it was a false-refusal bug (red-team
+# round 4, R4-P3). Word's default bullet extracts as U+F0B7, a private-use codepoint, because
+# that is how Symbol and Wingdings address their glyphs -- legitimately, in ordinary documents.
+# Three bullets were enough to refuse a file, and adding them to every corpus page refused 70
+# of 71. A symbol font is not a broken font.
+_UNDECODABLE_CATEGORIES = frozenset({"Cc", "Cn"})
 
 
 def _is_undecodable(ch: str) -> bool:
@@ -181,7 +186,12 @@ def page_text_is_readable(text: str) -> bool:
 # Legitimate extracted text contains essentially NO control characters, so a small absolute
 # count is both a tight test and a quiet one: it does not fire on ordinary documents, and it
 # fires on the one that matters. Three rather than one leaves room for a stray artefact.
-_UNDECODABLE_MAX = 3
+# ONE is enough, now that private use is excluded. Legitimate extracted text contains no
+# control characters at all, so the absolute 3 this used to be was pure slack -- and red-team
+# round 4 (R4-I2) walked through it: a subset font that fails on just the two diacritics of a
+# Slovak surname produces two undecodable characters, which the old threshold accepted, and
+# the name was then undetected, still drawn on the page, and invisible to the leak gate.
+_UNDECODABLE_MAX = 1
 
 
 def page_has_unreadable_text(text: str) -> bool:

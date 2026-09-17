@@ -193,7 +193,24 @@ def _paragraph_runs(p_elem):
     part of the text detect() was given -- it could not be found, let alone removed. Word
     auto-hyperlinks every address and URL as you type.
     """
-    return p_elem.findall(".//" + qn("w:r"))
+    own = []
+    for r in p_elem.findall(".//" + qn("w:r")):
+        # Keep only runs whose nearest ancestor <w:p> is THIS paragraph. A descendant search
+        # also reaches runs inside a NESTED <w:p> -- a textbox anchored in this paragraph --
+        # and welding that text onto this paragraph's is document corruption, not extra
+        # coverage: measured, "Predávajúci: Ján Novák" plus an anchored textbox reading
+        # "Kupujúci: Mária Kováčová" produced MENO('Ján NovákKupujúci') and deleted the other
+        # party's role label out of the textbox (red-team round 4, R4-T9).
+        #
+        # Nothing is lost by skipping them. The nested <w:p> is itself visited by the
+        # paragraph walk in _redact_docx, where its runs are redacted in their own context and
+        # tagged with their own location.
+        node = r.getparent()
+        while node is not None and node.tag != qn("w:p"):
+            node = node.getparent()
+        if node is p_elem:
+            own.append(r)
+    return own
 
 
 def _redact_paragraph(

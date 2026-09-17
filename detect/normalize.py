@@ -150,6 +150,22 @@ _HOMOGLYPH_PAIRS = (
 )
 _HOMOGLYPHS = {ord(src): dst for src, dst in _HOMOGLYPH_PAIRS}
 
+# Hyphen-like punctuation that means ASCII '-'. See the module docstring on nb_hyphen: Word's
+# Ctrl+Shift+hyphen is U+2011, and per-character NFKC folds it to U+2010, not to '-'.
+# Unconditional, unlike the script confusables -- a dash is punctuation, so there is no
+# "genuinely Cyrillic" case to protect. 1:1, so offsets are untouched. The en and em dashes are
+# deliberately absent: they are range punctuation in ordinary prose, not hyphens.
+_HYPHENS = {
+    0x2010: "-",   # HYPHEN
+    0x2011: "-",   # NON-BREAKING HYPHEN
+    0x2012: "-",   # FIGURE DASH
+    0x2043: "-",   # HYPHEN BULLET
+    0x2212: "-",   # MINUS SIGN
+    0xFE63: "-",   # SMALL HYPHEN-MINUS
+    0xFF0D: "-",   # FULLWIDTH HYPHEN-MINUS
+}
+
+
 # A character is "interesting" when normalization might change it. The fast path below
 # returns the input untouched when none is present, which is the common case for a short
 # DOCX paragraph. The class is deliberately WIDER than the transformations -- a false
@@ -291,7 +307,15 @@ def _fold_indices(text: str) -> set[int]:
     out: set[int] = set()
     for m in _TOKEN_RE.finditer(text):
         token = m.group(0)
-        if any("LATIN" in unicodedata.name(ch, "") for ch in token):
+        has_latin = any("LATIN" in unicodedata.name(ch, "") for ch in token)
+        # A DIGIT counts as evidence too, and leaving it out was a regression (red-team round
+        # 4, R4-N1). An identifier written in confusable CAPITALS and digits -- an IBAN, an
+        # ECV, an OP number -- contains no Latin letter at all, so the Latin-letter test alone
+        # folded nothing and the identifier matched nothing: cyrillic_homoglyph fell from
+        # 1.000 to 0.973 and every type that moved was an identifier. A Slovak word does not
+        # contain digits, so this does not re-open the Cyrillic-name damage the test exists to
+        # prevent.
+        if has_latin or any(ch.isdigit() for ch in token):
             out.update(range(m.start(), m.end()))
     return out
 
@@ -424,7 +448,9 @@ def normalize(text: str, join_wrapped: bool = False) -> Normalized:
 
         # 4. HOMOGLYPH then COMPATIBILITY FOLD. The homoglyph map is 1:1; _compat may expand
         # one character into several, each of which maps back to this single original index.
-        base = _HOMOGLYPHS.get(ord(ch), ch) if i in foldable else ch
+        code = ord(ch)
+        base = _HOMOGLYPHS.get(code, ch) if i in foldable else ch
+        base = _HYPHENS.get(code, base)
         folded = _compat(base)
         for piece in folded:
             out.append(piece)
