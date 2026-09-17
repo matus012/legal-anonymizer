@@ -71,10 +71,33 @@ def _strip_tracked_changes(root) -> None:
     mutated tree — so content that was inserted-then-deleted (a w:del nested in a w:ins, or an
     ins nested in a del) resolves correctly with no dangling detached-parent inserts. Both lists
     are materialised (findall + list) so the tree is never mutated under a live iterator."""
+    # <w:moveFrom> FIRST, and it is a third revision pair the original implementation did not
+    # know about (red-team round 4, R4-M4a). Word records a MOVED clause as <w:moveFrom> at the
+    # old position -- holding the text in <w:delText>, exactly like a deletion -- and
+    # <w:moveTo> at the new one. A clause dragged from one article to another therefore kept
+    # its original text verbatim in document.xml: "Kupujúci: Mária Kováčová, rodné číslo
+    # 855612/7788", sitting in the file after being "moved away". Same failure the w:del branch
+    # exists to prevent, through a door nobody had opened.
+    for moved in list(root.findall(".//" + qn("w:moveFrom"))):
+        parent = moved.getparent()
+        if parent is not None:
+            parent.remove(moved)
+
     for dele in list(root.findall(".//" + qn("w:del"))):
         parent = dele.getparent()
         if parent is not None:
             parent.remove(dele)
+
+    # <w:moveTo> is the accepted half of a move -- its runs SURVIVE, like <w:ins> -- so it is
+    # promoted the same way and stays subject to the normal redaction passes.
+    for moved in list(root.findall(".//" + qn("w:moveTo"))):
+        parent = moved.getparent()
+        if parent is None:
+            continue
+        idx = parent.index(moved)
+        for offset, child in enumerate(list(moved)):
+            parent.insert(idx + offset, child)
+        parent.remove(moved)
 
     for ins in list(root.findall(".//" + qn("w:ins"))):
         parent = ins.getparent()
@@ -541,6 +564,71 @@ def _scrub_rel_targets(path: str, known_entities: list[str], config) -> int:
     return replaced
 
 
+# OPC parts that carry PII and that nothing used to touch (red-team round 4, R4-M1/M2/M3).
+# eval/extract.py already READS all three, so a leak here was gated -- it was simply never
+# scrubbed. Blanked BY POSITION, like docProps/core.xml: a template variable named ClientName
+# or a comment author's e-mail address is personal data whether or not it matches a detector
+# pattern, and the original value is never preserved.
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_W15 = "{http://schemas.microsoft.com/office/word/2012/wordml}"
+_CUSTOM_PROPS = "{http://schemas.openxmlformats.org/officeDocument/2006/custom-properties}"
+_VT = "{http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes}"
+
+
+def _scrub_extra_parts(path: str) -> int:
+    """Blank PII-bearing values in settings.xml, custom.xml and people.xml of a saved .docx.
+
+    Rewrites the package in place. Returns how many values were blanked. The PARTS are kept
+    rather than deleted: removing word/people.xml would dangle its relationship, and Word
+    reports a dangling relationship as a corrupt file.
+    """
+    with zipfile.ZipFile(path) as zin:
+        items = [(n, zin.read(n)) for n in zin.namelist()]
+
+    blanked = 0
+    rewritten = []
+    for name, data in items:
+        lowered = name.lower()
+        try:
+            if lowered == "word/settings.xml":
+                root = etree.fromstring(data)
+                for var in root.findall(".//" + _W + "docVar"):
+                    if var.get(_W + "val"):
+                        var.set(_W + "val", "")
+                        blanked += 1
+                data = etree.tostring(root, encoding="UTF-8", standalone=True)
+            elif lowered == "docprops/custom.xml":
+                root = etree.fromstring(data)
+                for prop in root.findall(_CUSTOM_PROPS + "property"):
+                    for value in list(prop):
+                        if value.tag.startswith(_VT) and (value.text or "").strip():
+                            value.text = ""
+                            blanked += 1
+                data = etree.tostring(root, encoding="UTF-8", standalone=True)
+            elif lowered == "word/people.xml":
+                root = etree.fromstring(data)
+                for person in root.findall(".//" + _W15 + "person"):
+                    if person.get(_W15 + "author"):
+                        person.set(_W15 + "author", "")
+                        blanked += 1
+                    for presence in person.findall(_W15 + "presenceInfo"):
+                        if presence.get(_W15 + "userId"):
+                            presence.set(_W15 + "userId", "")
+                            blanked += 1
+                data = etree.tostring(root, encoding="UTF-8", standalone=True)
+        except etree.XMLSyntaxError:
+            # A malformed part is left exactly as it was rather than crashing the redaction.
+            # It is still graded by the leak gate, so a leak here cannot pass unnoticed.
+            pass
+        rewritten.append((name, data))
+
+    if blanked:
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for name, data in rewritten:
+                zout.writestr(name, data)
+    return blanked
+
+
 def _drop_thumbnail(path: str) -> None:
     """Remove ``docProps/thumbnail.*`` and its relationship from a saved .docx.
 
@@ -661,6 +749,8 @@ def _redact_docx(
     _drop_thumbnail(out_path)
     # Hyperlink destinations live in .rels, which no paragraph pass can reach.
     _scrub_rel_targets(out_path, known_entities, config)
+    # settings.xml / custom.xml / people.xml: parts no paragraph pass reaches.
+    _scrub_extra_parts(out_path)
 
     # 7) W5b-2: emit the per-document report NEXT TO out_path (<stem>_report.txt), built from the
     #    LabelMap's capture side-channels (occurrences + low_confidence) the passes above filled.

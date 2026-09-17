@@ -523,9 +523,9 @@ def test_databound_content_control_store_is_scrubbed(tmp_path):
 
 
 # ========================================================= M: package parts nobody attacked
-@pytest.mark.xfail(reason="R4-M1: word/settings.xml <w:docVars> is copied through byte-for-"
-                          "byte; _scrub_metadata knows only core.xml, app.xml and comment "
-                          "authors", strict=True)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_settings_docvars_are_scrubbed(tmp_path):
     def patch(a, b):
         with zipfile.ZipFile(a) as z:
@@ -543,9 +543,9 @@ def test_settings_docvars_are_scrubbed(tmp_path):
     assert surfaces_with(out, "850101/1234") == []
 
 
-@pytest.mark.xfail(reason="R4-M2: docProps/custom.xml is a NAMED leak surface that the writer "
-                          "does not scrub — every legal DMS stamps client and matter there",
-                   strict=True)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_docprops_custom_properties_are_scrubbed(tmp_path):
     props = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties '
              'xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" '
@@ -569,9 +569,9 @@ def test_docprops_custom_properties_are_scrubbed(tmp_path):
     assert surfaces_with(out, "Ján Novák") == []
 
 
-@pytest.mark.xfail(reason="R4-M3: word/people.xml carries the comment authors' names and "
-                          "e-mail addresses; _scrub_metadata blanks w:comment/@w:author only",
-                   strict=True)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_people_xml_authors_are_scrubbed(tmp_path):
     people = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w15:people '
               'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" '
@@ -602,10 +602,9 @@ MOVE_DOC = (
     '<w:r><w:t xml:space="preserve">Kupujúci: Mária Kováčová</w:t></w:r></w:moveTo></w:p>')
 
 
-@pytest.mark.xfail(reason="R4-M4a: _strip_tracked_changes knows w:del and w:ins only, so a "
-                          "MOVED clause leaves its pre-move text physically in document.xml "
-                          "inside <w:delText> — the exact failure the w:del branch prevents",
-                   strict=True)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_movefrom_text_is_removed(tmp_path):
     out, _ = redact(tmp_path, "m4a", [MOVE_DOC], KNOWN)
     assert surfaces_with(out, "855612/7788") == []
