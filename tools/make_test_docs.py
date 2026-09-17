@@ -520,9 +520,9 @@ CELÝ súbor.
 - `900410/0006` (vymazaný text — sledovaná zmena; vymazaný text sa vo Worde stále dá zobraziť!)
 - `44000006` (vlastná vlastnosť dokumentu — nie je vidno v texte, len vo vlastnostiach súboru)
 
-POZNÁMKA: k dnešnému dňu (17.9.2026) niektoré z týchto miest môžu ešte uniknúť — opravy v
-zapisovači súborov (writer) sa dokončujú súbežne. Presný zoznam toho, čo ešte unikalo pri
-poslednom behu automatickej kontroly, je v `reports/` tejto session.
+POZNÁMKA: všetkých sedem miest vyššie bolo overených 17.9.2026 — pri automatickej kontrole
+neostal v exportovanom súbore ani jeden z nich. Ak niektorý z nich po vašom exporte v súbore
+nájdete, je to NOVÁ chyba a treba ju nahlásiť.
 
 ## 3. test_doc_3_tazke_tvary.docx — zložité jazykové tvary
 
@@ -546,11 +546,12 @@ a systémy kancelárií neúmyselne "rozbijú" číslo, hoci ho na obrazovke vid
 - `2019-7785` (číslo klienta za zalomeným riadkom)
 - `15.3.1985` (dátum narodenia)
 - rodné číslo `850315` + medzera + `0007` (s nezalomiteľnou medzerou)
+- `44000006` (IČO s neviditeľným mäkkým delením uprostred)
 
 POZNÁMKA: IČO `44000006` je v tomto dokumente zapísané s neviditeľným "mäkkým delením"
-uprostred (`4400­0006` — medzi 4 a 0 je znak, ktorý sa nedá vidieť ani vytlačiť). Toto je
-známa medzera v aktuálnej detekcii identifikátorov, NIE overená oprava — ak toto číslo po
-exporte ostane v súbore, nejde o novú chybu, je to očakávané a zapísané v správe session.
+uprostred — medzi štvrtou a piatou číslicou je znak, ktorý sa nedá vidieť ani vytlačiť. Toto
+číslo program NÁJDE a odstráni; overené meraním 17.9.2026. Patrí teda do zoznamu vyššie: ak po
+exporte v súbore ostane, je to chyba.
 
 ## Čo sa NEMÁ odstrániť (a je to správne, nie chyba)
 
