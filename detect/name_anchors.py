@@ -88,7 +88,21 @@ _CAP = rf"[{_UP}][{_LO}]+"
 # Two full regex sets are precompiled at import time -- STRICT (`_CAP`) and RELAXED
 # (`_CAP_CI`) -- and `_anchored` below picks the set once per unit.
 _CAP_CI = rf"(?i:[{_UP}][{_LO}]+)"
-_NAME_SEQ = rf"{_CAP}(?:{_SEP}{_CAP}){{0,2}}"
+
+# SURNAME-CAPS CONVENTION (mutation gate, surname_caps arm): continental legal drafting sets
+# a party's SURNAME in full capitals inside an otherwise mixed-case document -- "Ján NOVÁK",
+# "NOVÁK Ján", "JUDr. Mária KOVÁČOVÁ". This is a SEPARATE token class from `_CAP`, not a
+# relaxation of it, because it is admitted UNCONDITIONALLY (STRICT set, not gated behind
+# `document_is_single_case`/`_CAP_CI` the way the whole-document all-caps/all-lowercase
+# relaxation is): the document as a whole stays mixed-case here, so the CI relaxation's
+# precondition never fires, yet the convention still needs recognising. Widening `_CAP`
+# itself to accept caps would swallow real ALL-CAPS HEADINGS ("ZMLUVA", "ČLÁNOK I") into the
+# anchored title/role run; keeping it as a separate alternative and relying on `_trim_run`'s
+# stoplist (which matches after casefold, so "ZMLUVA"/"zmluva" hit the same stopword either
+# way) to cut the run at the first heading/legal-vocabulary token is what keeps that safe.
+_CAPS = rf"[{_UP}]{{2,}}"  # all-caps Slovak token, 2+ letters (the caps-SURNAME convention)
+_NAME_TOK = rf"(?:{_CAP}|{_CAPS})"
+_NAME_SEQ = rf"{_NAME_TOK}(?:{_SEP}{_NAME_TOK}){{0,2}}"
 _NAME_SEQ_CI = rf"{_CAP_CI}(?:{_SEP}{_CAP_CI}){{0,2}}"
 _TOKEN_RE = re.compile(rf"[^ {NBSP}]+")
 
@@ -250,7 +264,13 @@ _LABEL_RE = re.compile(
 
 
 # -------------------------------------------------------------- 4. BARE-NAME (review)
-_BARE_RE = re.compile(rf"{_CAP}(?:{_SEP}{_CAP}){{1,2}}")
+# Uses `_NAME_TOK` (STRICT + caps-SURNAME alternative) so "Ján NOVÁK" / "NOVÁK Ján" anchor
+# without a title or role nearby. But a run whose tokens are ALL caps is a HEADING ("KÚPNA
+# ZMLUVA", "ČLÁNOK I", "V MENE SLOVENSKEJ REPUBLIKY"), not a name in this convention -- the
+# convention is specifically MIXED: one Capitalized given-name token plus one all-caps
+# surname token. That all-caps rejection is applied in `_bare_names` below via
+# `str.isupper()`, not here, because the check needs the full matched text.
+_BARE_RE = re.compile(rf"{_NAME_TOK}(?:{_SEP}{_NAME_TOK}){{1,2}}")
 _SENTENCE_ENDERS = ".!?"
 
 
@@ -326,6 +346,15 @@ def _anchored(text: str) -> list[Candidate]:
 def _bare_names(text: str) -> list[Candidate]:
     out: list[Candidate] = []
     for m in _BARE_RE.finditer(text):
+        if m.group().isupper():
+            # Entirely caps = a heading ("KÚPNA ZMLUVA", "ČLÁNOK I", "V MENE SLOVENSKEJ
+            # REPUBLIKY"), not the caps-SURNAME convention -- that convention is always
+            # MIXED (a Capitalized token next to an all-caps one). `str.isupper()` is True
+            # iff every cased character in the string is uppercase AND at least one cased
+            # character exists, which is exactly "no lowercase signal anywhere in this
+            # run" -- verified against "Ján NOVÁK" (mixed, False), "NOVÁK Ján" (mixed,
+            # False) and "KÚPNA ZMLUVA" (all caps, True).
+            continue
         if _at_sentence_start(text, m.start()):
             continue
         if any(_is_stopword(t.group()) for t in _TOKEN_RE.finditer(m.group())):

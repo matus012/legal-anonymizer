@@ -359,3 +359,18 @@ def test_module_does_not_import_corpus_or_eval():
     src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
     assert "import corpus" not in src and "from corpus" not in src
     assert "import eval" not in src and "from eval" not in src
+
+
+# ======================================================== CASE RELAXATION REGRESSION PIN
+# `_anchored` picks the CASE-INSENSITIVE regex set only when `document_is_single_case` says
+# the WHOLE unit has no capitalisation signal left to lose (see the CASE comment above
+# `_anchored`). This pin locks that this still works after the surname-caps convention was
+# added to the STRICT set (`_NAME_SEQ`): a genuinely all-caps party block still relies on the
+# RELAXED set + `_trim_run`'s stoplist to stop the role-anchored run at the address label,
+# rather than swallowing "TRVALE BYTOM" into the person's name.
+def test_role_all_caps_document_stops_at_address_anchor():
+    text = "PREDÁVAJÚCI NOVÁK JÁN TRVALE BYTOM KOŠICE, PSČ 040 01."
+    cands = detect_name_anchors(text, DEFAULT)
+    menos = [c for c in cands if c.type == "MENO"]
+    assert any(c.surface == "NOVÁK JÁN" for c in menos), menos
+    assert not any("TRVALE" in c.surface for c in cands), cands

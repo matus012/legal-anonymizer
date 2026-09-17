@@ -227,11 +227,13 @@ def test_control_role_anchored_slovak_name_is_fully_covered() -> None:
     assert _auto_covers("Zmluvné strany: predávajúci Ján Kováč, bytom Košice.", "Ján Kováč")
 
 
-@pytest.mark.xfail(
-    reason="R3-A5: _CAP is [A-Z…][a-z…]+ and document_is_single_case is False for a "
-           "mixed-case unit, so an ALL-CAPS surname next to a role anchor is not taken",
-    strict=True,
-)
+# FIXED 2026-09-17 (mutation gate surname_caps arm): detect/name_anchors.py now has a
+# separate `_CAPS` token class (an all-caps Slovak surname next to a role/title anchor is
+# the continental legal convention, not a relaxation of `_CAP`) included in the STRICT
+# `_NAME_SEQ`, so this no longer depends on `document_is_single_case`. The marker is gone
+# rather than flipped to xpass: a finding that has been fixed must become an ordinary
+# regression test, or a later regression puts it back to "xfail" -- the state this file
+# calls normal -- and nobody notices the fix was undone.
 def test_r3_a5_uppercase_surname_in_a_mixed_case_document() -> None:
     assert _auto_covers(
         "Zmluvné strany: predávajúci Hartmut SCHNEIDER, bytom Viedeň.", "Hartmut SCHNEIDER"

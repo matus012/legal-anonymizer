@@ -381,6 +381,22 @@ def _capitalized(core: str, *, relaxed: bool = False) -> bool:
         return False
     if relaxed:
         return core.isalpha()
+    # SURNAME-CAPS CONVENTION (mutation gate, surname_caps arm): the continental legal
+    # convention sets a surname (and, in a heading/party block, a place) in full capitals
+    # inside an otherwise mixed-case document -- "Ján NOVÁK", "bytom KOŠICE". Such a token
+    # is admitted unconditionally (not gated behind `relaxed`/`document_is_single_case`,
+    # because the document as a WHOLE stays mixed-case here -- only this one token is
+    # caps) as long as it is a whole alphabetic word.
+    #
+    # This does NOT weaken the Amendment-6 guard below: that guard exists to keep a
+    # LOWERCASE common word (an ordinary sentence token with no capital at all) out of the
+    # gazetteer walk, and an all-caps token is definitionally not a lowercase common word.
+    # The stoplists (`_SURNAME_COMMON_WORDS`, the place stoplist) are applied downstream via
+    # `stem()`, which casefolds before comparing, so "NOVÁK"/"Novák"/"novák" all stem
+    # identically and the stoplists keep rejecting the same surnames/places unchanged
+    # whether or not the token arrived in caps.
+    if core.isupper() and core.isalpha():
+        return True
     return core[:1].isupper() and any(ch.islower() for ch in core[1:])
 
 
