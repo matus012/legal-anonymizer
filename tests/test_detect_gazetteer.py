@@ -160,7 +160,20 @@ def test_adjectival_form_from_the_same_stem_does_not_match() -> None:
     # detect/declension.py is what makes this hold. This module reaches the stemmer through
     # the surname index, so it DOES exercise the discriminator path.
     text = "Bývala na Kováčskej ulici v meste."
-    assert [c for c in detect_gazetteer(text, DEFAULT) if c.surface == "Kováčskej"] == []
+    # NARROWED to MENO, 2026-09-17, and the invariant it guards is UNCHANGED: the assertion
+    # below still fails the moment stem("Kováčskej") collapses onto stem("Kováč").
+    #
+    # It used to assert that NO candidate of any type covered this surface, which held only
+    # because ULICA could not match a declined street name. It can now, and "Kováčska" IS a
+    # real street in the Register adries — so "na Kováčskej ulici" genuinely is a street
+    # reference and ULICA is the right answer. Verified before changing this: the stems still
+    # differ (kovačskej vs kovač) and the surname index produces nothing here.
+    #
+    # The discriminator this test exists for is about the SURNAME, so that is what it asserts.
+    assert [c for c in detect_gazetteer(text, DEFAULT)
+            if c.surface == "Kováčskej" and c.type == "MENO"] == []
+    from detect.declension import stem as _stem
+    assert _stem("Kováčskej") != _stem("Kováč"), "the nominal/adjectival stems collapsed"
 
 
 # ------------------------------------------------------ data loading / the silent-zero trap

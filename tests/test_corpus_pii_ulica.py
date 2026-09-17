@@ -120,20 +120,35 @@ def test_bare_street_with_no_anchor_is_not_detected():
 
 
 # --------------------------------------------------------------------------- the hard case
-def test_declined_form_is_the_documented_miss():
-    """``make_ulica_declined`` is DELIBERATELY seeded even though today's detector misses it
-    (task instruction: report the miss, don't omit the fixture). This test pins that fact so
-    a future fix to the declension engine's suffix inventory is NOTICED here (this test would
-    start failing) rather than the gap silently persisting forever. See the module docstring
-    of corpus/pii/ulica.py and detect/declension.py for why: the closed suffix inventory
-    excludes the plain adjectival "-ej" ending, so stem("Hlavnej") != stem("Hlavná")."""
+def test_declined_form_is_now_DETECTED():
+    """This test was written to FAIL the day the gap closed, and that is what happened.
+
+    It used to assert the opposite -- that ``make_ulica_declined`` is deliberately seeded even
+    though the detector misses it -- with the note that "a future fix to the declension engine's
+    suffix inventory is NOTICED here rather than the gap silently persisting forever". It did
+    its job, so it is inverted rather than deleted: the same fixture now pins the FIX.
+
+    The fix is NOT in the declension engine's suffix inventory, which is what the old note
+    expected. That inventory still excludes the plain adjectival "-ej" on purpose -- the
+    exclusion is what keeps a possessive form of a SURNAME ("Kováčovej", which IS the person)
+    apart from an adjective derived from it. Widening it would have broken names to fix
+    streets. Instead ``detect/gazetteer.py`` GENERATES the declined forms of the street names
+    it already knows and indexes those, so nothing about the stemmer changed.
+    """
     placed, spec = ulica.make_ulica_declined(random.Random(0))
     assert spec.surface == "Hlavnej"
     cands = detect(placed)
-    assert not any(c.type == "ULICA" for c in cands), cands
-    # confirms it is a genuine PII miss recorded anyway (contract §7's three-state decision;
-    # the "seed it and let the gate record the miss" instruction) rather than a fixture bug.
-    assert spec.auto_redact is True
+    assert any(c.type == "ULICA" and c.surface == spec.surface for c in cands), cands
+
+
+def test_the_surname_stemmer_was_not_widened_to_achieve_it():
+    """The constraint the fix had to respect. If these two stems ever collapse, the street fix
+    has been paid for with the surname/adjective discriminator -- which is the one thing
+    detect/declension.py's closed suffix inventory exists to protect."""
+    from detect.declension import stem
+
+    assert stem("Kováčovej") == stem("Kováč"), "a possessive surname form must still match"
+    assert stem("Kováčskej") != stem("Kováč"), "an adjective from the surname must NOT match"
 
 
 def test_declined_form_surface_is_gradeable_length():

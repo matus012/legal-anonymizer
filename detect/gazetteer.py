@@ -260,6 +260,14 @@ _HOUSENUM_AFTER_RE = re.compile(rf"^{_SEP}+\d{{1,4}}(?:/[A-Za-z0-9]{{1,3}})?(?!\
 # unambiguous address context even after an ordinary-word place name.
 _PSC_AFTER_RE = re.compile(rf"^,?{_SEP}*(?:\d{{3}}{_SEP}\d{{2}}|\d{{5}})(?!\d)")
 
+# The same keywords INFLECTED and FOLLOWING the name: "na Hlavnej ULICI", "na Štúrovom
+# NÁMESTÍ". Matched on the ascii-folded text, so the accents in "námestí" need no alternatives.
+# Bounded by a fixed window and anchored at the start of the text AFTER the name, so it cannot
+# reach past the words immediately following it.
+_STREET_KEYWORD_AFTER_RE = re.compile(
+    rf"^{_SEP_ANCHOR}+(?:ulic[aeiuoy]|namest[ie][a-z]?|tried[aeuoy]|cest[aeuoy])\b"
+)
+
 _ANCHOR_WINDOW = 25
 
 
@@ -300,6 +308,12 @@ def _street_anchored(text: str, start: int, end: int, *, stoplisted: bool = Fals
     applies only to the 79 hand-listed collision words, and only to the weaker of the two
     anchors. "ul. Strana 3" still matches."""
     keyword = _STREET_KEYWORD_RE.search(ascii_fold(text[max(0, start - _ANCHOR_WINDOW) : start]))
+    # ... or an INFLECTED keyword AFTER the name. "na Hlavnej ulici" is how an address reads
+    # when the street name is declined, and it puts the keyword on the other side and in the
+    # locative ("ulici", not "ulica"). Looking only backwards made the declined form
+    # unreachable -- the two halves of this only work together.
+    if not keyword:
+        keyword = _STREET_KEYWORD_AFTER_RE.match(ascii_fold(text[end : end + _ANCHOR_WINDOW]))
     if stoplisted:
         return bool(keyword)
     return bool(keyword or _HOUSENUM_AFTER_RE.match(text[end:]))
@@ -465,6 +479,75 @@ def _place_candidate(text: str, type_: str, start: int, end: int) -> Candidate:
 
 
 # --------------------------------------------------------------------------- street walk
+# --------------------------------------------------------------------- ULICA declension
+# Slovak adjectival endings, by the nominative ending of the head word. Streets are adjectives
+# far more often than nouns -- Hlavná, Krátka, Školská, Dlhý, Štúrova -- and an address puts
+# them in the locative or genitive: "na Hlavnej ulici", "z Krátkej", "na Štúrovej".
+#
+# GENERATED, not stripped. detect/declension.py's suffix inventory excludes the plain
+# adjectival -ej on purpose: that exclusion is the discriminator between a possessive form of
+# a SURNAME ("Kovacovej", which IS the person) and an adjective derived from it ("Kovacskej",
+# which is not). Widening the shared stemmer for streets would break names, so instead the
+# street index gains the inflected forms and the stemmer is left exactly as it was.
+_ADJ_FORMS = {
+    # Feminine, BOTH endings. Slovak rhythmic shortening shortens the adjective ending after a
+    # long stem syllable -- "hlavná" keeps -á, "krátka" shortens to -a -- and on the register
+    # the short form is the MAJORITY: 4 708 head words end in -a against 2 324 in -á.
+    "a": ("ej", "u", "ou", "e", "ych", "ymi"),      # feminine short: Krátka -> Krátkej ...
+    "á": ("ej", "ú", "ou", "e", "ych", "ymi"),      # feminine long:  Hlavná -> Hlavnej ...
+    "ý": ("eho", "emu", "om", "ym", "e", "ych"),    # masculine: Dlhý -> Dlhého / Dlhom ...
+    "é": ("eho", "emu", "om", "ym"),                # neuter:   Dlhé -> Dlhého ...
+}
+# Possessive streets (Štúrova, Hviezdoslavova, Kollárova) end in -ova/-ina and decline like a
+# feminine adjective. Restricted to those two suffixes: a street that is a NOUN ending in -a
+# ("Lipa") declines differently, and generating adjectival forms for it would index words that
+# are not the street.
+_POSSESSIVE_SUFFIXES = ("ova", "ina")
+_POSSESSIVE_FORMS = ("ovej", "ovu", "ovou", "inej", "inu", "inou")
+
+
+def _declined_variants(name: str) -> list[str]:
+    """Every inflected spelling of ``name``'s head word. Nominative is NOT included -- it is
+    already indexed by the ordinary path."""
+    head = name.split()[-1] if name.split() else name
+    if len(head) < 4:
+        return []
+    lowered = head.lower()
+    out: list[str] = []
+    for suffix in _POSSESSIVE_SUFFIXES:
+        if lowered.endswith(suffix):
+            base = head[: -len(suffix)]
+            out.extend(base + form for form in _POSSESSIVE_FORMS
+                       if form.startswith(suffix[:2]))
+            break
+    else:
+        endings = _ADJ_FORMS.get(head[-1])
+        if endings:
+            out.extend(head[:-1] + ending for ending in endings)
+    prefix = name[: len(name) - len(head)]
+    return [prefix + variant for variant in out]
+
+
+@functools.lru_cache(maxsize=None)
+def _street_declined_index() -> tuple[dict[str, str], dict[str, str]]:
+    """(stem -> canonical, ascii-stem -> canonical) for the DECLINED forms of every street.
+
+    Single-head-word entries only. A multi-word register entry ("Ulica Štúrova") already
+    matches through the multi-word path on its own tokens, and its head word is covered here.
+    """
+    by_stem: dict[str, str] = {}
+    by_stem_ascii: dict[str, str] = {}
+    for name in _load_names(_ULICE):
+        for variant in _declined_variants(name):
+            words = variant.split()
+            if not words:
+                continue
+            head = words[-1]
+            by_stem.setdefault(stem(head), name)
+            by_stem_ascii.setdefault(stem(ascii_fold(head)), name)
+    return by_stem, by_stem_ascii
+
+
 def _street_hits(
     text: str,
     toks: list[tuple[str, int, int]],
@@ -494,7 +577,8 @@ def _street_hits(
             # it here, so it is dropped — and the walk does NOT skip its tokens: the inner
             # name may still be anchored on its own ("bydlisko Ulica Štúrova" anchors
             # "Štúrova" on the keyword "Ulica").
-        if s in single or s_a in single_a:
+        declined, declined_a = _street_declined_index()
+        if s in single or s_a in single_a or s in declined or s_a in declined_a:
             stoplisted = s in _stoplist_stems() or s_a in _stoplist_stems_ascii()
             if _street_anchored(text, start, end, stoplisted=stoplisted):
                 out.append(Candidate("ULICA", text[start:end], start, end, True, "n/a"))
