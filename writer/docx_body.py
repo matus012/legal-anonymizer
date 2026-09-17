@@ -32,6 +32,7 @@ is never preserved (see _scrub_metadata).
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import unicodedata
 import urllib.parse
@@ -49,7 +50,7 @@ from lxml import etree
 from detect.config import DetectConfig
 from detect.core import detect_with_failures
 from writer.decisions import RedactionDecisions
-from writer.errors import UnreadableDocumentError
+from writer.errors import EmbeddedSubDocumentError, UnreadableDocumentError
 from writer.labelmap import LabelMap, make_snippet
 from writer.report import write_report
 
@@ -548,6 +549,57 @@ def _document_trees(doc) -> list[_Tree]:
         trees.append(_open_tree(rel.target_part, location))
 
     return trees
+
+
+# ---------------------------------------------------------------- w:altChunk (R5-02)
+# An altChunk is a placeholder for a whole EXTERNAL DOCUMENT stored as its own package part,
+# which Word splices onto the page on open. Nothing in this writer can read it: the paragraph
+# walk looks for w:p and an altChunk contains none, only a relationship id. See
+# writer/errors.py::EmbeddedSubDocumentError for why the answer is a refusal rather than a
+# best-effort redaction or a silent deletion of the part.
+_ALT_CHUNK = qn("w:altChunk")
+_AFCHUNK_RELTYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk"
+)
+
+
+def _alt_chunk_parts(path: str, trees: list[_Tree]) -> list[str]:
+    """Every embedded sub-document in this package, named by part, in package order.
+
+    Both planes are checked, because either one alone misses a real case:
+
+    * the PACKAGE plane -- every ``.rels`` part in the zip, for a relationship of type
+      ``aFChunk``. This is what actually carries the bytes, and it finds a chunk referenced
+      from a header, the glossary or a part this writer does not enumerate, plus an orphan
+      chunk part left behind by an editor (still text shipping in the output);
+    * the DOCUMENT plane -- a ``w:altChunk`` element in any tree, which catches one whose
+      relationship is missing or malformed. There is no content to redact in that case, but
+      the document is still one this writer provably cannot process.
+    """
+    parts: list[str] = []
+    with zipfile.ZipFile(path) as zin:
+        for name in zin.namelist():
+            if not name.endswith(".rels"):
+                continue
+            base = posixpath.dirname(posixpath.dirname(name))
+            try:
+                rels_root = etree.fromstring(zin.read(name))
+            except etree.XMLSyntaxError as exc:
+                # A .rels python-docx never had to follow (an orphan) can still be malformed,
+                # and skipping it would mean not knowing whether it names an altChunk. R4-X3's
+                # contract is that such a file is refused BY NAME, not raised as an lxml message.
+                raise UnreadableDocumentError(path, f"{name}: {exc}") from exc
+            for el in rels_root:
+                if el.get("Type") != _AFCHUNK_RELTYPE:
+                    continue
+                target = el.get("Target", "")
+                parts.append(
+                    target.lstrip("/") if target.startswith("/")
+                    else posixpath.normpath(posixpath.join(base, target))
+                )
+    if not parts and any(t.element.find(f".//{_ALT_CHUNK}") is not None for t in trees):
+        parts.append("<w:altChunk with no resolvable relationship>")
+    return parts
 
 
 _APP_XML_PII_TAGS = ("Company", "Manager")
@@ -1169,6 +1221,14 @@ def _redact_docx(
     # below. See _document_trees: the passes used to enumerate this for themselves, four times,
     # and each of the four knew a different subset (R5-01 / R5-03 / R5-04).
     trees = _document_trees(doc)
+
+    # 0-) R5-02: an embedded sub-document (w:altChunk) is refused BEFORE anything is written, so
+    #     the refusal's "nothing was written" is true by construction rather than by cleanup.
+    #     Every altChunk, not only the ones that look like they carry PII -- see
+    #     EmbeddedSubDocumentError for the argument.
+    alt_chunks = _alt_chunk_parts(in_path, trees)
+    if alt_chunks:
+        raise EmbeddedSubDocumentError(in_path, alt_chunks)
 
     # 0) W4a: accept ALL tracked revisions FIRST, before any _redact_paragraph call. Deleted
     #    text is then physically gone (it must never reach detect() as a redaction candidate);

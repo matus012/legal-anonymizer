@@ -42,7 +42,7 @@ from eval.extract import extract
 from eval.leak import Leak
 from eval.leak_gate import split_found_in
 from writer.docx_body import _scrub_field_instruction, redact_docx_collect
-from writer.errors import UnreadableDocumentError
+from writer.errors import EmbeddedSubDocumentError, UnreadableDocumentError
 
 # --------------------------------------------------------------------------------- OOXML kit
 NS = (
@@ -233,45 +233,117 @@ def _patch_altchunk(src, dst):
     )
 
 
-def _altchunk_fixture(tmp_path):
-    return redact(tmp_path, "r5_02",
-                  ['<w:p><w:r><w:t>Predavajuci: Ján Novák.</w:t></w:r></w:p>',
-                   '<w:altChunk r:id="rIdAC"/>'], patch=_patch_altchunk)
+_AC_BODY = ['<w:p><w:r><w:t>Predavajuci: Ján Novák.</w:t></w:r></w:p>',
+            '<w:altChunk r:id="rIdAC"/>']
 
 
-def test_control_r5_02_body_beside_the_chunk_is_redacted(tmp_path):
-    """CONTRAST CONTROL for R5-02: the ordinary paragraph in the same document is redacted, so
-    the chunk's survival is about the part nobody opens."""
-    out, lm = _altchunk_fixture(tmp_path)
+def _altchunk_source(tmp_path, name="r5_02"):
+    """The SOURCE package: an ordinary body paragraph plus an altChunk pointing at an .mht.
+
+    The fixture is built and checked here rather than through ``redact()`` because the writer
+    now REFUSES this document (see below), so there is no output to assert about. Everything
+    ``redact()`` guarantees about a source is still asserted: it re-opens through python-docx
+    and every XML/rels part in it parses.
+    """
+    src = doc_with_body(_AC_BODY, Path(tmp_path) / f"{name}.docx")
+    src = _patch_altchunk(src, str(Path(tmp_path) / f"{name}_p.docx"))
+    assert reopens(src), "fixture control: the SOURCE package must be well-formed"
+    return src
+
+
+# FIXED 2026-09-17, second run. THE CONTRACT CHANGED, so these two controls changed with it.
+# R5-02 was written expecting the chunk to be REDACTED, and both controls were phrased against
+# an OUTPUT file. The fix is a REFUSAL (writer/errors.py::EmbeddedSubDocumentError): an altChunk
+# is not WordprocessingML, this writer cannot rewrite it, and silently deleting a merged-in
+# annex is document damage the reviewer cannot see. There is therefore no output package to
+# inspect, and a control that asserts one would assert the bug back into existence.
+#
+# Each control keeps its ORIGINAL PURPOSE, restated against what now exists:
+#   * the contrast control still proves the refusal is attributable to the chunk and not to the
+#     body -- by showing the same body, with the altChunk removed, is redacted normally;
+#   * the reachability control still proves the needle is visible to the extractor, and now
+#     pins the surface it must be visible ON, which is the whole of the R5-02b half.
+def test_control_r5_02_the_same_body_without_a_chunk_is_redacted(tmp_path):
+    """CONTRAST CONTROL for R5-02: the identical body paragraph in a document with NO altChunk
+    goes through the writer untouched by the refusal, so the refusal is about the chunk."""
+    out, lm = redact(tmp_path, "r5_02_ctl", _AC_BODY[:1])
     assert surfaces_with(out, "Ján Novák") == []
     assert lm.occurrences["[MENO_1]"] == [("body", "Ján Novák")]
 
 
-def test_control_r5_02_the_chunk_part_survives_the_rewrite_and_is_reachable(tmp_path):
-    """REACHABILITY CONTROL for R5-02: the chunk part is still in the output package and the
-    extractor does see its text (on `binary_parts`), so this is a leak and not a blind spot."""
-    out, _ = _altchunk_fixture(tmp_path)
-    with zipfile.ZipFile(out) as z:
+def test_control_r5_02_the_chunk_part_is_reachable_and_is_not_an_opaque_surface(tmp_path):
+    """REACHABILITY CONTROL for R5-02: the extractor sees the chunk's text, and sees it on
+    `alt_chunk_parts` -- a TEXT surface -- not on `binary_parts`, which the leak gate discounts
+    short needles on. Before the R5-02 extractor fix this read `["binary_parts"]`."""
+    src = _altchunk_source(tmp_path, "r5_02_reach")
+    with zipfile.ZipFile(src) as z:
         assert "word/afchunk.mht" in z.namelist()
-    assert surfaces_with(out, "Mária Kováčová") == ["binary_parts"]
+    assert surfaces_with(src, "Mária Kováčová") == ["alt_chunk_parts"]
 
 
-@pytest.mark.xfail(strict=True, reason="R5-02: nothing opens a w:altChunk part, so an entire "
-                                       "embedded sub-document that Word merges into the page "
-                                       "on open ships unredacted")
-def test_r5_02_altchunk_content_is_redacted(tmp_path):
-    out, _ = _altchunk_fixture(tmp_path)
+# FIXED 2026-09-17, second run — as a REFUSAL, which is what the finding itself recommended and
+# is the shape test_r5_10 already contracts for ("redacted or refused by name"). The marker is
+# gone rather than flipped to xpass, for the reason the other fixed findings in this file give.
+def test_r5_02_altchunk_content_is_redacted_or_the_document_is_refused_by_name(tmp_path):
+    src = _altchunk_source(tmp_path, "r5_02_fix")
+    out = str(Path(tmp_path) / "r5_02_fix_r.docx")
+    try:
+        redact_docx_collect(src, out, list(KNOWN))
+    except EmbeddedSubDocumentError as exc:
+        # The message promises nothing was written. That has to be TRUE on disk, and it has to
+        # say what an altChunk is in terms the reviewer can act on.
+        assert not os.path.exists(out), "refused, but a partial output was left on disk"
+        assert "word/afchunk.mht" in str(exc)
+        assert "embedded sub-document" in str(exc)
+        assert isinstance(exc, UnreadableDocumentError), "every caller that refuses an " \
+            "unreadable document must refuse this one unchanged"
+        return
     chunk = part(out, "word/afchunk.mht")
     survivors = [n for n in ("Mária Kováčová", "855612/7788", "04001") if n in chunk]
     assert survivors == [], f"embedded altChunk document shipped unredacted: {survivors}"
 
 
-@pytest.mark.xfail(strict=True, reason="R5-02b: a needle shorter than the attributability "
-                                       "minimum leaks on `binary_parts` and the leak gate "
-                                       "scores the document CLEAN")
+def test_r5_02_an_ordinary_document_is_not_refused_as_an_embedded_sub_document(tmp_path):
+    """FALSE-REFUSAL CONTROL. A guard that fires on ordinary work is a guard the office turns
+    off. Nothing without an aFChunk relationship may reach the refusal."""
+    out, _ = redact(tmp_path, "r5_02_false", _AC_BODY[:1])
+    assert os.path.exists(out)
+
+
+def test_r5_02_a_nested_docx_altchunk_is_readable_and_refused(tmp_path):
+    """The OTHER altChunk flavour, and a worse one for the gate: a whole nested .docx. Its
+    document.xml is DEFLATED inside the inner ZIP inside the outer ZIP, so no decoding of the
+    outer bytes could see a word of it — on `binary_parts` it was not merely discounted, it was
+    INVISIBLE at any needle length. It must now read as text, and be refused."""
+    inner = doc_with_body([], tmp_path / "inner.docx")
+    d = Document(inner)
+    d.add_paragraph("Kupujuci: Maria Kovacova, PSC 04001, kod banky 1100.")
+    d.save(inner)
+    src = doc_with_body(['<w:p><w:r><w:t>Telo.</w:t></w:r></w:p>', '<w:altChunk r:id="rIdAC"/>'],
+                        tmp_path / "outer.docx")
+    src = patch_package(
+        src, str(tmp_path / "outer_p.docx"),
+        add={"word/afchunk.docx": Path(inner).read_bytes()},
+        content_types=['<Default Extension="docx" ContentType="application/vnd.openxmlformats-'
+                       'officedocument.wordprocessingml.document"/>'],
+        doc_rels=[relationship("rIdAC", "aFChunk", "afchunk.docx")],
+    )
+    assert reopens(src)
+    assert surfaces_with(src, "04001") == ["alt_chunk_parts"]
+    assert surfaces_with(src, "Maria Kovacova") == ["alt_chunk_parts"]
+    out = str(tmp_path / "outer_r.docx")
+    with pytest.raises(EmbeddedSubDocumentError):
+        redact_docx_collect(src, out, ["Maria Kovacova"])
+    assert not os.path.exists(out)
+
+
+# FIXED 2026-09-17, second run (R5-02b, the extractor half). Graded on the SOURCE package: the
+# writer now refuses to emit a package containing an altChunk, so the source is the only place
+# an altChunk can be graded -- and grading it is exactly the point, because it is what would
+# catch a regression that dropped the refusal.
 def test_r5_02_the_leak_gate_grades_a_short_needle_in_an_altchunk(tmp_path):
-    out, _ = _altchunk_fixture(tmp_path)
-    res = extract(out)
+    src = _altchunk_source(tmp_path, "r5_02_gate")
+    res = extract(src)
     ungraded = []
     for needle, ptype in (("04001", "PSC"), ("1100", "KOD_BANKY")):
         found = tuple(s for s, t in res.by_surface.items() if needle in t)

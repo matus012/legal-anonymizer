@@ -52,3 +52,56 @@ class PasswordProtectedError(UnreadableDocumentError):
 
     def __init__(self, path: str) -> None:
         super().__init__(path, "encrypted / password-protected")
+
+
+class EmbeddedSubDocumentError(UnreadableDocumentError):
+    """The .docx merges in a whole second document through ``<w:altChunk>``.
+
+    A SUBCLASS, for the same reason as PasswordProtectedError: every caller that already
+    refuses an unreadable document refuses this one unchanged, and the distinct type exists so
+    the GUI can name the remedy, which is specific and within the lawyer's reach.
+
+    WHAT AN ALTCHUNK IS. ``<w:altChunk r:id="..."/>`` is not content — it is a placeholder for
+    an ENTIRE EXTERNAL DOCUMENT stored as its own part in the package (typically HTML, an
+    ``.mht`` bundle, plain text, or a nested ``.docx``). Word parses that part and splices its
+    content onto the page when the file is opened. It is how Word stores pasted HTML, how
+    ``Insert > Object > Text from File`` stores an inserted file on several code paths, and
+    what essentially every HTML-to-DOCX pipeline, mail-merge engine and DMS export emits.
+
+    WHY A REFUSAL AND NOT A REDACTION (red-team round 5, R5-02). The part is not WordprocessingML
+    and no pass in this writer can read it: the paragraph walk looks for ``w:p`` and an altChunk
+    contains none, only a relationship id. Before this refusal existed the sub-document shipped
+    BYTE-FOR-BYTE UNREDACTED while the report said the document was redacted -- the one failure
+    mode this project treats as unacceptable, because the reviewer reads the report, not the ZIP.
+
+    WHY NOT JUST DELETE THE PART. Dropping the element and its part would silently remove a
+    merged-in annex from a filing, and the reviewer cannot see what is no longer there. This
+    project refuses rather than half-redacts (see UnreadableTextLayerError,
+    ShreddedTextLayerError and MojibakeTextLayerError in writer/pdf_body.py).
+
+    WHY EVERY ALTCHUNK AND NOT ONLY THE ONES THAT LOOK LIKE THEY CARRY PII. "No PII was detected
+    in a part we cannot properly parse" is precisely the reasoning that produced the
+    undecodable-text and shredded-text leaks: a detector that never ran cleanly cannot license a
+    clean verdict. Running detect() over bytes the writer has no way to rewrite would also buy
+    nothing -- a hit could not be redacted either way.
+
+    Carries ``parts`` (the package part names, in package order) so the message can name them.
+    """
+
+    def __init__(self, path: str, parts: list[str]) -> None:
+        self.parts = list(parts)
+        self.path = path
+        self.detail = "w:altChunk -> " + ", ".join(self.parts)
+        # Not super().__init__: the parent's sentence is about a damaged file, and this file is
+        # not damaged. It is intact, readable by Word, and carries content this tool cannot
+        # reach -- which needs its own sentence.
+        Exception.__init__(
+            self,
+            f"document contains {len(self.parts)} embedded sub-document(s) that this tool "
+            f"cannot redact, nothing was written: {path}. Word merges the content of "
+            f"{', '.join(self.parts)} onto the page when the document is opened (it is stored "
+            f"as a separate file inside the .docx, typically pasted HTML or an inserted file), "
+            f"and this tool cannot read it, so it would have shipped unredacted. Remedy: open "
+            f"the document in Word and re-save it as .docx (File > Save As) -- Word writes the "
+            f"merged content out as ordinary document text -- then run the tool again."
+        )

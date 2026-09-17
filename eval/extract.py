@@ -41,6 +41,12 @@ DOCX
     UTF-16LE), plus image EXIF/XMP. Part NAMES are included so a picture-only surface such as
     ``docProps/thumbnail.jpeg`` at least shows up in a report (its pixels cannot be read —
     see the KNOWN BLIND SPOTS section of ``redteam/FINDINGS.md``).
+  * **altChunk sub-documents** (``alt_chunk_parts``, red-team round 5, R5-02) — a
+    ``<w:altChunk>`` part is a whole external document (HTML/``.mht``/text/nested ``.docx``)
+    that Word splices onto the page on open. It has no ``.xml`` extension, so it used to be
+    swept as a binary part, i.e. as an OPAQUE surface the leak gate discounts short needles on
+    — which made a five-digit PSČ and a four-digit bank code in RENDERED DOCUMENT TEXT score
+    CLEAN. It now has its own TEXT surface, graded with no discount.
 
 PDF
   * **text hidden from ``get_text()``** — MuPDF's structured-text device clips to the
@@ -71,6 +77,8 @@ existing keys only ever gained text.
 """
 from __future__ import annotations
 
+import io
+import posixpath
 import re
 import zipfile
 import zlib
@@ -96,6 +104,7 @@ S_XML_ATTRS = "xml_attributes"      # attribute values of EVERY xml/rels part in
 S_OTHER_XML = "other_xml_parts"     # text of every xml part no named surface covers
 S_RELS = "rels_targets"             # relationship Target values (hyperlinks, templates, ...)
 S_BINARY_PARTS = "binary_parts"     # embeddings/media: part names + decoded strings
+S_ALT_CHUNKS = "alt_chunk_parts"    # w:altChunk sub-documents — TEXT Word renders on the page
 # PDF
 S_TEXT_LAYER = "text_layer"
 S_ANNOTATIONS = "annotations"
@@ -246,6 +255,59 @@ def _is_named_part(name: str) -> bool:
     return name in _DOCX_NAMED_PARTS or bool(_DOCX_HEADER_FOOTER_RE.search(name))
 
 
+# ---------------------------------------------------------------- w:altChunk (R5-02)
+# The surface classification above is BY FILE EXTENSION: anything that is not .xml/.rels is
+# swept as ``binary_parts``, which the leak gate treats as OPAQUE — a surface whose premise is
+# that it cannot hold document text, so a short needle in it is discounted as structural noise
+# (font tables, xref offsets). An altChunk part is the counter-example that breaks the premise:
+# it is a whole external document (HTML, .mht, plain text, or a nested .docx) that Word splices
+# ONTO THE PAGE when the file is opened, and it is stored as ``word/afchunk.mht`` — no .xml
+# extension, therefore opaque, therefore ``04001`` (a Slovak PSČ) and ``1100`` (a bank code)
+# leaked there while the gate scored the document CLEAN.
+#
+# These parts are identified by RELATIONSHIP TYPE, not by extension. Extension is what got this
+# wrong in the first place, the reltype is what Word itself keys on, and it reclassifies exactly
+# the altChunk parts rather than every ``.txt`` that happens to be in a package.
+_AFCHUNK_RELTYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk"
+)
+
+
+def _alt_chunk_names(z: zipfile.ZipFile) -> set[str]:
+    """Package part names reached by an ``aFChunk`` relationship from any ``.rels`` part."""
+    out: set[str] = set()
+    for name in z.namelist():
+        if not name.endswith(".rels"):
+            continue
+        try:
+            root = etree.fromstring(z.read(name))
+        except etree.XMLSyntaxError:
+            continue  # the bytes are still swept by the xml_parts pass below
+        base = posixpath.dirname(posixpath.dirname(name))
+        for el in root:
+            if el.get("Type") != _AFCHUNK_RELTYPE:
+                continue
+            target = el.get("Target", "")
+            out.add(target.lstrip("/") if target.startswith("/")
+                    else posixpath.normpath(posixpath.join(base, target)))
+    return out
+
+
+def _alt_chunk_text(data: bytes) -> str:
+    """The readable text of one altChunk part, in every plausible encoding.
+
+    A nested ``.docx`` chunk is a ZIP, so its ``document.xml`` is DEFLATED and no decoding of
+    the outer bytes can see a word of it; its entries are therefore read out one level. The
+    whole decoding is kept rather than printable runs: this is document text, and a needle as
+    short as four digits has to be findable in it.
+    """
+    if data[:4] == b"PK\x03\x04":
+        with zipfile.ZipFile(io.BytesIO(data)) as inner:
+            names = inner.namelist()
+            return "\n".join(names + [_decode_all(inner.read(n)) for n in names])
+    return _decode_all(data)
+
+
 def _extract_docx(path: Path) -> dict[str, str]:
     with zipfile.ZipFile(path) as z:
         names = z.namelist()
@@ -270,8 +332,12 @@ def _extract_docx(path: Path) -> dict[str, str]:
         def content_glob(pattern: str) -> str:
             return "".join(content(n) for n in names if re.search(pattern, n))
 
-        xml_parts = [n for n in names if _XML_PART_RE.search(n)]
-        binary_parts = [n for n in names if not _XML_PART_RE.search(n)]
+        # altChunk parts are text Word renders on the page, so they leave the opaque sweep and
+        # get a surface of their own that the leak gate grades with no discount (R5-02).
+        alt_chunks = _alt_chunk_names(z) & set(names)
+        xml_parts = [n for n in names if _XML_PART_RE.search(n) and n not in alt_chunks]
+        binary_parts = [n for n in names
+                        if not _XML_PART_RE.search(n) and n not in alt_chunks]
 
         attrs: list[str] = []
         others: list[str] = []
@@ -315,6 +381,9 @@ def _extract_docx(path: Path) -> dict[str, str]:
             S_OTHER_XML: "\n".join(others),
             S_RELS: "\n".join(rels),
             S_BINARY_PARTS: "\n".join(binaries),
+            S_ALT_CHUNKS: "\n".join(
+                sorted(alt_chunks) + [_alt_chunk_text(z.read(n)) for n in sorted(alt_chunks)]
+            ),
         }
 
 
