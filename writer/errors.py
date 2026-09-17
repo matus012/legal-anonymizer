@@ -54,6 +54,50 @@ class PasswordProtectedError(UnreadableDocumentError):
         super().__init__(path, "encrypted / password-protected")
 
 
+class ResidualContentError(Exception):
+    """The SAVED file still carries a surface this pass believes it destroyed (R6-08).
+
+    NOT a subclass of UnreadableDocumentError: the input was readable, the redaction ran, the
+    page a reviewer looks at is clean. What failed is the container -- some stream body in the
+    output still holds the pre-redaction text, recoverable with ``qpdf --qdf``, ``mutool clean``
+    or three lines of PyMuPDF. R6-08's instance of that class was a Form XObject shared between
+    pages: ``apply_redactions()`` writes a redacted COPY and repoints the pages at it, while the
+    ORIGINAL stays in the file, kept by ``garbage=4`` because it is still reachable (measured:
+    the redacted copy inherits the original's /Resources, and that dictionary references the
+    original XObject -- a genuine cycle, which ``clean=True`` does not break either).
+
+    WHY THIS EXISTS AT ALL, when ``_scrub_stream_residue`` already blanks such a surface before
+    the save: every other control in writer/pdf_body.py closes a door somebody thought of. This
+    one is a post-condition on the FILE -- it re-opens the output and looks for the surfaces,
+    so it fires on a mechanism nobody anticipated, which is the only check here that a new
+    MuPDF version or a new PDF construct cannot quietly walk around.
+
+    WHY A REFUSAL WITH NO FILE ON DISK, the same trade as UnreadableTextLayerError and
+    EmbeddedSubDocumentError: if it fires, the tool has PROVED it cannot remove something and
+    the visible page says otherwise -- the exact shape ("everything looks fine") this project
+    refuses to ship. Measured before choosing it: over all 70 gradeable corpus PDFs plus the
+    demo, the check fires ZERO times both with and without the scrub, so no ordinary document
+    is refused by it (scratch sweep, 2026-09-17).
+
+    Carries ``surfaces`` (what was found) and ``xrefs`` (where), because a maintainer needs both
+    and the lawyer needs neither -- the sentence is what the GUI shows.
+    """
+
+    def __init__(self, path: str, surfaces: list[str], xrefs: list[int]) -> None:
+        self.path = path
+        self.surfaces = list(surfaces)
+        self.xrefs = list(xrefs)
+        self.detail = f"{self.surfaces} in stream object(s) {self.xrefs}"
+        super().__init__(
+            f"the redacted file still contained personal data in its internal structure and "
+            f"was NOT written: {path}. The visible pages were redacted, but "
+            f"{len(self.surfaces)} removed item(s) survived inside the PDF's own objects, where "
+            f"anyone opening the file with a PDF tool could recover them, so the output was "
+            f"deleted rather than handed over. Remedy: open the document, print it to PDF (or "
+            f"export it again from the program that made it) and run the tool on that copy."
+        )
+
+
 class EmbeddedSubDocumentError(UnreadableDocumentError):
     """The .docx merges in a whole second document through ``<w:altChunk>``.
 

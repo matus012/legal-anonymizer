@@ -50,6 +50,7 @@ search_for at three rects is one redacted occurrence, three destroyed boxes.
 """
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 
@@ -67,7 +68,8 @@ from writer.decisions import RedactionDecisions
 # imported from where it lives rather than copied. There is no cycle: docx_body does not import
 # this module.
 from writer.docx_body import _target_carries_pii
-from writer.errors import PasswordProtectedError, UnreadableDocumentError
+from writer.errors import (PasswordProtectedError, ResidualContentError,
+                           UnreadableDocumentError)
 from writer.labelmap import LabelMap, make_snippet
 from writer.pdf_view import (associated_filespecs, embedded_file_streams, rehide,
                              unhide)
@@ -661,6 +663,237 @@ def _blank_strings(doc: "fitz.Document", xref: int) -> None:
     doc.update_object(xref, "".join(out))
 
 
+# --------------------------------------------------------------- stream residue (R6-08)
+# The encodings a PDF literal string can spell a Slovak surface in. PDFDocEncoding and
+# WinAnsi differ from latin-1 only outside the Slovak repertoire's overlap, and cp1250 is what
+# every Windows producer in this corpus's ancestry writes; utf-8 is what MuPDF itself emits.
+# A surface drawn through an Identity-H CID font is a run of GLYPH IDS, not text, and is not
+# findable by any of these -- it is also not recoverable by a reader, which is why the residue
+# that matters is the literal-string kind.
+_STREAM_ENCODINGS = ("latin-1", "cp1250", "utf-8")
+
+
+def _byte_forms(surface: str) -> list[str]:
+    """``surface`` as it can appear in a stream BODY, each form carried as a latin-1 str so the
+    body (which is bytes) can be scanned and rewritten as one string without re-decoding."""
+    forms: list[str] = []
+    for enc in _STREAM_ENCODINGS:
+        try:
+            form = surface.encode(enc).decode("latin-1")
+        except UnicodeEncodeError:
+            continue
+        if form not in forms:
+            forms.append(form)
+    return forms
+
+
+def _mask_labels(body: str, labels: list[str]) -> str:
+    """Blank this pass's OWN labels in a stream body, length-preservingly, before it is scanned.
+
+    Measured, and not hypothetical: the demo document redacts a surface whose text is exactly
+    ``VIN``, and the label the writer draws in its place is ``[VIN_1]``. The replacement text
+    therefore CONTAINS the surface, and a scan that does not know that reports the tool's own
+    redaction as residue -- a false alarm that, with the refusal below, would refuse the
+    project's own demo document. Any type name that is also a detectable surface does this.
+    """
+    for label in labels:
+        at = body.find(label)
+        while at != -1:
+            body = body[:at] + " " * len(label) + body[at + len(label):]
+            at = body.find(label, at + len(label))
+    return body
+
+
+def _literal_spans(body: str) -> list[tuple[int, int]]:
+    """(start, end) of the CONTENT of every LITERAL string in a stream body.
+
+    Deliberately NOT ``_string_spans``, which is the object-source scanner: that one STOPS at
+    the first unbalanced ``(`` because it exists to REWRITE an object and a half-rewritten
+    object is corrupt. A stream body is binary (inline images, a subset font's glyph codes),
+    so a stray ``(`` byte is ordinary -- and a scan that stops there is BLIND to every string
+    after it, which for a leak check is the one failure mode that must not happen quietly. So
+    this one skips the unbalanced ``(`` and keeps scanning."""
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(body)
+    while i < n:
+        if body[i] != "(":
+            i += 1
+            continue
+        depth, j = 1, i + 1
+        while j < n and depth:
+            ch = body[j]
+            if ch == "\\":
+                j += 2
+                continue
+            depth += 1 if ch == "(" else -1 if ch == ")" else 0
+            j += 1
+        if depth:
+            i += 1
+            continue
+        spans.append((i + 1, j - 1))
+        i = j
+    return spans
+
+
+def _literal_hits(body: str, surfaces: list[str]) -> list[tuple[int, int, str]]:
+    """(start, end, surface) of every redacted surface inside a LITERAL string of this stream
+    body, in latin-1 positions. This is the form the residue actually takes: measured, both the
+    R6-08 fixture and the corpus's own form-field appearance streams spell it
+    ``(Helena Horvathova) Tj``."""
+    hits: list[tuple[int, int, str]] = []
+    for start, end in _literal_spans(body):
+        chunk = body[start:end]
+        for surface in surfaces:
+            for form in _byte_forms(surface):
+                at = chunk.find(form)
+                while at != -1:
+                    hits.append((start + at, start + at + len(form), surface))
+                    at = chunk.find(form, at + 1)
+    return hits
+
+
+_HEX_STRING_RE = re.compile(r"<([0-9A-Fa-f \t\r\n]*)>")
+
+
+def _hex_hits(body: str, surfaces: list[str], labels: list[str]) -> list[str]:
+    """Surfaces spelled inside a HEX string of this stream body — detection only, no positions.
+
+    The DECODED bytes are matched, never the hex digits. That distinction is the whole reason
+    this is safe to switch on: the demo's /ToUnicode CMap contains ``<1200> <1205>``, and the
+    document really does redact the bank code ``1200`` — matching hex TEXT would refuse the
+    demo over a font-machinery coincidence (the R6-03b lesson), while matching what ``1200``
+    decodes to (``\\x12\\x00``) cannot collide with it.
+
+    No positions, because unlike a literal this cannot be rewritten in place safely: whitespace
+    is legal between hex digits, so blanking a byte range would shift the digit count and
+    corrupt every glyph after it. A hex-spelled residue is therefore REFUSED rather than
+    repaired — the honest outcome for a construct the scrub cannot fix."""
+    found: list[str] = []
+    for match in _HEX_STRING_RE.finditer(body):
+        digits = re.sub(r"\s", "", match.group(1))
+        if len(digits) < 2:
+            continue
+        try:
+            decoded = bytes.fromhex(digits if len(digits) % 2 == 0 else digits + "0")
+        except ValueError:  # noqa: PERF203 -- malformed hex carries no text
+            continue
+        # Masked HERE too, not only on the raw body: the demo document draws its labels as hex
+        # strings (``<5b56494e5f315d>`` is ``[VIN_1]``), so masking the body alone leaves the
+        # writer's own replacement text to be re-found one decode later. Measured: without
+        # this, the shipping writer refuses the project's demo document.
+        text = _mask_labels(decoded.decode("latin-1"), labels)
+        utf16 = (_mask_labels(decoded.decode("utf-16-be", "ignore"), labels)
+                 if len(decoded) % 2 == 0 else "")
+        for surface in surfaces:
+            if surface in utf16 or any(form in text for form in _byte_forms(surface)):
+                found.append(surface)
+    return found
+
+
+def _stream_bodies(doc: "fitz.Document", labels: list[str]):
+    """(xref, body) for every stream object in ``doc``, this pass's own labels masked out.
+
+    EVERY stream object, not the reachable ones: R6-08's residue is an orphan in every sense
+    that matters to a reader and is still in the file, and ``qpdf --qdf`` dumps it without ever
+    consulting the page tree. Bodies come back DECOMPRESSED and carried as latin-1 str --
+    ``deflate=True`` means a check on the file's raw bytes would find nothing and would be
+    protection in name only."""
+    for xref in range(1, doc.xref_length()):
+        if not doc.xref_is_stream(xref):
+            continue
+        try:
+            body = doc.xref_stream(xref).decode("latin-1")
+        except Exception:  # noqa: BLE001 -- a broken/undecompressable stream carries no text
+            continue
+        yield xref, _mask_labels(body, labels)
+
+
+def _drawn_labels(labelmap: LabelMap) -> list[str]:
+    """The ``[TYPE_N]`` labels this pass drew onto the pages -- text the writer PUT THERE."""
+    return sorted(labelmap.occurrences)
+
+
+def _redacted_surfaces(labelmap: LabelMap) -> list[str]:
+    """The surfaces this pass believes it DESTROYED -- what must not be anywhere in the output.
+
+    Minus the unlocated ones, deliberately: a surface search_for could not locate is still on
+    the page by design, it is already reported and it already raises RedactionIncompleteError
+    with the output written. Including it here would convert every one of those documents into
+    a refusal with no file at all, which is a different (and worse) contract than the one
+    gui/model.py was built against."""
+    unlocated = {surface for _loc, _type, surface in labelmap.unlocated}
+    return sorted({surface
+                   for occurrences in labelmap.occurrences.values()
+                   for _loc, surface in occurrences
+                   if surface.strip() and surface not in unlocated})
+
+
+def _scrub_stream_residue(doc: "fitz.Document", surfaces: list[str],
+                          labels: list[str]) -> None:
+    """Blank every redacted surface still sitting in a stream body (R6-08), before the save.
+
+    THE MECHANISM, measured rather than assumed. When a Form XObject is shared between pages,
+    ``apply_redactions()`` writes a REDACTED COPY and repoints the pages at it. The original is
+    not collected, and ``garbage=4, clean=True`` does not collect it either -- because it is
+    genuinely REACHABLE: the redacted copy inherits the original's /Resources dictionary, and
+    that dictionary is the page resources dict which references the original XObject. Garbage
+    collection is right to keep it; the object graph really does lead there. So no save option
+    can fix this, and the fix has to be about the CONTENT, not about reachability.
+
+    Each hit is overwritten with SPACES OF THE SAME LENGTH: a literal string stays a literal
+    string of the same size, so no offset, no /Length and no operand count moves, and a stream
+    that is executed after all (an appearance stream nobody expected to be live) still runs.
+
+    What this cannot change is anything a reader sees. Anything the text device rendered was
+    found by the redaction loop and destroyed there; what is left over is, by construction, the
+    copy nobody renders -- and the corpus measurement agrees: extracted text is byte-identical
+    on all 71 corpus PDFs and the demo with this scrub on and off."""
+    for xref, body in _stream_bodies(doc, labels):
+        hits = _literal_hits(body, surfaces)
+        if not hits:
+            continue
+        # Rewrite the REAL body, not the label-masked copy the scan ran on: masking is
+        # length-preserving, so the offsets carry over, and the labels must stay drawn.
+        body = doc.xref_stream(xref).decode("latin-1")
+        for start, end, _surface in hits:
+            body = body[:start] + " " * (end - start) + body[end:]
+        doc.update_stream(xref, body.encode("latin-1"))
+
+
+def _assert_no_residue(out_path: str, surfaces: list[str], labels: list[str]) -> None:
+    """Re-open the SAVED file and refuse it if a redacted surface is still in a stream body.
+
+    This is a post-condition on the artefact, which is what makes it different in kind from
+    every other control in this module: the others each close a door that somebody thought of,
+    and this one fails on a door nobody has thought of yet -- a future MuPDF that copies a
+    stream somewhere new, a construct not in the corpus, a scrub above that silently did
+    nothing. It is also the only check here that reads the bytes the lawyer will actually send.
+
+    WIDER THAN THE SCRUB, on purpose: it counts hex strings too (``_hex_hits``), which the
+    scrub cannot rewrite safely. The two halves are allowed to differ exactly here -- one
+    repairs what it can prove it can repair, the other refuses everything else.
+
+    On a fire: DELETE THE OUTPUT and raise. See ResidualContentError for why refusing is the
+    right failure mode and for the corpus measurement that says it does not fire on ordinary
+    documents."""
+    doc = fitz.open(out_path)
+    found: dict[int, list[str]] = {}
+    for xref, body in _stream_bodies(doc, labels):
+        hits = [surface for _s, _e, surface in _literal_hits(body, surfaces)]
+        hits += _hex_hits(body, surfaces, labels)
+        if hits:
+            found[xref] = hits
+    doc.close()
+    if not found:
+        return
+    os.remove(out_path)
+    raise ResidualContentError(
+        out_path,
+        sorted({surface for hits in found.values() for surface in hits}),
+        sorted(found),
+    )
+
+
 def _reachable(doc: "fitz.Document", roots: list[int]) -> set[int]:
     seen: set[int] = set()
     stack = list(roots)
@@ -880,8 +1113,25 @@ def _redact_pdf(
     rehide(doc, view)
     _scrub_document_surfaces(doc)
 
+    # R6-08, both halves. The surfaces this pass destroyed must not survive anywhere in the
+    # file, and a save option cannot deliver that: measured, the pre-redaction copy of a shared
+    # Form XObject is REACHABLE (see _scrub_stream_residue), so garbage=4 keeps it and
+    # garbage=4, clean=True keeps it too. So the content is blanked here, and then -- because a
+    # scrub only closes the mechanism it was written for -- the SAVED FILE is re-opened and
+    # checked, which is the one control in this module that a mechanism nobody anticipated
+    # cannot walk around.
+    surfaces = _redacted_surfaces(labelmap)
+    labels = _drawn_labels(labelmap)
+    _scrub_stream_residue(doc, surfaces, labels)
+
+    # clean=True is NOT passed, and that is measured rather than assumed: it does not collect
+    # the residue (it cannot -- see _scrub_stream_residue), it re-encodes every content stream,
+    # and on the demo document it rewrote hex-encoded text back into literal strings. The one
+    # thing it buys on this corpus is 1.63% of output size, for a full rewrite of every object
+    # in a document whose fidelity is the product.
     doc.save(out_path, garbage=4, deflate=True)
     doc.close()
+    _assert_no_residue(out_path, surfaces, labels)
 
     # P4: the report is written BEFORE the incomplete-redaction raise, deliberately. A partial
     # output is precisely the file whose record a reviewer needs; writing the report after the

@@ -42,8 +42,9 @@ from detect.core import detect_with_failures
 from eval.extract import extract
 from eval.leak import Leak
 from eval.leak_gate import split_found_in
+from writer.errors import ResidualContentError
 from writer.labelmap import LabelMap
-from writer.pdf_body import (RedactionIncompleteError, _collect_page_redactions,
+from writer.pdf_body import (RedactionIncompleteError, _collect_page_redactions, _mask_labels,
                              _draw_label, _locate, redact_pdf)
 from writer.report import build_report
 
@@ -706,10 +707,6 @@ def test_control_r6_08_a_single_page_document_leaves_no_residue(tmp_path):
     assert _recoverable_streams(out, NAME) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R6-08: the pre-redaction Form XObject stays in the output as recoverable residue",
-)
 def test_r6_08_no_pre_redaction_content_stream_survives_in_the_output(tmp_path):
     src = _shared_xobject_pdf(tmp_path, pages=2)
     out = tmp_path / "out.pdf"
@@ -717,6 +714,79 @@ def test_r6_08_no_pre_redaction_content_stream_survives_in_the_output(tmp_path):
     residue = _recoverable_streams(out, NAME)
     assert residue == [], (
         f"pre-redaction content stream(s) still in the output at xref(s) {residue}")
+
+
+def test_r6_08_the_post_save_assertion_fires_on_a_planted_residue(tmp_path, monkeypatch):
+    """POSITIVE CONTROL for the second half of the R6-08 fix — the assertion CAN fire.
+
+    A check that has never been seen to fail is indistinguishable from a check that cannot
+    fail, and this one is the backstop for "a mechanism nobody anticipated": it has to be
+    proved capable of firing, or it reads as protection and is not.
+
+    The residue is planted by NEUTRALISING the scrub (the half that would have removed it) and
+    running the writer on the same shared-XObject fixture. What must then happen is the house
+    pattern: a named refusal and NO FILE ON DISK."""
+    import writer.pdf_body as pdf_body
+
+    monkeypatch.setattr(pdf_body, "_scrub_stream_residue", lambda doc, surfaces, labels: None)
+    src = _shared_xobject_pdf(tmp_path, pages=2)
+    out = tmp_path / "out.pdf"
+    with pytest.raises(ResidualContentError) as exc:
+        redact_pdf(str(src), str(out), known_entities=[NAME])
+    assert NAME in exc.value.surfaces, exc.value.surfaces
+    assert exc.value.xrefs, "the refusal must name WHERE the residue was"
+    assert not out.exists(), "a file the tool refused must not be left on disk"
+    assert not out.with_name(out.stem + "_report.txt").exists(), (
+        "a refused document must get no report either")
+
+
+def test_r6_08_the_assertion_reads_stream_bodies_and_not_raw_file_bytes(tmp_path, monkeypatch):
+    """The same planted residue, asserting the check is NOT VACUOUS.
+
+    ``doc.save(deflate=True)`` Flate-compresses every stream, so a plain byte grep over the
+    file finds nothing — which is exactly how this leak stayed invisible. This test keeps the
+    saved bytes (by letting the scrub run, so the file survives) and shows that the needle is
+    absent from the raw bytes while present in the DECOMPRESSED body of the same file when the
+    scrub is off. A check written against raw bytes would pass on both files and mean nothing."""
+    import writer.pdf_body as pdf_body
+
+    src = _shared_xobject_pdf(tmp_path, pages=2)
+    monkeypatch.setattr(pdf_body, "_assert_no_residue", lambda out_path, surfaces, labels: None)
+    monkeypatch.setattr(pdf_body, "_scrub_stream_residue", lambda doc, surfaces, labels: None)
+    unscrubbed = tmp_path / "unscrubbed.pdf"
+    _redact(src, unscrubbed, known=[NAME])
+    assert NAME.encode() not in unscrubbed.read_bytes(), (
+        "fixture broken: the residue must be COMPRESSED, or this test proves nothing")
+    assert _recoverable_streams(unscrubbed, NAME), (
+        "the same file's decompressed stream bodies must still hold the needle")
+
+
+def test_r6_08_the_writers_own_label_is_not_mistaken_for_residue():
+    """FALSE-ALARM CONTROL, from a real document: the demo redacts a surface whose text is
+    exactly ``VIN`` and draws ``[VIN_1]`` in its place, in one document as a literal string and
+    in another as the hex string ``<5b56494e5f315d>``. A residue check that does not know its
+    own replacement text refuses that document — measured, before the mask existed."""
+    from writer.pdf_body import _hex_hits, _literal_hits
+
+    literal = "BT /helv 9 Tf ([VIN_1]) Tj ET\n"
+    assert _literal_hits(_mask_labels(literal, ["[VIN_1]"]), ["VIN"]) == []
+    assert _literal_hits(literal, ["VIN"]), "control: unmasked, the label DOES match"
+    hexed = "BT /helv 9 Tf <5b56494e5f315d> Tj ET\n"
+    assert _hex_hits(hexed, ["VIN"], ["[VIN_1]"]) == []
+    assert _hex_hits(hexed, ["VIN"], []) == ["VIN"], "control: unmasked, the label DOES match"
+
+
+def test_r6_08_the_hex_half_catches_text_and_not_glyph_arithmetic():
+    """The assertion's hex branch matches DECODED bytes, never hex digits, and that is what
+    makes it safe to switch on: ``<1200>`` in a /ToUnicode CMap is a glyph-id range that
+    collides with the bank code ``1200`` this project's own demo really does redact (the
+    R6-03b lesson), while the bytes it decodes to cannot collide with it."""
+    from writer.pdf_body import _hex_hits
+
+    assert _hex_hits("<4D61726961204B6F7661636F7661>", [NAME], []) == [NAME]
+    assert _hex_hits("<FEFF004D00610072006900610020004B006F007600610063006F00760061>",
+                     [NAME], []) == [NAME], "UTF-16BE, what Acrobat writes for a diacritic"
+    assert _hex_hits("<1200> <1205> <107b5>", [KOD_BANKY], []) == []
 
 
 # =================================================================================== R6-09

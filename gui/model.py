@@ -15,7 +15,11 @@ from dataclasses import dataclass
 
 from detect.config import DetectConfig
 from writer.decisions import RedactionDecisions
-from writer.errors import PasswordProtectedError, UnreadableDocumentError
+from writer.errors import (
+    PasswordProtectedError,
+    ResidualContentError,
+    UnreadableDocumentError,
+)
 from writer.docx_body import redact_docx_collect
 from writer.labelmap import LabelMap
 from writer.pdf_body import (
@@ -65,6 +69,13 @@ MSG_SHREDDED_TEXT = (
     "z nej nevie prečítať mená ani čísla. NIE JE to sken. Býva to výsledok exportu z "
     "dokumentového systému, konverzie do PDF/A alebo OCR. Súbor bol odmietnutý; "
     "vyexportujte ho znova (napr. Tlač → Uložiť ako PDF) a skúste znova."
+)
+MSG_RESIDUAL_CONTENT = (
+    "Výstupný súbor by obsahoval PÔVODNÝ text aj po redigovaní — ukrytý v štruktúre PDF, "
+    "kde ho na strane nevidno, ale dá sa z neho získať späť. NEBOL vytvorený žiadny výstupný "
+    "súbor. Stáva sa to pri dokumentoch, ktoré vznikli pečiatkovacím alebo podpisovým "
+    "nástrojom. Otvorte pôvodný súbor a uložte ho znova (napr. Tlač → Uložiť ako PDF), potom "
+    "skúste znova."
 )
 MSG_INCOMPLETE = (
     "Dokument sa nedá úplne redigovať automaticky ({n} nájditeľných miest zlyhalo). "
@@ -225,6 +236,11 @@ def scan_file(src: str, known_entities, extra_terms: tuple[str, ...] = (),
                 pages=", ".join(str(p) for p in e.pages)))
         except NoTextLayerError:
             return FileScan(src, [], MSG_NO_TEXT_LAYER)
+        except ResidualContentError:
+            # The page renders correctly and the file is still rejected, which is the hardest
+            # refusal in this list to explain -- so the message says WHERE the text would have
+            # been (in the structure, not on the page) and that it is recoverable.
+            return FileScan(src, [], MSG_RESIDUAL_CONTENT)
         except RedactionIncompleteError as e:
             return FileScan(src, [], MSG_INCOMPLETE.format(n=len(e.surfaces)))
         rows = _rows_from(lm)

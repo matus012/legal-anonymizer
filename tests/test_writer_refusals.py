@@ -126,8 +126,48 @@ def test_an_ordinary_document_is_unaffected(tmp_path):
 
 
 def test_the_gui_messages_say_no_file_was_written():
-    from gui.model import MSG_PASSWORD_PROTECTED, MSG_UNREADABLE_DOC
+    from gui.model import (
+        MSG_PASSWORD_PROTECTED,
+        MSG_RESIDUAL_CONTENT,
+        MSG_UNREADABLE_DOC,
+    )
 
-    assert MSG_UNREADABLE_DOC != MSG_PASSWORD_PROTECTED
-    for msg in (MSG_UNREADABLE_DOC, MSG_PASSWORD_PROTECTED):
+    msgs = (MSG_UNREADABLE_DOC, MSG_PASSWORD_PROTECTED, MSG_RESIDUAL_CONTENT)
+    assert len(set(msgs)) == len(msgs), "each refusal needs its OWN message, not a shared one"
+    for msg in msgs:
         assert "NEBOL vytvorený" in msg, "the message must answer 'is there a file on disk?'"
+
+
+def test_the_residual_content_refusal_reaches_the_lawyer_in_slovak(tmp_path, monkeypatch):
+    """The clause fires, and the reviewer sees the Slovak message rather than the exception.
+
+    ResidualContentError shipped with NO handler in gui/model.py, so it fell through to
+    gui/worker.py's per-file ``except Exception`` and the review screen showed the exception's
+    English sentence. That is precisely the failure writer/errors.py exists to prevent -- its
+    docstring calls a library message "written for a developer" the problem, and this one was
+    written by us.
+
+    This refusal is the hardest of the set to explain, because the PAGE LOOKS RIGHT: the text is
+    gone where the reader can see it and survives where only a tool can. So the message has to
+    say where it would have been, and that it is recoverable.
+    """
+    import gui.model as model
+    from writer.errors import ResidualContentError
+
+    src = tmp_path / "residue.pdf"
+    src.write_bytes(b"%PDF-1.7\n")
+
+    # Patch the collect step itself, NOT the writer functions it calls. My first version of this
+    # test patched names that do not exist on the module, so the real code ran, failed to open a
+    # nine-byte file and returned MSG_UNREADABLE_DOC -- a green-looking red herring that would
+    # have proved nothing about this clause.
+    def _raise(*a, **k):
+        raise ResidualContentError(str(src), ["Maria Kovacova"], [7])
+
+    monkeypatch.setattr(model, "_collect", _raise)
+
+    scan = model.scan_file(str(src), [])
+    assert scan.error == model.MSG_RESIDUAL_CONTENT, (
+        f"the lawyer sees {scan.error!r}, not the Slovak refusal"
+    )
+    assert scan.rows == []
