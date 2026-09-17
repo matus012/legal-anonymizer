@@ -59,8 +59,17 @@ from detect.config import DetectConfig
 from detect.core import detect_with_failures
 from detect.normalize import mojibake_is_unrepairable, strip_format_chars
 from writer.decisions import RedactionDecisions
+# The SAME predicate the DOCX writer uses on a relationship target (R6-02). Round 5 confirmed
+# _scrub_rel_targets removes "mailto:jan.novak@advokat.sk" from a .docx; the identical address
+# in a PDF link annotation survived, and two formats disagreeing about the same string is a bug
+# in itself. Its right home is a format-neutral writer/targets.py -- it is a predicate about a
+# URI, and neither format owns it -- but moving it would edit writer/docx_body.py, so it is
+# imported from where it lives rather than copied. There is no cycle: docx_body does not import
+# this module.
+from writer.docx_body import _target_carries_pii
 from writer.errors import PasswordProtectedError, UnreadableDocumentError
 from writer.labelmap import LabelMap, make_snippet
+from writer.pdf_view import rehide, unhide
 from writer.report import write_report
 
 
@@ -354,6 +363,17 @@ def _locate(page, needle: str) -> tuple[list, bool]:
     return found, complete
 
 
+def _is_degenerate(rect) -> bool:
+    """Does ``rect`` cover no glyph -- zero width or zero height (R6-09)?
+
+    ``getattr`` rather than ``rect.is_empty`` because _collect_page_redactions takes its page by
+    DUCK TYPE (it needs only .get_text and .search_for), which makes the rects that page returns
+    duck-typed too: the existing soft-hyphen unit test hands it a marker object with no
+    geometry. A stand-in with no is_empty is not a degenerate rect; every real fitz.Rect has it.
+    """
+    return bool(getattr(rect, "is_empty", False))
+
+
 def _collect_page_redactions(
     page,
     known_entities: list[str] | None,
@@ -408,10 +428,33 @@ def _collect_page_redactions(
             continue
         needle = raw[cand.start : cand.end]  # on-page glyphs; cand.surface is normalized
         rects, complete = _locate(page, needle)
+        # R6-09: search_for can return a DEGENERATE rect -- zero width, ``is_empty`` True. A
+        # tagged (PDF/UA) document writes /ActualText for a ligature, an abbreviation or a
+        # hyphen-split word, and when the replacement text is longer than the glyph run it
+        # covers, MuPDF distributes it over the glyph advances and the surplus characters get
+        # zero-width boxes. Measured: Rect(130.355, 530.417, 130.355, 545.091).
+        #
+        # Such a rect destroys nothing (add_redact_annot covers no glyph) and crashes
+        # insert_textbox with "text box must be finite and not empty" -- so before this the
+        # lawyer got a bare ValueError, no output and no report on an ORDINARY accessible PDF.
+        # The rect is DROPPED, never widened: widening it to something drawable would redact
+        # glyphs nobody detected. Dropping it makes the surface partly (or wholly) unredacted,
+        # which is exactly what ``skipped`` means, so it goes through the same bookkeeping and
+        # the anti-theatre invariant still fires.
+        drawable = [r for r in rects if not _is_degenerate(r)]
+        if len(drawable) != len(rects):
+            complete = False
+        rects = drawable
         if not rects:
             skipped.append(needle)
+            # R6-10: this ``continue`` is why the report used to read as "nothing was found"
+            # for a document that is under-redacted -- record_occurrence is below it and
+            # record_low_confidence is on the other branch, so a detected-but-unlocatable
+            # surface reached NEITHER.
+            labelmap.record_unlocated(location, cand.type, cand.surface)
             continue
         if not complete:
+            labelmap.record_unlocated(location, cand.type, cand.surface)
             # Some of the surface WAS located and will be destroyed, but not all of it. That is
             # the worst possible state to report as success, so it is recorded as skipped too:
             # the caller raises RedactionIncompleteError and the reviewer is told which surface
@@ -438,7 +481,15 @@ def _draw_label(page, rect, label: str) -> None:
     Text does NOT reflow -- the label occupies exactly the footprint of the removed span, so it
     is shrunk until insert_textbox reports it fits (a negative return means nothing was drawn,
     which would silently lose the label and break the 'reviewer can see WHAT was removed'
-    property). Falls back to insert_text at the top-left if even the floor size will not fit."""
+    property). Falls back to insert_text at the top-left if even the floor size will not fit.
+
+    An EMPTY rect draws nothing and returns (R6-09). _collect_page_redactions already drops
+    degenerate rects, so this guard exists for the next caller: insert_textbox raises
+    ValueError on a zero-width rect, and that ValueError reached the lawyer as PyMuPDF's
+    "text box must be finite and not empty" with no output and no report. There is nothing to
+    label here in any case -- a zero-width box covers no glyph, so nothing was destroyed."""
+    if rect.is_empty:
+        return
     fontsize = max(1.0, min(rect.height, 11.0))
     while fontsize >= 3.0:
         if page.insert_textbox(rect, label, fontsize=fontsize, color=(1, 1, 1), align=0) >= 0:
@@ -469,6 +520,59 @@ def _scrub_document_surfaces(doc: "fitz.Document") -> None:
     doc.del_xml_metadata()
     for name in list(doc.embfile_names()):
         doc.embfile_del(name)
+    # R6-01: /Outlines. A court or cadastre PDF's bookmarks ARE its section headings --
+    # "Kupna zmluva - Maria Kovacova", "Rodne cislo 855612/7788" -- and nothing here called
+    # get_toc/set_toc, so they shipped verbatim on ``outline``, a named TEXT surface the leak
+    # gate counts with no discount.
+    #
+    # WHY DELETING BEATS REWRITING THE TITLES THROUGH detect(). A rewrite has to be right about
+    # every title or it ships one: the titles are not page text, so a miss is invisible to the
+    # per-page loop that just destroyed the same name on the page, and there is no moment at
+    # which a reviewer sees a bookmark. It would also have to rebuild the outline TREE (set_toc
+    # takes [level, title, page] rows) from titles it rewrote, so a detector failure on one row
+    # would corrupt the nesting of the rest. Deleting is unconditional and cannot half-succeed.
+    #
+    # THE COST, HONESTLY: the reader's bookmark pane goes empty. On a 200-page cadastre file
+    # that is a real loss of navigation -- but it is a NAVIGATION loss, not a content loss:
+    # every heading a bookmark points at is still on its page, where the reader can search for
+    # it. This module already makes exactly that trade for embedded attachments above.
+    doc.set_toc([])
+
+
+# The link-dictionary keys eval/extract.py reads into its ``links`` surface. Deciding on
+# EXACTLY the strings the gate grades is the point: anything else is the writer and the gate
+# disagreeing about what a link contains, which is how R6-02 happened in the first place.
+_LINK_TEXT_KEYS = ("uri", "file", "nameddest", "name")
+
+
+def _scrub_link_targets(doc: "fitz.Document", known_entities: list[str] | None,
+                       config: DetectConfig | None) -> None:
+    """Delete every link annotation whose TARGET carries personal data (R6-02).
+
+    doc.bake() flattens what has an APPEARANCE; a Link annotation's payload is its ACTION, and
+    an action has no appearance stream, so "mailto:jan.novak@advokat.sk" -- a name and an
+    address -- survived the bake untouched on the ``links`` surface. The identical mailto: in a
+    .docx IS removed (writer/docx_body._scrub_rel_targets, red-team round 5), so this was the
+    two formats disagreeing about the same string.
+
+    The DECISION is the DOCX writer's _target_carries_pii, imported rather than rewritten: a
+    second predicate would drift, and the round-4 measurement behind that one (30 real Slovak
+    legal links, three of which a blanket rule destroyed) is not worth re-earning.
+
+    The ACTION differs from the DOCX spelling on purpose. A Word hyperlink's display text is
+    document content whose relationship must keep resolving, so there the target is REPLACED by
+    a placeholder. A PDF link annotation is invisible geometry laid over text that is already
+    on the page: deleting it removes the action and changes nothing a reader sees, while a
+    placeholder URL would leave a live link to a dead host. It also covers the kinds for which
+    no placeholder is even well-formed (/Launch and /GoToR carry a FILE, not a URL).
+
+    Runs after the redaction loop, on the baked document, so it sees every link that will
+    actually be saved."""
+    for page in doc:
+        for link in page.get_links():
+            targets = [str(link[k]) for k in _LINK_TEXT_KEYS if link.get(k)]
+            if any(_target_carries_pii(t, list(known_entities or []), config) for t in targets):
+                page.delete_link(link)
 
 
 def _open_pdf(in_path: str) -> "fitz.Document":
@@ -505,6 +609,20 @@ def _redact_pdf(
         known_entities = list(known_entities or []) + extras
 
     doc = _open_pdf(in_path)
+    # R6-05 / R6-06: READ THE SAME DOCUMENT THE GATE GRADES. Everything below -- the refusal
+    # checks, detect(), search_for -- goes through page.get_text(), and MuPDF's text device
+    # clips to the CropBox and honours optional-content visibility. So text on an OFF layer
+    # (an attorney's "Poznamky" layer) and text cropped away by Acrobat's Crop Pages tool
+    # ("crop out the letterhead before you send it" is an ordinary paralegal action) were
+    # returned by NOTHING here, while eval/extract.py -- which has widened the box and dropped
+    # /OCProperties since v1.1 -- read them on ``text_layer`` and would have failed the gate
+    # with no discount. One helper, called from both, is the only arrangement in which the
+    # writer cannot drift from the grader again.
+    #
+    # rehide() puts the boxes and the layer configuration back immediately before the save, so
+    # the output is the lawyer's document with the PII destroyed -- not an un-cropped one with
+    # the firm's internal layers switched on.
+    view = unhide(doc)
     # R3-C4: a page whose text we cannot decode is MORE dangerous than a page with none. The
     # glyphs are drawn and a human reads them; detect() sees control characters and removes
     # nothing; and eval/extract.py reads the same control characters, so the leak gate agrees
@@ -565,7 +683,9 @@ def _redact_pdf(
         for rect, label in pairs:
             _draw_label(page, rect, label)
 
+    _scrub_link_targets(doc, known_entities, config)
     _scrub_document_surfaces(doc)
+    rehide(doc, view)
 
     doc.save(out_path, garbage=4, deflate=True)
     doc.close()
@@ -575,7 +695,7 @@ def _redact_pdf(
     # raise would leave the worst case as the one case with no record at all.
     write_report(out_path, labelmap.occurrences, labelmap.low_confidence,
                  labelmap.checksums, labelmap.lc_checksums,
-                 labelmap.detector_failures)
+                 labelmap.detector_failures, labelmap.unlocated)
 
     # Every page was attempted and the (partial) output written -- but the caller must be told,
     # loudly, that this file is not fully redacted.

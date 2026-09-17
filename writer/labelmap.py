@@ -78,6 +78,14 @@ class LabelMap:
         # unit of the document -- a report listing it 400 times would bury the one line
         # that matters. The LOCATION kept is the FIRST one, which is where a reviewer
         # should start looking, and the count is carried so the scale is not lost.
+        # Red-team round 6 (R6-10): surfaces detect() marked auto=True that the pass could NOT
+        # destroy -- search_for located none of the glyphs, located only part of them, or
+        # returned a degenerate (zero-width) rect. They are still in the document. A FOURTH
+        # side-channel for the same reason as the three above: occurrences/low_confidence are
+        # unpacked positionally by build_report and cannot widen, and these rows belong in
+        # neither -- the surface was not redacted (so not an occurrence) and was not a
+        # low-confidence judgement call either (the tool wanted to remove it and failed).
+        self.unlocated: list[tuple[str, str, str]] = []  # [(location, type, surface)]
         self.detector_failures: list[tuple[str, str, str]] = []  # [(detector, location, error)]
         self._failure_seen: dict[tuple[str, str], int] = {}      # (detector, error) -> index
         self._failure_counts: dict[tuple[str, str], int] = {}
@@ -132,6 +140,14 @@ class LabelMap:
         self.low_confidence.append((location, type, surface))
         self.lc_contexts.append(snippet)
         self.lc_checksums.append(checksum)
+
+    def record_unlocated(self, location: str, type: str, surface: str) -> None:
+        """Record ONE auto=True surface the pass could not remove -- it is still in the file.
+
+        Never deduplicated: two occurrences of the same name that both failed to locate are two
+        places a reviewer has to visit. The caller raises RedactionIncompleteError on the same
+        evidence; this is what puts it in the WRITTEN RECORD, which is what the reviewer reads."""
+        self.unlocated.append((location, type, surface))
 
     def record_detector_failure(self, detector: str, location: str, error: str) -> None:
         """Record that ``detector`` raised at ``location``. Idempotent per (detector, error).

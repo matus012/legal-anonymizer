@@ -88,6 +88,8 @@ from pathlib import Path
 import fitz
 from lxml import etree
 
+from writer.pdf_view import unhide
+
 # ---------------------------------------------------------------- physical surfaces
 # DOCX
 S_DOCUMENT = "document_xml"   # body, tables, textboxes, tracked changes — all live here
@@ -391,31 +393,13 @@ def _extract_docx(path: Path) -> dict[str, str]:
 def _pdf_unhide(doc: fitz.Document) -> None:
     """Make text that MuPDF's text device would skip visible to ``get_text()``.
 
-    Two mechanisms hide text from extraction while leaving it fully recoverable by any other
-    PDF tool — i.e. they are leaks that the gate would score as clean:
-
-    * **CropBox** — the structured-text device clips to the page rect, which is the CropBox.
-      Text drawn outside it (trivially restored by resetting the box in any PDF editor) is
-      returned by nothing. Widening every CropBox to its MediaBox recovers it.
-    * **Optional content (layers)** — text inside an OCG whose default state is OFF is not
-      emitted. Dropping ``/OCProperties`` from the catalogue makes MuPDF ignore the
-      visibility configuration and emit everything. (``set_layer``/``set_layer_ui_config``
-      were both tried first: ``set_layer(-1, on=[...])`` does not change what ``get_text()``
-      returns, and the ui-config call only TOGGLES, so it would hide an ON layer just as
-      often as it reveals an OFF one.)
-
-    This mutates the in-memory document only — the extractor never writes the file back.
+    The logic moved to ``writer/pdf_view.py`` unchanged (red-team round 6, R6-05/R6-06): the
+    WRITER has to read the same document this extractor grades, and the way to guarantee that
+    is one definition called from both, not a second copy here. The mutation is in-memory only
+    — the extractor never writes the file back, so it discards the restore handle that the
+    writer needs.
     """
-    try:
-        doc.xref_set_key(doc.pdf_catalog(), "OCProperties", "null")
-    except Exception:  # not a PDF catalogue we can edit; the raw-bytes surface still applies
-        pass
-    for page in doc:
-        try:
-            if page.cropbox != page.mediabox:
-                page.set_cropbox(page.mediabox)
-        except Exception:  # a malformed box must not cost us the other 5 surfaces
-            pass
+    unhide(doc)
 
 
 # A stream whose dictionary says it is an embedded font: its body is glyph outlines, which

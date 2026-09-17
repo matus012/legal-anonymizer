@@ -38,12 +38,13 @@ from pathlib import Path
 import fitz
 import pytest
 
+from detect.core import detect_with_failures
 from eval.extract import extract
 from eval.leak import Leak
 from eval.leak_gate import split_found_in
 from writer.labelmap import LabelMap
 from writer.pdf_body import (RedactionIncompleteError, _collect_page_redactions,
-                             _draw_label, redact_pdf)
+                             _draw_label, _locate, redact_pdf)
 from writer.report import build_report
 
 # --------------------------------------------------------------------------------- needles
@@ -164,8 +165,8 @@ def test_control_r6_01_the_outline_needles_are_reachable(tmp_path):
     assert "outline" in _surfaces(src, RC)
 
 
-@pytest.mark.xfail(strict=True, reason="R6-01: /Outlines is never scrubbed")
 def test_r6_01_outline_bookmarks_are_redacted(tmp_path):
+    """FIXED: ``_scrub_document_surfaces`` now calls ``doc.set_toc([])``."""
     src = _outline_pdf(tmp_path)
     out = tmp_path / "out.pdf"
     _redact(src, out, known=[NAME])
@@ -191,8 +192,9 @@ def test_control_r6_02_the_link_uri_is_reachable(tmp_path):
     assert "links" in _surfaces(_link_pdf(tmp_path), "maria.kovacova@gmail.com")
 
 
-@pytest.mark.xfail(strict=True, reason="R6-02: link annotation actions survive doc.bake()")
 def test_r6_02_link_annotation_targets_are_scrubbed(tmp_path):
+    """FIXED: ``_scrub_link_targets`` deletes a link whose target ``_target_carries_pii`` --
+    the DOCX writer's own predicate -- says carries personal data."""
     src = _link_pdf(tmp_path)
     out = tmp_path / "out.pdf"
     _redact(src, out)
@@ -409,11 +411,9 @@ def test_control_r6_05_the_writer_cannot_see_the_hidden_layer(tmp_path):
     assert "text_layer" in _surfaces(src, NAME)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R6-05: text in an OFF optional-content group is never detected or redacted",
-)
 def test_r6_05_text_on_a_hidden_layer_is_redacted(tmp_path):
+    """FIXED: the writer calls the SAME ``writer.pdf_view.unhide`` the extractor calls, so the
+    hidden layer is in the text it runs detect() over."""
     src = _ocg_off_pdf(tmp_path)
     out = tmp_path / "out.pdf"
     _redact(src, out, known=[NAME])
@@ -448,9 +448,8 @@ def test_control_r6_06_the_writer_cannot_see_outside_the_cropbox(tmp_path):
     assert "text_layer" in _surfaces(src, NAME)
 
 
-@pytest.mark.xfail(
-    strict=True, reason="R6-06: text outside the CropBox is never detected or redacted")
 def test_r6_06_text_outside_the_cropbox_is_redacted(tmp_path):
+    """FIXED, by the same one helper as R6-05."""
     src = _cropbox_pdf(tmp_path)
     out = tmp_path / "out.pdf"
     _redact(src, out, known=[NAME])
@@ -609,30 +608,52 @@ def _actualtext_pdf(tmp_path: Path) -> Path:
 
 def test_control_r6_09_search_for_really_returns_an_empty_rect(tmp_path):
     """CONTROL (mechanism): the fixture is well-formed and the page really does yield a
-    degenerate rectangle from ``page.search_for``, via ``_collect_page_redactions``."""
+    degenerate rectangle from ``page.search_for`` — the raw library call, so the control keeps
+    measuring the SHAPE rather than the writer's handling of it.
+
+    AMENDED with the R6-09 fix: the original asserted the degenerate rect through
+    ``_collect_page_redactions``'s returned pairs, which is exactly where the fix removes it,
+    so it could not survive its own finding being closed. The second half is the new property:
+    the rect the library returns is dropped from the pairs and RECORDED AS SKIPPED, never
+    silently discarded — that is what keeps RedactionIncompleteError firing."""
     src = _actualtext_pdf(tmp_path)
     doc = fitz.open(str(src))
-    pairs, _skipped = _collect_page_redactions(doc[0], [NAME], LabelMap([NAME]), "page_1")
-    empties = [r for r, _ in pairs if r.is_empty]
+    page = doc[0]
+    raw = page.get_text("text")
+    # _locate is the step BEFORE the fix's filter: every needle the page pass would search for,
+    # located exactly as it locates them. Measured: the /ActualText span puts "Maria Kovacov"
+    # on the page as Rect(121.808, 530.417, 135.855, 545.091) plus the degenerate
+    # Rect(130.355, 530.417, 130.355, 545.091).
+    located = [(raw[c.start:c.end], _locate(page, raw[c.start:c.end])[0])
+               for c in detect_with_failures(raw, [NAME], None)[0] if c.auto]
+    degenerate = [(needle, r) for needle, rects in located for r in rects if r.is_empty]
+    assert degenerate, "fixture no longer produces a degenerate rect"
+
+    lm = LabelMap([NAME])
+    pairs, skipped = _collect_page_redactions(page, [NAME], lm, "page_1")
     doc.close()
-    assert empties, "fixture no longer produces a degenerate rect"
+    assert [r for r, _ in pairs if r.is_empty] == [], "a degenerate rect reached the draw stage"
+    for needle, _rect in degenerate:
+        assert needle in skipped, needle
+        assert [row for row in lm.unlocated if row[2] == needle], needle
 
 
 def test_control_r6_09_a_zero_width_rect_is_what_breaks_draw_label(tmp_path):
-    """CONTROL (isolation): the crash is ``_draw_label``'s, not the fixture's — a zero-WIDTH
-    rect raises while a zero-HEIGHT one does not."""
+    """CONTROL (isolation): the crash was ``_draw_label``'s, not the fixture's — a zero-WIDTH
+    rect raised while a zero-HEIGHT one did not.
+
+    AMENDED with the R6-09 fix, which guards ``_draw_label`` itself so no future caller can
+    reintroduce the crash: the zero-width rect now draws nothing and returns. Both halves still
+    assert the isolation property (neither degenerate shape reaches the lawyer as a ValueError)
+    and the guard is measured at the unit, not only through the writer."""
     doc = fitz.open()
     page = doc.new_page()
     _draw_label(page, fitz.Rect(100, 100, 120, 100), "[MENO_1]")   # zero height: fine
-    with pytest.raises(ValueError):
-        _draw_label(page, fitz.Rect(100, 100, 100, 115), "[MENO_1]")
+    _draw_label(page, fitz.Rect(100, 100, 100, 115), "[MENO_1]")   # zero width: guarded
+    assert "[MENO_1]" not in page.get_text("text"), "a zero-width rect covers no glyph"
     doc.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R6-09: a degenerate search rect crashes the writer with a bare ValueError",
-)
 def test_r6_09_a_tagged_pdf_is_not_refused_with_a_library_message(tmp_path):
     """``writer/errors.py`` promises: a file the tool cannot process is refused with a named
     error and a sentence the lawyer can act on. Here the lawyer gets PyMuPDF's
@@ -676,10 +697,6 @@ def test_control_r6_10_the_surfaces_really_were_detected_and_missed(tmp_path):
     assert NAME in skipped and RC in skipped
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R6-10: the report never mentions an auto=True surface that could not be located",
-)
 def test_r6_10_the_report_names_the_surfaces_that_were_missed(tmp_path):
     """``writer/pdf_body.py``: "the report is written BEFORE the incomplete-redaction raise,
     deliberately. A partial output is precisely the file whose record a reviewer needs." The
@@ -687,7 +704,7 @@ def test_r6_10_the_report_names_the_surfaces_that_were_missed(tmp_path):
     document in which nothing was found."""
     lm, skipped = _blind_run()
     report = build_report(lm.occurrences, lm.low_confidence, lm.checksums,
-                          lm.lc_checksums, lm.detector_failures)
+                          lm.lc_checksums, lm.detector_failures, lm.unlocated)
     unmentioned = [s for s in skipped if s not in report]
     assert unmentioned == [], (
         f"report is silent about {len(unmentioned)} surface(s) left in the document: "
@@ -916,6 +933,93 @@ def test_dnr_a_widget_with_needappearances_and_no_ap_is_removed(tmp_path):
     out = tmp_path / "out.pdf"
     _redact(src2, out, known=[NAME])
     assert _surfaces(out, NAME) == ()
+
+
+# ===================================================== PROPERTIES THE ROUND-6 FIXES MUST KEEP
+# Closing a finding is only half of it: each fix touches the SHIPPING path for every ordinary
+# document, and a fix that costs the office an ordinary document is worse than the finding.
+def test_the_writer_and_the_extractor_read_the_same_document(tmp_path):
+    """The root cause of R6-05 AND R6-06 was two readings of one file. There is now exactly ONE
+    definition of the unhidden view, and both sides call it -- asserted on the identity of the
+    function object, because a second copy is what would bring the finding back."""
+    import eval.extract as extract_mod
+    import writer.pdf_body as pdf_body_mod
+    from writer.pdf_view import unhide
+
+    assert pdf_body_mod.unhide is unhide
+    assert extract_mod.unhide is unhide
+
+
+def test_the_output_keeps_the_cropbox_it_arrived_with(tmp_path):
+    """R6-06's fix must not UN-CROP the lawyer's document. The band is read and redacted with
+    the box widened; the box is put back before the save, so the output page is the page they
+    handed in."""
+    src = _cropbox_pdf(tmp_path)
+    out = tmp_path / "out.pdf"
+    _redact(src, out, known=[NAME])
+    before = fitz.open(str(src))
+    after = fitz.open(str(out))
+    assert tuple(after[0].cropbox) == tuple(before[0].cropbox)
+    assert tuple(after[0].cropbox) != tuple(after[0].mediabox), "fixture is not cropped"
+    before.close()
+    after.close()
+
+
+def test_the_output_keeps_an_off_layer_switched_off(tmp_path):
+    """The R6-05 counterpart: the PII on the hidden layer is destroyed, but the layer
+    CONFIGURATION is restored, so an attorney's "Poznamky advokata" layer does not arrive at
+    the other side switched on."""
+    src = _ocg_off_pdf(tmp_path)
+    out = tmp_path / "out.pdf"
+    _redact(src, out, known=[NAME])
+    doc = fitz.open(str(out))
+    kind, _value = doc.xref_get_key(doc.pdf_catalog(), "OCProperties")
+    off = doc.get_layer().get("off") or []
+    doc.close()
+    assert kind != "null", "/OCProperties was dropped from the saved output"
+    assert off, "the OFF layer came back switched ON"
+
+
+def test_a_link_that_carries_no_pii_survives(tmp_path):
+    """FALSE-REFUSAL guard for R6-02: the scrub deletes links by the DOCX writer's measured
+    predicate, not by being a link. A citation to the statute book is the commonest link in a
+    Slovak legal document and must still work."""
+    src = tmp_path / "cite.pdf"
+    _page_pdf(src)
+    doc = fitz.open(str(src))
+    doc[0].insert_link({"kind": fitz.LINK_URI, "from": fitz.Rect(72, 150, 300, 170),
+                        "uri": "https://www.slov-lex.sk/pravne-predpisy/SK/ZZ/1964/40/"})
+    src2 = src.with_name("cite_b.pdf")
+    doc.save(str(src2))
+    doc.close()
+    out = tmp_path / "out.pdf"
+    _redact(src2, out)
+    doc = fitz.open(str(out))
+    uris = [link.get("uri") for p in doc for link in p.get_links()]
+    doc.close()
+    assert "https://www.slov-lex.sk/pravne-predpisy/SK/ZZ/1964/40/" in uris
+
+
+def test_the_unlocated_section_says_the_document_may_be_under_redacted(tmp_path):
+    """R6-10's framing, not merely its rows: the block carries the same
+    THIS DOCUMENT MAY BE UNDER-REDACTED warning ``_FAILURE_HEADER`` uses, and sits ABOVE the
+    two tables -- what is missing from them is what the reviewer has to act on."""
+    lm, _skipped = _blind_run()
+    report = build_report(lm.occurrences, lm.low_confidence, lm.checksums,
+                          lm.lc_checksums, lm.detector_failures, lm.unlocated)
+    assert "THIS DOCUMENT MAY BE UNDER-REDACTED" in report
+    assert report.index("NOT REDACTED --") < report.index("[REDACTED]")
+    assert "MENO" in report and NAME in report
+
+
+def test_a_report_without_the_new_channel_is_byte_identical(tmp_path):
+    """The same discipline every earlier side-channel was added under: a document with nothing
+    to report loses not one byte, so no existing report, test or diff shifts because R6-10's
+    block exists. This is what keeps the DOCX writer (which does not pass the channel)
+    unchanged."""
+    base = build_report({"[MENO_1]": [("page_1", "Novak")]}, [])
+    assert build_report({"[MENO_1]": [("page_1", "Novak")]}, [], None, None, None, None) == base
+    assert build_report({"[MENO_1]": [("page_1", "Novak")]}, [], None, None, None, []) == base
 
 
 # ================================================================ CONTROL: corpus reality
