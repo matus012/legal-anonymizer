@@ -14,6 +14,7 @@ from eval.cross_format_gate import (
     PDF_ONLY_PARTS,
     judge_pair,
     main,
+    run_gate,
 )
 
 
@@ -102,8 +103,18 @@ def test_part_classification_is_a_partition():
 
 
 def test_end_to_end_gate_runs_and_currently_passes():
-    """Slower integration smoke test: the real fixture-authoring + redaction + extraction
-    path (main()) must actually run to completion. Currently PASS on this codebase — if it
-    ever starts failing, that is a real product finding (per-format detection divergence),
-    not a reason to weaken this gate."""
-    assert main() == 0
+    """Integration SMOKE test: the real fixture-authoring + redaction + extraction + compare
+    path must run to completion. Currently PASS on this codebase — if it ever starts failing,
+    that is a real product finding (per-format detection divergence), not a reason to weaken
+    this gate.
+
+    CAPPED AT TWO CORPUS PAIRS, 2026-09-17. The gate gained the whole 70-pair corpus that day
+    (QUESTIONS.md Q14 made the .docx and .pdf of one index the same document at last), which
+    took this one test from ~5s to ~80s and the full suite from 170s to 245s. The six AUTHORED
+    pairs are still graded in full here — they are the population this test was written for,
+    and the one whose content the gate controls. The corpus population is what the GATE is for,
+    and `python -m eval.cross_format_gate` still grades every pair of it.
+
+    What this test asserts is that the PATH WORKS. What the gate asserts is that the corpus is
+    consistent. Those are different questions and only the first one belongs in the suite."""
+    assert run_gate(limit=2) == 0

@@ -9,10 +9,10 @@ GATES
 =========================================================================
   gate                       value                                   pass/fail
   ------------------------------------------------------------------------
-  full suite                 1702 passed, 8 skipped, 12 xfailed      PASS
+  full suite                 1712 passed, 8 skipped, 12 xfailed      PASS
   dual leak gate             0 leaks, NO type exclusions             PASS
   mutation gate              15 of 17 arms pass, 1 report-only       FAIL (letterspaced only)
-  cross-format consistency   0 unexplained asymmetries               PASS
+  cross-format consistency   76 pairs, 2197 surfaces, 0 asymmetries  PASS
   per-type recall floor      ULICA 100.0% (gate >= 98%)              PASS
   per-type precision         report only, never gates                n/a
   demo (end to end)          0 of 36 PII needles survive, both fmts  PASS
@@ -222,8 +222,6 @@ STILL OPEN
     the numbers.
   - ORG claims "ČSOB, a. s." while ground truth calls the bare "ČSOB" a NAZOV_BANKY. Redacted
     either way; the label is wrong.
-  - eval/cross_format_gate.py still authors its own six fixtures. Now that the corpus is
-    genuinely paired it could grade the real one too, keeping the authored pairs as controls.
   - THE STRUCTURAL ONE, above: the corpus cannot express a single shape round 5 attacked.
 
 =========================================================================
