@@ -23,7 +23,7 @@ W4 metadata scope. Labels are type-only ("[MENO]"); per-entity numbering ("[MENO
 The input file is never modified — output is a new file.
 
 W4b (context.md §10) scrubs document METADATA that carries PII: docProps/core.xml properties
-(dc:creator, cp:lastModifiedBy, ...), docProps/app.xml's Company/Manager free-text fields, and
+(dc:creator, cp:lastModifiedBy, ...), every free-text value in docProps/app.xml, and
 the comment w:author/w:initials attributes deferred from W3 (see _scrub_metadata). These are
 BLANKED UNCONDITIONALLY BY POSITION — detect() never runs over metadata, since an author or
 manager name is PII regardless of whether it matches a detector pattern, and the original value
@@ -38,13 +38,13 @@ import unicodedata
 import urllib.parse
 import zipfile
 from copy import deepcopy
+from functools import lru_cache
 from typing import NamedTuple
 
 from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
-from docx.text.run import Run
 from lxml import etree
 
 from detect.config import DetectConfig
@@ -115,74 +115,195 @@ def _strip_tracked_changes(root) -> None:
             parent.insert(idx + offset, child)
         parent.remove(ins)
 
-    # LAST, on whatever revision bookkeeping the strips above left behind (red-team round 4,
-    # R4-M4b). w:ins and w:del are not the only elements Word stamps with an author: every
-    # FORMATTING revision carries one too -- w:pPrChange (any change to a paragraph's
-    # formatting), w:rPrChange, w:sectPrChange, w:tblPrChange, w:trPrChange, w:tcPrChange,
-    # w:cellIns / w:cellDel. Those elements hold no visible text, only the PREVIOUS formatting,
-    # so nothing above removes them and their w:author survived verbatim into the output --
-    # measured on the xml_attributes surface as "JUDr. Ján Novák".
-    #
-    # Blanked BY POSITION, exactly like docProps/core.xml and for the same reason: a revision
-    # author is the name of a person whether or not it matches any detector pattern, and there
-    # is nothing in it worth preserving. Done as one attribute sweep over the tree rather than
-    # an element whitelist, because the whitelist is what failed here -- _strip_tracked_changes
-    # knew two of Word's revision elements out of the dozen that exist.
+    # The w:author / w:initials that whatever revision bookkeeping the strips above left behind
+    # still carries (red-team round 4, R4-M4b) are blanked by _scrub_attributes, which runs
+    # straight after this pass over the same trees. It is the same blanket sweep this function
+    # used to end with, grown to the rest of the attribute plane (R5-07) -- one sweep rather
+    # than two, so the next attribute nobody thought of has one place to be added.
+
+
+# ------------------------------------------------------------------- THE ATTRIBUTE PLANE
+# Word keeps a great deal of free text in ATTRIBUTES, and the only attribute sweep this writer
+# had was the two names added for R4-M4b. Measured in ONE document (red-team round 5, R5-07): a
+# scanned signature's alt text, a legacy VML stamp's alt text, a bookmark named after the party,
+# a content control's alias and tag, a dropdown's selected value AND ITS WHOLE LIST, and a
+# legacy w:ffData status text and default value all survived a redaction.
+#
+# The sharpest shape is a control carrying <w:showingPlcHdr/>: the page displays "Kliknite sem a
+# zadajte meno." -- a clean page, and the contrast control confirms the visible plane IS redacted
+# -- while the selected client and THE OFFICE'S ENTIRE CLIENT LIST sit in the w:sdtPr attributes
+# underneath. All of it lands on ``xml_attributes``, an OPAQUE surface, so the leak gate only
+# counts a needle of 7 characters or more: a first name, a four-digit bank code or a five-digit
+# PSČ in an alt text is a leak scored CLEAN.
+#
+# Blanked BY POSITION as a BLANKET SWEEP OVER ATTRIBUTE NAMES rather than an element whitelist.
+# That is the R4-M4b argument verbatim and it applies here for the same reason: the whitelist is
+# what failed, because it can only ever know the elements somebody has already thought of.
+_BLANKET_ATTRS = (
+    # Object names and alt text. wp:docPr / pic:cNvPr / a:cNvPr carry @name @descr @title and
+    # the legacy VML v:shape / v:image / v:rect carry @alt @title -- all UNPREFIXED, so one
+    # attribute name covers every element that has ever carried them.
+    "alt", "descr", "title", "name",
+    qn("w:lastValue"),                     # w:dropDownList / w:comboBox: the SELECTED entry
+    qn("w:displayText"), qn("w:value"),    # w:listItem: the list itself
+    qn("w:author"), qn("w:initials"),      # every revision element (R4-M4b)
+)
+
+# w:val CANNOT be swept by name: it is WordprocessingML's universal value attribute and carries
+# font sizes, style ids and numbering levels, none of which survive being emptied. These are the
+# elements whose w:val is free text A PERSON TYPED -- a content control's alias and tag, a legacy
+# Developer-tab form field's status bar, help text, default value and list entries, and a smart
+# tag's attribute value.
+_VAL_TEXT_ELEMENTS = frozenset({
+    qn("w:alias"), qn("w:tag"), qn("w:statusText"), qn("w:helpText"),
+    qn("w:default"), qn("w:listEntry"), qn("w:attr"),
+})
+
+
+def _scrub_attributes(root) -> None:
+    """Blank every attribute under ``root`` that can carry free text, by position."""
     for elem in root.iter():
-        for attr in (qn("w:author"), qn("w:initials")):
+        for attr in _BLANKET_ATTRS:
             if elem.get(attr) is not None:
                 elem.set(attr, "")
+        if elem.tag in _VAL_TEXT_ELEMENTS and elem.get(qn("w:val")) is not None:
+            elem.set(qn("w:val"), "")
+        # <w:ffData><w:name w:val="Klient"/> -- the legacy form field's own name. Scoped to that
+        # parent because w:name/@w:val is ALSO a style's display name and a building block's
+        # gallery name, and blanking either of those is document damage, not redaction.
+        if elem.tag == qn("w:name") and elem.get(qn("w:val")) is not None:
+            parent = elem.getparent()
+            if parent is not None and parent.tag == qn("w:ffData"):
+                elem.set(qn("w:val"), "")
+        # A bookmark name is free text the author typed -- "Adresa_Maria_Kovacova" -- EXCEPT in
+        # Word's own namespace (_Toc, _Ref, _GoBack, _Hlk), which is what every table-of-contents
+        # entry and cross-reference points AT. Renaming one of those breaks the navigation
+        # instead of redacting anything: R5-08 is exactly what that costs, it has bitten this
+        # project twice, and tests/test_docx_field_codes.py pins the survival list.
+        if elem.tag == qn("w:bookmarkStart"):
+            value = elem.get(qn("w:name"))
+            if value is not None and not value.startswith("_"):
+                elem.set(qn("w:name"), "")
 
 
-# The <w:r> children that CONTRIBUTE CHARACTERS to run.text, and therefore to the offsets
-# detect() is given. python-docx renders w:t as its text, w:tab as "\t", and w:br / w:cr as
-# "\n"; w:noBreakHyphen and w:softHyphen render as their characters. All of them must be
-# dropped when a run is rebuilt, or their text is duplicated into every fragment.
-_TEXT_BEARING = frozenset({
-    qn("w:t"), qn("w:tab"), qn("w:br"), qn("w:cr"),
-    qn("w:noBreakHyphen"), qn("w:softHyphen"), qn("w:delText"),
-})
-# Split a fragment so tabs and line breaks can be re-emitted as the elements they were.
-_TEXT_SPLIT_RE = re.compile(r"([\t\n])")
+# Which <w:r> children CONTRIBUTE CHARACTERS to run.text -- and therefore to the offsets
+# detect() is given -- ASKED OF python-docx ITSELF rather than hand-maintained.
+#
+# The hand-written set disagreed with CT_R.text in BOTH directions at once (red-team round 5,
+# R5-09), because it was written from the docstring's DESCRIPTION of run.text and never checked
+# against the library:
+#
+#   * w:ptab -- Word's Alignment Tab, what puts the page number at the right margin of a header
+#     and the leader dots in a TOC line -- renders as "\t" and was NOT in the set, so it was
+#     cloned into EVERY fragment and its tab was separately re-emitted as a plain <w:tab/>;
+#   * w:softHyphen renders as "" and WAS in the set, so it was stripped from every clone and
+#     never re-emitted: silently deleted;
+#   * w:noBreakHyphen renders as "-" and came back as a literal hyphen-minus inside a <w:t>,
+#     i.e. a non-breaking hyphen downgraded to a breaking one.
+#
+# The probe asks the question the library answers: a <w:r> holding exactly one child of this tag
+# either renders characters through CT_R.text or it does not. That is CT_R.text's own xpath,
+# evaluated by CT_R.text, so a python-docx upgrade that adds an inner-content element is picked
+# up instead of silently corrupting documents (tests/test_redteam_round5.py pins the derived
+# answer against the xpath in the installed library's source).
+#
+# The child is given text, so a w:t is judged by what it renders and not by happening to be
+# empty. w:delText -- which the old hand-written set carried -- is NOT selected by CT_R.text and
+# so is not text-bearing; it can only live inside a w:del, and _strip_tracked_changes removes
+# every w:del subtree before any of this runs.
+_PROBE_RUN = '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'
 
 
-def _rebuild_run(run, fragments: list[tuple[str, str]]) -> None:
+@lru_cache(maxsize=None)
+def _is_text_bearing(tag: str) -> bool:
+    run = parse_xml(_PROBE_RUN)
+    child = run.makeelement(tag, {})
+    child.text = "X"
+    run.append(child)
+    return run.text != ""
+
+
+def _run_spans(r_elem, start: int) -> list[tuple[object, int, str]]:
+    """Every child of ``r_elem`` as (child, first character offset, what it renders).
+
+    A child that contributes NO characters -- w:rPr, w:softHyphen, w:drawing, w:fldChar,
+    w:instrText -- gets an empty rendering at the position it sits in. That is what lets
+    _rebuild_run put it back exactly ONCE, where it was, instead of copying it into every
+    fragment (which is what duplicated w:ptab) or dropping it (which is what deleted
+    w:softHyphen)."""
+    spans = []
+    pos = start
+    for child in r_elem:
+        rendered = str(child) if _is_text_bearing(child.tag) else ""
+        spans.append((child, pos, rendered))
+        pos += len(rendered)
+    return spans
+
+
+def _emit_chars(src, text: str) -> list:
+    """Re-emit surviving characters AS THE ELEMENT THEY CAME FROM.
+
+    A child that renders its own text (a w:t) is cloned with the surviving text substituted, so
+    its attributes survive. A child that renders a FIXED string (w:tab, w:br, w:cr, w:ptab,
+    w:noBreakHyphen) is cloned as itself, with its own attributes -- a w:ptab keeps its
+    alignment and leader, and a non-breaking hyphen comes back non-breaking."""
+    if str(src) == (src.text or ""):
+        clone = deepcopy(src)
+        clone.text = text
+        # Preserve leading/trailing whitespace in the fragment (labels have none, but a
+        # surviving boundary fragment like ' súhlasí' does).
+        clone.set(_XML_SPACE, "preserve")
+        return [clone]
+    return [deepcopy(src) for _ in range(len(text) // len(str(src)))]
+
+
+def _rebuild_run(r_elem, items: list[tuple]) -> None:
     """Replace a single <w:r> with one new <w:r> per fragment, cloning the original run's
-    formatting onto each. ``fragments`` is an ordered list of ('t', text) surviving-text and
-    ('l', label) replacement pieces. An empty list means the whole run was covered -> remove.
-    """
-    r_elem = run._r
+    formatting onto each. ``items`` is the ordered emission stream _redact_paragraph built:
+
+        ('c', char, source child)  a surviving character, and which child rendered it
+        ('l', label)               a replacement label, which starts a new fragment
+        ('e', child)               a child that renders no characters, put back exactly once
+
+    A fragment with nothing in it is not emitted, so a wholly covered run disappears."""
     parent = r_elem.getparent()
     idx = parent.index(r_elem)
 
-    for offset, (_kind, value) in enumerate(fragments):
+    fragments: list[list[tuple]] = [[]]
+    for item in items:
+        if item[0] == "l":
+            fragments.append([item])
+            fragments.append([])
+        else:
+            fragments[-1].append(item)
+
+    offset = 0
+    for frag in fragments:
+        if not frag:
+            continue
         clone = deepcopy(r_elem)  # carries a copy of <w:rPr> so formatting is preserved
-        # EVERY text-bearing child is removed, not just the first <w:t> rewritten. See
-        # _TEXT_BEARING: a run can hold several, python-docx never emits one that does, and
-        # the old code copied the extras into every fragment with their ORIGINAL TEXT.
         for child in list(clone):
-            if child.tag in _TEXT_BEARING:
+            if child.tag != qn("w:rPr"):
                 clone.remove(child)
-        # The fragment's own text is then re-emitted STRUCTURALLY: run.text renders <w:tab/>
-        # as "\t" and <w:br/> as "\n", and those characters are inside the offsets detect()
-        # was given, so writing them back as literal characters inside a <w:t> would silently
-        # turn a line break into a space. Splitting them back out keeps the document looking
-        # like itself.
-        for piece in _TEXT_SPLIT_RE.split(value):
-            if piece == "":
+        src, buf = None, ""
+        for item in frag:
+            if item[0] == "c" and item[2] is src:
+                buf += item[1]
                 continue
-            if piece == "\t":
-                clone.append(clone.makeelement(qn("w:tab"), {}))
-            elif piece == "\n":
-                clone.append(clone.makeelement(qn("w:br"), {}))
-            else:
-                t = clone.makeelement(qn("w:t"), {})
-                t.text = piece
-                # Preserve leading/trailing whitespace in the fragment (labels have none, but
-                # a surviving boundary fragment like ' súhlasí' does).
-                t.set(_XML_SPACE, "preserve")
-                clone.append(t)
+            if src is not None:
+                clone.extend(_emit_chars(src, buf))
+            src, buf = (item[2], item[1]) if item[0] == "c" else (None, "")
+            if item[0] == "e":
+                clone.append(deepcopy(item[1]))
+            elif item[0] == "l":
+                label = clone.makeelement(qn("w:t"), {})
+                label.text = item[1]
+                label.set(_XML_SPACE, "preserve")
+                clone.append(label)
+        if src is not None:
+            clone.extend(_emit_chars(src, buf))
         parent.insert(idx + offset, clone)
+        offset += 1
 
     parent.remove(r_elem)
 
@@ -285,20 +406,23 @@ def _redact_paragraph(
     _is_alternate_fallback). It never affects what is removed — only what is counted."""
     # Every run in the paragraph, nested ones included -- NOT paragraph.runs, which is a
     # direct-child view and silently omits anything inside a <w:hyperlink> or a <w:sdt>.
-    runs = [Run(r, paragraph) for r in _paragraph_runs(paragraph._p)]
-    if not runs:
+    run_elems = _paragraph_runs(paragraph._p)
+    if not run_elems:
         return
 
-    # Reconstruct paragraph text and remember which run owns each character offset.
-    run_start: list[int] = []
-    owner: list[int] = []
+    # Reconstruct paragraph text, remembering for every character WHICH CHILD OF WHICH RUN
+    # rendered it. That mapping is what lets the rebuild put a w:ptab / w:br / w:noBreakHyphen
+    # back as the element it was rather than as a character in a <w:t> (R5-09). The joined
+    # renderings are CT_R.text by construction: _run_spans renders exactly the children
+    # CT_R.text selects, in document order.
+    spans_by_run = []
     pieces: list[str] = []
     pos = 0
-    for ri, r in enumerate(runs):
-        run_start.append(pos)
-        text = r.text
+    for r_elem in run_elems:
+        spans = _run_spans(r_elem, pos)
+        spans_by_run.append(spans)
+        text = "".join(rendered for _child, _a, rendered in spans)
         pieces.append(text)
-        owner.extend([ri] * len(text))
         pos += len(text)
     recon = "".join(pieces)
 
@@ -358,28 +482,27 @@ def _redact_paragraph(
                 checksum=c.checksum,
             )
 
-    # Build, per touched run, the ordered surviving-text / label fragments, then rewrite it.
-    for ri, r in enumerate(runs):
-        rs = run_start[ri]
-        re = rs + len(r.text)
-        touched = any(covered[i] or i in label_at for i in range(rs, re))
+    # Build, per touched run, the ordered emission stream, then rewrite it.
+    for r_elem, spans in zip(run_elems, spans_by_run):
+        items: list[tuple] = []
+        touched = False
+        for child, a, rendered in spans:
+            if not rendered:
+                items.append(("e", child))
+                continue
+            for k, ch in enumerate(rendered):
+                i = a + k
+                if i in label_at:
+                    items.append(("l", label_at[i]))
+                    touched = True
+                if covered[i]:
+                    touched = True
+                else:
+                    items.append(("c", ch, child))
         if not touched:
             continue  # leave the run — and its exact XML — completely alone
 
-        fragments: list[tuple[str, str]] = []
-        buf = ""
-        for i in range(rs, re):
-            if i in label_at:
-                if buf:
-                    fragments.append(("t", buf))
-                    buf = ""
-                fragments.append(("l", label_at[i]))
-            if not covered[i]:
-                buf += recon[i]
-        if buf:
-            fragments.append(("t", buf))
-
-        _rebuild_run(r, fragments)
+        _rebuild_run(r_elem, items)
 
 
 def _redact_cells(
@@ -602,10 +725,88 @@ def _alt_chunk_parts(path: str, trees: list[_Tree]) -> list[str]:
     return parts
 
 
-_APP_XML_PII_TAGS = ("Company", "Manager")
+# ------------------------------------------------------------ docProps/app.xml (R5-05/06/10)
+# The extended-properties part (ECMA-376 Part 1 §15.2.12.1). Its scrub used to be a two-item tag
+# list -- ("Company", "Manager") -- applied as a REGEX over the raw bytes, and that was wrong
+# three ways at once (red-team round 5):
+#
+#   R5-05  Word populates <TitlesOfParts> with THE TEXT OF EVERY HEADING IN THE DOCUMENT -- that
+#          is how the properties pane and Explorer's preview show an outline -- so a contract
+#          whose Article I reads "Kúpna zmluva – Mária Kováčová" shipped that string in its
+#          metadata. <HyperlinkBase> is the office's own share path, which on a Windows domain
+#          carries an account name. Neither is Company or Manager, and app_xml is a NAMED,
+#          non-opaque surface: the leak gate counts every one of them with no discount.
+#   R5-06  <ep:Company> and <Company> are the SAME ELEMENT in XML and different strings to a
+#          regex. This was the only scrub in the writer that parsed XML with a regular
+#          expression; every other branch uses Clark names and is prefix-safe.
+#   R5-10  ``.decode("utf-8")`` with no guard turned a windows-1250 app.xml -- valid XML, simply
+#          not UTF-8, which is what an RTF->DOCX converter or a legacy Central-European court
+#          system emits -- into a raw UnicodeDecodeError where context.md §3 promises a named
+#          refusal. Parsing the BYTES honours the declaration's encoding, so the part is now
+#          read correctly and redacted. Deliberately NOT papered over with
+#          ``decode("utf-8", "replace")``: that would silently mojibake the part and write the
+#          result back, which is round 4's cp1250 finding in reverse.
+#
+# So: parse with lxml, match on EXPANDED names, and blank every free-text value BY POSITION --
+# the same choice _scrub_extra_parts makes for customXml, for the same reason. This is an
+# application's private bookkeeping part that no reviewer reads, so blanking a value that was
+# not PII costs nothing at all, while enumerating the tags that might be PII is precisely the
+# enumeration that just failed.
+#
+# CHECKED BEFORE BLANKING BY POSITION -- nothing downstream reads a VALUE out of this part:
+# eval/extract.py takes it as one RAW TEXT HAYSTACK (S_APP = raw("docProps/app.xml"));
+# eval/baselines.py only substitutes into it when building the greedy oracle's own inputs; and
+# corpus/docx_builder.py writes <Company> into GENERATED SOURCES, never reads an output.
+#
+# WHAT IS KEPT is what Word VALIDATES rather than reads: the numeric and boolean bookkeeping.
+# Blanking one of those leaves an empty string where the schema wants an xsd:int, which is a
+# corrupt-file dialog rather than a redaction. The list is the round's, plus the other
+# INTEGER-VALUED elements of the same schema (TotalTime and CharactersWithSpaces are in every
+# app.xml Word writes; the presentation counters ride along for the same reason) -- an element
+# whose schema type is an integer cannot carry a Slovak name, so keeping it costs no recall.
+_EXTENDED_PROPS_NS = (
+    "{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}"
+)
+_VT_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes}"
+_APP_XML_KEEP = frozenset({
+    "Pages", "Words", "Characters", "CharactersWithSpaces", "Lines", "Paragraphs", "TotalTime",
+    "Slides", "Notes", "HiddenSlides", "MMClips", "DocSecurity", "ScaleCrop", "LinksUpToDate",
+    "SharedDoc", "HyperlinksChanged", "AppVersion", "Application", "Template",
+})
+# The vt: variant types that hold a NUMBER, A BOOLEAN OR A TIMESTAMP rather than text. vt:lpstr,
+# vt:lpwstr and vt:bstr are text and are blanked -- that is every heading in <TitlesOfParts>.
+_APP_XML_DECLARATION = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+_VT_NON_TEXT = frozenset({
+    "i1", "i2", "i4", "i8", "int", "ui1", "ui2", "ui4", "ui8", "uint",
+    "r4", "r8", "decimal", "cy", "bool", "date", "filetime", "empty", "null", "clsid", "error",
+})
 
 
-def _scrub_metadata(doc) -> None:
+def _scrub_app_xml(part) -> None:
+    """Blank every free-text value in a docProps/app.xml part, by position."""
+    root = etree.fromstring(part._blob)
+    for elem in root.iter():
+        if not isinstance(elem.tag, str):
+            continue  # a comment or a processing instruction holds no property value
+        name = etree.QName(elem).localname
+        if elem.tag.startswith(_VT_NS):
+            if name in _VT_NON_TEXT:
+                continue
+        elif name in _APP_XML_KEEP:
+            continue
+        # ``.strip()``: a whitespace-only text node is the file's own INDENTATION between
+        # elements, not a value. Blanking it would reflow the part for nothing.
+        if elem.text and elem.text.strip():
+            elem.text = ""
+    # The declaration is written out rather than left to lxml, which spells it with SINGLE
+    # quotes. Word, python-docx and every other part of the package use the double-quoted form,
+    # and tests/test_writer_docx_metadata.py pins these exact bytes -- a metadata scrub has no
+    # business changing the shape of the XML declaration it re-serialises.
+    part._blob = _APP_XML_DECLARATION + etree.tostring(root, encoding="UTF-8",
+                                                       xml_declaration=False)
+
+
+def _scrub_metadata(doc, path: str) -> None:
     """W4b (context.md §10): blank the three PII-bearing metadata locations, by position —
     never via detect(), never preserving the original value.
 
@@ -613,10 +814,10 @@ def _scrub_metadata(doc) -> None:
       settable str property backed by a ZeroOrOne element); the API write persists through
       doc.save(). created/modified/revision are dates/ints, not PII, and are left alone.
     * docProps/app.xml: python-docx has no API for this part — it comes back as a generic
-      blob-backed Part. Company/Manager are located with a targeted regex on the decoded
-      blob so every unrelated tag (HeadingPairs, TitlesOfParts, vt: vectors, the <?xml?>
-      declaration) is byte-preserved; only a NON-EMPTY <Tag>...</Tag> is rewritten, so an
-      already-empty <Tag/>/<Tag></Tag> is left as-is rather than needlessly touched.
+      blob-backed Part, so its BYTES are parsed here and every free-text value is blanked by
+      position (see _scrub_app_xml). A part that will not parse at all is refused BY NAME,
+      like a malformed .rels part, rather than raised as a library message: this runs BEFORE
+      doc.save(), so "nothing was written" is true by construction.
     * word/comments.xml <w:comment w:author=...>: deferred from W3's paragraph pass.
       Same element-vs-blob asymmetry applies — a CommentsPart's .blob RE-SERIALIZES from its
       live .element, so the attribute is mutated ON THE ELEMENT, never via a ._blob reassign
@@ -629,10 +830,10 @@ def _scrub_metadata(doc) -> None:
     for part in doc.part.package.iter_parts():
         if str(part.partname) != "/docProps/app.xml":
             continue
-        xml = part._blob.decode("utf-8")
-        for tag in _APP_XML_PII_TAGS:
-            xml = re.sub(rf"<{tag}>.+?</{tag}>", f"<{tag}></{tag}>", xml, flags=re.DOTALL)
-        part._blob = xml.encode("utf-8")
+        try:
+            _scrub_app_xml(part)
+        except (etree.XMLSyntaxError, ValueError) as exc:
+            raise UnreadableDocumentError(path, f"docProps/app.xml: {exc}") from exc
         break
 
     for rel in doc.part.rels.values():
@@ -885,7 +1086,8 @@ def _scrub_rel_targets(path: str, known_entities: list[str], config) -> int:
 #   <w:r><w:instrText> HYPERLINK "mailto:jan.novak@advokat.sk" </w:instrText></w:r>  (R4-T5)
 #
 # Neither goes through .rels, so _scrub_rel_targets never saw them; and w:instrText is not in
-# _TEXT_BEARING and python-docx's Run.text does not render it, so detect() never saw it either.
+# text-bearing (see _is_text_bearing) and python-docx's Run.text does not render it, so
+# detect() never saw it either.
 # The page read "[MENO_1]" while document.xml -- a STRICT text surface -- still named the party
 # and carried their address. RTF->DOCX conversion, Word 97-era documents and several DMS and
 # court-portal exports write hyperlinks this way.
@@ -1236,6 +1438,11 @@ def _redact_docx(
     #    (so an insertion carrying PII is caught by the existing W1-W3 code — no special-casing).
     for tree in trees:
         _strip_tracked_changes(tree.element)
+        # ONE attribute sweep per tree, straight after the strip so it also reaches the revision
+        # bookkeeping the strip leaves behind. Alt text, bookmark names, content-control aliases,
+        # dropdown lists and legacy form-field defaults (R5-07) all live on the attribute plane,
+        # which no paragraph pass can see.
+        _scrub_attributes(tree.element)
 
     # 0b) Field instructions and data bindings, for the same reason the tracked-change strip
     #     runs first: both carry PII that is not text detect() can see, and both must be settled
@@ -1271,9 +1478,10 @@ def _redact_docx(
     for tree in trees:
         _close_tree(tree)
 
-    # 6) W4b: blank PII-bearing metadata (core.xml properties, app.xml Company/Manager, and
-    #    the comment w:author/w:initials deferred from W3) LAST, unconditionally by position.
-    _scrub_metadata(doc)
+    # 6) W4b: blank PII-bearing metadata (core.xml properties, every free-text value in
+    #    app.xml, and the comment w:author/w:initials deferred from W3) LAST, unconditionally
+    #    by position. Still BEFORE doc.save(), so a refusal raised in here leaves no output.
+    _scrub_metadata(doc, in_path)
 
     doc.save(out_path)
 

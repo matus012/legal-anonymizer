@@ -28,7 +28,9 @@ Findings are documented in ``redteam/FINDINGS_ROUND5.md``.
 """
 from __future__ import annotations
 
+import inspect
 import os
+import re
 import zipfile
 from pathlib import Path
 
@@ -36,12 +38,14 @@ import pytest
 from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import qn
+from docx.oxml.text.run import CT_R
 from lxml import etree
 
 from eval.extract import extract
 from eval.leak import Leak
 from eval.leak_gate import split_found_in
-from writer.docx_body import _scrub_field_instruction, redact_docx_collect
+from writer.docx_body import (_is_text_bearing, _scrub_field_instruction,
+                              redact_docx_collect)
 from writer.errors import EmbeddedSubDocumentError, UnreadableDocumentError
 
 # --------------------------------------------------------------------------------- OOXML kit
@@ -544,6 +548,14 @@ def _app_fixture(tmp_path, blob, name):
                   patch=lambda s, d: patch_package(s, d, replace={"docProps/app.xml": blob}))
 
 
+def _app_source(tmp_path, blob, name):
+    """The same fixture BEFORE redaction. A reachability control has to measure the SOURCE —
+    see the amendment note on test_control_r5_05_app_xml_is_a_named_text_surface."""
+    src = doc_with_body(['<w:p><w:r><w:t>Telo.</w:t></w:r></w:p>'], Path(tmp_path) / f"{name}.docx")
+    return patch_package(src, str(Path(tmp_path) / f"{name}_p.docx"),
+                         replace={"docProps/app.xml": blob})
+
+
 def test_control_r5_05_company_and_manager_are_blanked(tmp_path):
     """CONTRAST CONTROL for R5-05: the two tags _APP_XML_PII_TAGS names ARE blanked."""
     out, _ = _app_fixture(tmp_path, _APP.encode(), "r5_05_ctl")
@@ -554,9 +566,18 @@ def test_control_r5_05_company_and_manager_are_blanked(tmp_path):
 
 def test_control_r5_05_app_xml_is_a_named_text_surface(tmp_path):
     """REACHABILITY CONTROL for R5-05: `app_xml` is a NAMED, non-opaque surface, so a leak here
-    is graded by the leak gate with no attributability discount at all."""
-    out, _ = _app_fixture(tmp_path, _APP.encode(), "r5_05_reach")
-    res = extract(out)
+    is graded by the leak gate with no attributability discount at all.
+
+    AMENDED 2026-09-17, evening run, WITH THE R5-05 FIX. The control asserted its gate verdict
+    over the REDACTED OUTPUT, so closing R5-05 — TitlesOfParts and HyperlinkBase are now blanked
+    — emptied its haystack and it failed for the opposite of the reason it exists. The haystack
+    moved to the SOURCE package, which is what this file's own docstring says a reachability
+    control measures ("the needle is provably present on the expected surface of the UNREDACTED
+    fixture"). Nothing was weakened: the same needle, the same surface tuple and the same
+    `counted == ('app_xml',)`, `set_aside == ()` verdict are asserted, on the package that still
+    contains the needle."""
+    src = _app_source(tmp_path, _APP.encode(), "r5_05_reach")
+    res = extract(src)
     found = tuple(s for s, t in res.by_surface.items() if "Mária Kováčová" in t)
     assert found == ("app_xml",)
     counted, aside = split_found_in(Leak("Mária Kováčová", "MENO", found, ("metadata_app",)),
@@ -564,9 +585,14 @@ def test_control_r5_05_app_xml_is_a_named_text_surface(tmp_path):
     assert counted == ("app_xml",) and aside == ()
 
 
-@pytest.mark.xfail(strict=True, reason="R5-05: _APP_XML_PII_TAGS is (Company, Manager) only; "
-                                       "Word writes every heading into TitlesOfParts and the "
-                                       "office share path into HyperlinkBase")
+# FIXED 2026-09-17, evening run. The two-item tag list is gone: docProps/app.xml is parsed with
+# lxml and every free-text value is blanked BY POSITION, keeping only the numeric/boolean
+# elements Word validates against (see writer/docx_body.py::_scrub_app_xml). That is what closes
+# TitlesOfParts — which Word fills with the text of every heading — and HyperlinkBase.
+#
+# The marker is gone rather than flipped to xpass: a finding that has been fixed must become an
+# ordinary regression test, or a later regression puts it back to "xfail" -- the state this file
+# calls normal -- and nobody notices the fix was undone.
 def test_r5_05_app_xml_free_text_carrying_pii_is_blanked(tmp_path):
     out, _ = _app_fixture(tmp_path, _APP.encode(), "r5_05")
     app = part(out, "docProps/app.xml")
@@ -597,9 +623,13 @@ def test_control_r5_06_the_prefixed_part_is_the_same_document(tmp_path):
     assert b.find(ep + "Manager").text == "Mária Kováčová"
 
 
-@pytest.mark.xfail(strict=True, reason="R5-06: _scrub_metadata rewrites app.xml with a regex "
-                                       "over the raw bytes ('<Company>.+?</Company>'), which "
-                                       "is blind to any namespace prefix")
+# FIXED 2026-09-17, evening run, by the same rewrite as R5-05: the regex over raw bytes is gone
+# and the part is parsed with lxml, so an element is matched by its EXPANDED NAME and a prefix
+# makes no difference. Filed and fixed separately from R5-05 on purpose (FINDINGS_ROUND5.md §6):
+# an incomplete tag list and a regex parsing XML are different mechanisms, and merging them would
+# have let the first be "fixed" by adding tags while the second stayed live.
+#
+# Marker deleted rather than flipped to xpass, for the reason given on R5-05.
 def test_r5_06_app_xml_scrub_is_namespace_prefix_independent(tmp_path):
     out, _ = _app_fixture(tmp_path, _APP_PREFIXED.encode(), "r5_06")
     app = part(out, "docProps/app.xml")
@@ -662,11 +692,18 @@ def test_control_r5_07_the_form_field_result_run_on_the_page_is_redacted(tmp_pat
 
 def test_control_r5_07_a_short_attribute_needle_is_set_aside_by_the_gate(tmp_path):
     """REACHABILITY CONTROL for R5-07: `xml_attributes` is an OPAQUE surface, so the gate only
-    counts a needle of >= 7 characters. A first name or a 4-digit code here is CLEAN."""
-    out, _ = redact(tmp_path, "r5_07_short",
-                    ['<w:p><w:r><w:pict><v:shape id="s2" alt="Klient Ján" '
-                     'style="width:10pt;height:10pt"/></w:pict></w:r></w:p>'])
-    res = extract(out)
+    counts a needle of >= 7 characters. A first name or a 4-digit code here is CLEAN — which is
+    WHY R5-07 had to be fixed in the writer rather than left to the gate.
+
+    AMENDED 2026-09-17, evening run, WITH THE R5-07 FIX, exactly as
+    test_control_r5_05_app_xml_is_a_named_text_surface was and for the same reason: the alt text
+    it measured is now blanked, so the verdict had to be measured on the SOURCE package. Same
+    needle, same surface, same `counted == ()`, `set_aside == ('xml_attributes',)` verdict."""
+    src = doc_with_body(['<w:p><w:r><w:pict><v:shape id="s2" alt="Klient Ján" '
+                         'style="width:10pt;height:10pt"/></w:pict></w:r></w:p>'],
+                        tmp_path / "r5_07_short.docx")
+    assert reopens(src)
+    res = extract(src)
     found = tuple(s for s, t in res.by_surface.items() if "Ján" in t)
     assert "xml_attributes" in found
     counted, aside = split_found_in(Leak("Ján", "MENO", ("xml_attributes",), ("body",)),
@@ -674,9 +711,14 @@ def test_control_r5_07_a_short_attribute_needle_is_set_aside_by_the_gate(tmp_pat
     assert counted == () and aside == ("xml_attributes",)
 
 
-@pytest.mark.xfail(strict=True, reason="R5-07: the writer's only attribute sweep is "
-                                       "w:author/w:initials; alt text, bookmark names, sdtPr "
-                                       "aliases, dropdown lists and w:ffData defaults survive")
+# FIXED 2026-09-17, evening run. The w:author/w:initials blanket grew into a full attribute
+# sweep (writer/docx_body.py::_scrub_attributes): alt text and object names by attribute name,
+# w:val on the elements whose w:val is free text a person typed, and w:bookmarkStart/@w:name
+# except Word's own _Toc/_Ref/_GoBack/_Hlk namespace. The w:listItem entries are BLANKED IN
+# PLACE rather than removed, because removing them would change what the control OFFERS — a
+# behaviour change, not a redaction.
+#
+# Marker deleted rather than flipped to xpass, for the reason given on R5-05.
 def test_r5_07_attribute_borne_pii_in_document_xml_is_removed(tmp_path):
     out, _ = redact(tmp_path, "r5_07", [_ATTRS])
     body = part(out, "word/document.xml")
@@ -757,10 +799,39 @@ def test_control_r5_09_an_untouched_run_keeps_its_inner_content(tmp_path):
     assert "<w:tab/>" not in body
 
 
-@pytest.mark.xfail(strict=True, reason="R5-09: w:ptab is not in _TEXT_BEARING so it is cloned "
-                                       "into every fragment AND re-emitted as w:tab; "
-                                       "w:softHyphen is in it but renders as nothing, so it is "
-                                       "deleted; w:noBreakHyphen is downgraded to a literal '-'")
+def test_r5_09_text_bearing_is_derived_from_the_xpath_run_text_actually_uses(tmp_path):
+    """THE PIN R5-09 ASKED FOR. The hand-written ``_TEXT_BEARING`` is gone; membership is now
+    decided by ``_is_text_bearing``, which asks the installed python-docx directly. This test
+    holds that answer against the xpath ``CT_R.text`` really evaluates, read out of the library's
+    own source, so a python-docx upgrade that adds an inner-content element turns the suite red
+    instead of silently corrupting documents.
+
+    The candidate universe is that xpath PLUS the run children that carry no characters —
+    including the two the old hand-written set got wrong in opposite directions (``w:softHyphen``
+    was in it and renders nothing; ``w:delText`` was in it and ``CT_R.text`` never selects it)."""
+    src = inspect.getsource(CT_R.text.fget)
+    m = re.search(r'self\.xpath\(\s*"([^"]+)"\s*\)', src)
+    assert m is not None, f"CT_R.text no longer computes its text from an xpath literal:\n{src}"
+    in_xpath = {qn(t.strip()) for t in m.group(1).split("|")}
+
+    not_content = {qn(t) for t in ("w:rPr", "w:softHyphen", "w:delText", "w:instrText",
+                                   "w:fldChar", "w:sym", "w:drawing", "w:object", "w:pict",
+                                   "w:footnoteReference", "w:lastRenderedPageBreak")}
+    universe = in_xpath | not_content
+    derived = {tag for tag in universe if _is_text_bearing(tag)}
+    assert derived == in_xpath, (
+        "_is_text_bearing disagrees with the xpath CT_R.text uses: "
+        f"missing {sorted(in_xpath - derived)}, extra {sorted(derived - in_xpath)}")
+
+
+# FIXED 2026-09-17, evening run. ``_TEXT_BEARING`` is not hand-maintained any more (it is not a
+# set any more): _is_text_bearing asks python-docx whether a given child renders characters, and
+# _run_spans / _rebuild_run re-emit every surviving character AS THE ELEMENT IT CAME FROM, with
+# its attributes — so a w:ptab keeps its alignment and leader and is emitted once, a w:softHyphen
+# is carried through as a child that renders nothing, and a w:noBreakHyphen comes back
+# non-breaking. Pinned against the library by the test above.
+#
+# Marker deleted rather than flipped to xpass, for the reason given on R5-05.
 def test_r5_09_rebuilding_a_run_preserves_its_inner_content_elements(tmp_path):
     faults = []
 
@@ -806,10 +877,35 @@ def test_control_r5_10_the_cp1250_part_is_well_formed_xml(tmp_path):
     assert root.find(ep + "Company").text == "Ján Novák"
 
 
-@pytest.mark.xfail(strict=True, reason="R5-10: _scrub_metadata does part._blob.decode('utf-8') "
-                                       "unguarded, so a legacy cp1250 docProps/app.xml leaves "
-                                       "the writer as UnicodeDecodeError instead of the "
-                                       "contracted UnreadableDocumentError")
+def test_r5_10_the_cp1250_part_is_scrubbed_and_not_mojibaked(tmp_path):
+    """ADDED 2026-09-17, evening run, WITH the R5-10 fix. The test below accepts "refused by
+    name" as well as "redacted", so on its own it would pass for a writer that refused the
+    document — and the fix REDACTS it. This pins the stronger half: the name is gone from the
+    part, and the part comes back as well-formed XML that still parses, rather than as the
+    mojibake a decode('utf-8', 'replace') would have written back."""
+    src = doc_with_body(['<w:p><w:r><w:t>Telo.</w:t></w:r></w:p>'], tmp_path / "r5_10b.docx")
+    src = patch_package(src, str(tmp_path / "r5_10b_p.docx"),
+                        replace={"docProps/app.xml": _APP_CP1250})
+    out = str(tmp_path / "r5_10b_r.docx")
+    redact_docx_collect(src, out, list(KNOWN))
+    assert reopens(out)
+    with zipfile.ZipFile(out) as z:
+        blob = z.read("docProps/app.xml")
+    ep = "{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}"
+    root = etree.fromstring(blob)
+    assert root.find(ep + "Company").text in (None, "")
+    assert "Novák" not in blob.decode("utf-8")
+    assert "Nov�k" not in blob.decode("utf-8")  # the mojibake this must not produce
+
+
+# FIXED 2026-09-17, evening run, and REDACTED rather than refused, which is the better half of
+# the test's "or": _scrub_app_xml parses the BYTES with etree.fromstring, which honours the
+# declaration's windows-1250 encoding, so the part is read correctly, blanked and written back as
+# UTF-8. A part that will not parse at all is refused BY NAME as UnreadableDocumentError, before
+# doc.save(), so "nothing was written" stays true. Deliberately NOT decode('utf-8', 'replace'),
+# which would mojibake the part and write the result back.
+#
+# Marker deleted rather than flipped to xpass, for the reason given on R5-05.
 def test_r5_10_a_non_utf8_metadata_part_is_redacted_or_refused_by_name(tmp_path):
     src = doc_with_body(['<w:p><w:r><w:t>Telo.</w:t></w:r></w:p>'], tmp_path / "r5_10.docx")
     src = patch_package(src, str(tmp_path / "r5_10_p.docx"),
