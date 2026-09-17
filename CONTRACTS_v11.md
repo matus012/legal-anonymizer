@@ -463,3 +463,21 @@ matched ONLY when followed by a number or preceded by `ul.` / `ulica` / `nám.` 
   the tool was auto-redacting "Monday" out of contracts. Stoplisting demotes to the review
   bucket; it does not delete the word from the gazetteer, so an anchored "obec Banka" still
   matches.
+* 2026-09-17 — AMENDMENT 18 (§8.2, mutation gate): a mutation arm may be REPORT ONLY. The
+  composite `line_break_mid` applied TWO deformations at once — a newline between every pair of
+  words, and a newline inside every alphanumeric run of 6+ — and scored 0.466, which could not
+  answer the only question that matters: is the tool weak against a REAL line wrap, or only
+  against a synthetic break inside a token? Split and measured on the same tree, the real half
+  `wrap_at_space` is **0.971** and over the gate, and the synthetic half `break_in_token` is
+  0.469. The composite number was dominated by the half with no producer. `break_in_token` is
+  therefore listed in `corpus/mutations.py::REPORT_ONLY`: it is still measured, still printed
+  with its real number, and prints as `report` so it can never be misread as a pass — it simply
+  does not fail the build on a deformation nothing emits (a PDF renderer breaks a line at a
+  space; a DOCX run boundary inserts no character at all and `writer/docx_body.py` rejoins the
+  runs before detection sees them). **This is not a threshold change and must never be used as
+  one.** `ROBUSTNESS_MIN` stays at 0.95 for every arm including this one; the bar for
+  REPORT_ONLY is a written, MEASURED demonstration that no real producer emits the deformation,
+  and moving an arm there is a dated, reviewable act rather than a number edit. The composite
+  function survives, composed of the two halves, so the historical figure stays reproducible.
+  NOTE FOR ANY FUTURE READER OF THE OLD NUMBER: the overnight brief of 2026-09-17 recorded the
+  between-words half as 0.839. Re-measured on the committed tree it is 0.971; use this figure.

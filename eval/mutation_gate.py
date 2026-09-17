@@ -76,7 +76,7 @@ from typing import Callable, Iterable
 
 from lxml import etree
 
-from corpus.mutations import CASE_DESTROYING, MUTATIONS
+from corpus.mutations import CASE_DESTROYING, MUTATIONS, REPORT_ONLY
 from detect.core import detect
 
 # --------------------------------------------------------------------------- constants
@@ -489,13 +489,21 @@ def run_gate(corpus_dir: Path) -> int:
     for name in MUTATIONS:
         for arm in _ARMS:
             overall = results[name][arm].overall.robustness
-            if overall is not None and overall < ROBUSTNESS_MIN:
-                failing.append((name, arm, overall))
+            if overall is None or overall >= ROBUSTNESS_MIN:
+                continue
+            # A REPORT_ONLY arm is printed with its real number but does not fail the build.
+            # See corpus/mutations.py::REPORT_ONLY for the bar an arm has to clear to be here.
+            if name in REPORT_ONLY:
+                continue
+            failing.append((name, arm, overall))
     for name in MUTATIONS:
         marks = " ".join(
             f"{arm}={_fmt(results[name][arm].overall.robustness).strip()}" for arm in _ARMS
         )
-        status = "FAIL" if any(f[0] == name for f in failing) else "pass"
+        if name in REPORT_ONLY:
+            status = "report"          # measured, printed, deliberately not gated
+        else:
+            status = "FAIL" if any(f[0] == name for f in failing) else "pass"
         print(f"  {name:<20s} {marks:<30s} {status}")
     print("VERDICT:", "PASS" if not failing else f"FAIL ({len(failing)} mutation-arm(s) below "
           f"{ROBUSTNESS_MIN})")

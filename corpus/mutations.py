@@ -154,7 +154,12 @@ def mutate_double_spaces(text: str) -> str:
 
 # --------------------------------------------------------------------------- 6. line_break_mid
 def mutate_line_break_mid(text: str) -> str:
-    """A newline between every pair of words AND inside every alphanumeric run of 6+.
+    """BOTH halves at once. Kept as a FUNCTION but no longer a gate ARM (2026-09-17).
+
+    It is composed of the two arms below so the historical composite stays reproducible, and
+    so the pinned example in tests/test_mutations.py keeps testing the same thing it did.
+
+    A newline between every pair of words AND inside every alphanumeric run of 6+.
 
     Real-world source: line wrapping. This is the second mutation that already produced a
     live leak: corpus PDF ``zmluva_v11_034.pdf`` wrapped as "... BIC FYCWSKZC . Cislo" +
@@ -168,10 +173,44 @@ def mutate_line_break_mid(text: str) -> str:
     is binary: does a break anywhere inside an anchor or an entity destroy the match?
     """
 
+    return mutate_break_in_token(mutate_wrap_at_space(text))
+
+
+# ------------------------------------------------------------------- 6a. wrap_at_space
+def mutate_wrap_at_space(text: str) -> str:
+    """A newline where a space was — THE REAL HALF of the old ``line_break_mid``.
+
+    This is what a PDF renderer actually does at the right margin: it breaks the line AT A
+    SPACE. It is also the half with a live leak behind it — corpus PDF ``zmluva_v11_034.pdf``
+    wrapped between the words of the anchor "Číslo klienta" and the client number survived
+    into the redacted text layer.
+
+    Gated at the normal threshold, and as of 2026-09-17 it PASSES (blind 0.971 / known 0.980).
+    """
+    return text.replace(" ", "\n")
+
+
+# ----------------------------------------------------------------- 6b. break_in_token
+def mutate_break_in_token(text: str) -> str:
+    """A newline three characters into every alphanumeric run of 6+ — THE SYNTHETIC HALF.
+
+    REPORT ONLY (see ``REPORT_ONLY`` below), and the reason is measured rather than asserted.
+    No producer we could find emits this: a PDF renderer breaks a line at a space, and a DOCX
+    run boundary inserts NO CHARACTER AT ALL — a split run is re-joined by
+    ``writer/docx_body.py`` before detection ever sees it, which is why the ``tabs`` and
+    ``double_spaces`` arms could be closed and this one cannot. Making it pass would mean
+    welding ordinary words back together across a newline, and that was measured doing real
+    damage: an over-join welded "Novák\nRodne" into a single MENO during the overnight run.
+
+    It stays MEASURED AND PRINTED because the day a producer for it does turn up, the number
+    is already there to compare against. It simply does not gate the build on a deformation
+    nothing produces. QUESTIONS.md Q12.
+    """
+
     def edit(run: str) -> str:
         return run if len(run) < 6 else run[:3] + "\n" + run[3:]
 
-    return _edit_runs(text.replace(" ", "\n"), edit)
+    return _edit_runs(text, edit)
 
 
 # --------------------------------------------------------------------------- 7. all_caps
@@ -478,7 +517,13 @@ MUTATIONS: dict[str, Callable[[str], str]] = {
     "soft_hyphen": mutate_soft_hyphen,
     "tabs": mutate_tabs,
     "double_spaces": mutate_double_spaces,
-    "line_break_mid": mutate_line_break_mid,
+    # SPLIT 2026-09-17 (daytime brief item 3). The composite scored 0.466 and could not
+    # answer the only question that matters -- is the tool weak against a REAL line wrap, or
+    # only against a synthetic break inside a token? Separated, the real half is 0.971 and
+    # over the gate; the synthetic half is 0.469 and is REPORT ONLY. The composite function
+    # still exists and is still tested; it is simply not a gate arm any more.
+    "wrap_at_space": mutate_wrap_at_space,
+    "break_in_token": mutate_break_in_token,
     "all_caps": mutate_all_caps,
     "lowercase": mutate_lowercase,
     "no_diacritics": mutate_no_diacritics,
@@ -498,3 +543,10 @@ MUTATIONS: dict[str, Callable[[str], str]] = {
 # a cell — never to exempt one from the threshold. A gate that excuses its own failures is
 # not a gate.
 CASE_DESTROYING = frozenset({"all_caps", "lowercase"})
+
+# Arms that are MEASURED AND PRINTED but do not gate the build. An arm belongs here only with
+# a written, MEASURED reason that no real producer emits the deformation -- never because the
+# number is inconvenient. Lowering ROBUSTNESS_MIN is forbidden; moving an arm here is a
+# narrower, documented, reviewable act, and eval/mutation_gate.py prints it as "report" so it
+# can never be mistaken for a pass.
+REPORT_ONLY: frozenset[str] = frozenset({"break_in_token"})

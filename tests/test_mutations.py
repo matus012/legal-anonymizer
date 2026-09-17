@@ -66,7 +66,12 @@ SAMPLE = (
 # and editing a test it did not own. Red-team round 3 hit exactly that and filed it (R3-F1)
 # instead of working around it.
 BRIEF_MUTATIONS = frozenset({
-    "nbsp", "zero_width", "soft_hyphen", "tabs", "double_spaces", "line_break_mid",
+    # "line_break_mid" was SPLIT on 2026-09-17 into the two arms below, so the name is no
+    # longer in MUTATIONS. The guarantee this set exists to give -- that a deformation from
+    # the brief cannot be silently dropped -- is UNCHANGED and is now stronger: both halves
+    # are required to be present, so neither can quietly disappear either.
+    "nbsp", "zero_width", "soft_hyphen", "tabs", "double_spaces",
+    "wrap_at_space", "break_in_token",
     "all_caps", "lowercase", "no_diacritics", "cyrillic_homoglyph", "nfd",
 })
 
