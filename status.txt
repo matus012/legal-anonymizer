@@ -1,3 +1,255 @@
+<<<EVENING BRIEF — daytime run, 2026-09-17>>>
+
+Every number below I measured myself on the committed tree. None is taken from a subagent's
+report: four subagent claims were checked and one was rejected outright, and two probes of my
+own were wrong before they were right. NOTHING PUSHED.
+
+=========================================================================
+GATES
+=========================================================================
+  gate                       value                                   pass/fail
+  ------------------------------------------------------------------------
+  full suite                 1696 passed, 8 skipped, 13 xfailed      PASS
+  dual leak gate             0 leaks, NO type exclusions             PASS
+  mutation gate              15 of 17 arms pass, 1 report-only       FAIL (letterspaced only)
+  cross-format consistency   0 unexplained asymmetries               PASS
+  per-type recall floor      ULICA 100.0% (gate >= 98%)              PASS
+  per-type precision         report only, never gates                n/a
+  demo (end to end)          0 of 36 PII needles survive, both fmts  PASS
+  owner smoke-test pack      0 of 42 needles, 3 positive controls    PASS
+  frozen build               rebuilt, 6/6 data files, self-check ok  PASS
+  corpus pairing             0 unexplained one-sided surfaces / 70   PASS
+  R0 regression (your bug)   20 tests                                PASS
+
+=========================================================================
+MUTATION ROBUSTNESS (threshold 0.95, blind arm) — 17 arms now, was 16
+=========================================================================
+  class                 overnight    now
+  nbsp                     1.000     1.000  PASS
+  zero_width               1.000     1.000  PASS
+  soft_hyphen              1.000     1.000  PASS
+  tabs                     1.000     1.000  PASS
+  double_spaces            1.000     1.000  PASS
+  nfd                      1.000     1.000  PASS
+  nb_hyphen                1.000     1.000  PASS
+  narrow_nbsp              1.000     1.000  PASS
+  no_diacritics            0.996     0.996  PASS
+  cyrillic_homoglyph       0.976     0.975  PASS
+  lowercase                0.968     0.968  PASS
+  all_caps                 0.959     0.964  PASS
+  surname_caps             0.647     0.994  PASS    <- closed today
+  mojibake_cp1250          0.844     0.994  PASS    <- closed today
+  wrap_at_space                -      0.971  PASS    <- new arm, split out of line_break_mid
+  break_in_token               -      0.464  report  <- new arm, REPORT ONLY, measured reason
+  letterspaced             0.113     0.120  FAIL    <- the only failing class left
+
+  letterspaced is MITIGATED rather than open: a letter-spaced PDF is REFUSED rather than
+  silently half-redacted, so the leak it represents is closed by a different door. The
+  DETECTION number is unchanged and honest. The small movements in cyrillic_homoglyph,
+  all_caps and letterspaced are the corpus rebuild changing which random values are drawn,
+  not detector changes; each is traced in CHECKPOINTS.md.
+
+=========================================================================
+TWO NUMBERS FROM THE MORNING BRIEF WERE WRONG. BOTH CORRECTED.
+=========================================================================
+1. It recorded the between-words half of line_break_mid as 0.839 and concluded the tool was
+   weak against real line wrapping. Re-measured on the committed tree that arm is 0.971 and
+   CLEARS THE GATE. The composite 0.466 was dominated by the other half, which models a break
+   INSIDE a token -- something no producer emits: a PDF renderer breaks at a space, and a DOCX
+   run boundary inserts no character at all. They are separate arms now; the synthetic one is
+   REPORT ONLY with its reason in CONTRACTS_v11.md Amendment 18. The THRESHOLD DID NOT MOVE and
+   never will -- moving an arm to report-only is a dated, reviewable act with evidence attached;
+   editing a threshold is neither.
+2. "31 commits" was stale and ambiguous. The real figure is commits ahead of origin/master.
+
+=========================================================================
+THE EIGHT ITEMS YOU ASKED FOR
+=========================================================================
+[1] CAPS-SURNAME CONVENTION .................................... DONE  0.647 -> 0.994
+    "Ján NOVÁK" is how Slovak legal drafting marks the family name, and the tool found 11 of
+    939 names written that way. Two guards -- in the name anchors and in the gazetteer -- both
+    required a LOWERCASE letter to exist in the token. Fixed as a separate token class in each
+    rather than by relaxing the existing one, which would swallow ALL-CAPS HEADINGS into the
+    anchored run. Per-type precision came back IDENTICAL IN EVERY ROW; I diffed it.
+
+[2] REAL-WORD LEAK VECTORS ..................................... DONE  (rounds 4 AND 5)
+    Eight round-4 findings and all eleven round-5 findings are closed. Between them: a textbox
+    stored TWICE where scrubbing one leaves the other; hyperlinks written as FIELD CODES; a
+    data-bound content control Word RE-POPULATES after you redact it; the first-page and
+    even-page LETTERHEAD parts, never redacted at all; the building-block glossary where a
+    template keeps a cover page forever; field codes in footnotes; docProps/app.xml shipping
+    every HEADING in the document; the attribute plane (alt text, bookmark names, dropdown
+    lists); and an embedded sub-document that Word merges onto the page.
+
+[3] LINE-BREAK ARM SPLIT ....................................... DONE  (see the correction)
+
+[4] MOJIBAKE cp1250 ............................................ DONE  0.844 -> 0.994
+    Repaired as an OFFSET-PRESERVING fold, so the document is still cut at original offsets and
+    the surface removed is the mojibake the reader sees. Where the repair would be a GUESS the
+    file is REFUSED with its own message. The evidence threshold is 1 because the clean corpus
+    contains ZERO evidence characters -- verified independently over 2 468 372 characters.
+
+[5] THE CORPUS PAIRS (Q14) ..................................... DONE
+    5285 unexplained one-sided ground-truth surfaces -> 0. Common surfaces 136 -> 3039. Every
+    gate re-measured, before/after in CHECKPOINTS.md, six numbers down and each investigated.
+    IT FOUND A REAL LEAK ON ITS FIRST RUN (below).
+
+[6] KATASTER LABEL + ULICA RECALL GATE ......................... DONE
+    KATASTER precision 0.0% -> 35.8%; ULICA recall 100.0%, now GATED at >= 98%. I also closed a
+    hole in that new gate before it could open: a pinned floor with NO population counted as
+    PASS, which is round 2's finding C-2 exactly -- a gate reporting PASS forever while
+    measuring nothing. It now fails loudly.
+
+[7] RED-TEAM ROUNDS ............................................ RUN, NOT CLEAN — see below
+
+[8] BUILD + BRIEF + TEST DOCUMENTS ............................. DONE
+
+=========================================================================
+[7] THE THREE-CLEAN-ROUNDS TARGET IS NOT MET, AND I DO NOT THINK IT CAN BE
+=========================================================================
+SIX rounds have now run and NONE has been clean. Two ran today, and between them they found
+TWENTY-ONE defects, of which TWENTY ARE FIXED AND IN THE TREE:
+  ROUND 5 attacked the shapes a Word TEMPLATE produces. 19 attacks, ELEVEN findings, ALL FIXED.
+  ROUND 6 attacked the PDF CONTAINER -- the objects a reader renders, as opposed to the text
+  layer rounds 1-5 concentrated on. 28 attacks, TEN findings, NINE FIXED.
+
+Round 6 is the sharper result, because writer/pdf_body.py is 612 lines against the DOCX
+writer's 1536 and its entire non-page scrub was THREE KEYS, while a PDF catalogue has about a
+dozen that a court or the cadastre routinely fills in. It found bookmark titles never scrubbed,
+a mailto: link surviving where the DOCX writer removes the identical thing, and -- the one that
+matters -- text on a hidden layer and text CROPPED AWAY BY ACROBAT shipping verbatim, because
+the extractor has a helper that strips those concealments before it reads and THE WRITER NEVER
+CALLS IT. The writer was reading a different document from the one the gate grades.
+
+THE REASON THE ROUNDS KEEP FINDING THINGS IS STRUCTURAL, and it is worth more than the target:
+THE CORPUS IS WRITTEN BY python-docx AND corpus/pdf_builder.py, SO IT CAN ONLY CONTAIN THE
+SHAPES THOSE TWO CAN WRITE. Every round-5 finding needed a hand-authored package. And measured
+over all 71 corpus PDFs: 0 have an outline, 0 have links, 0 have optional content, 0 have a
+structure tree, 0 have an associated file. A real law-office document comes out of Word from a
+.dotx, or out of a court system as a tagged PDF with bookmarks -- and the corpus contains none
+of that.
+
+So the honest reading is: the rounds are not converging because the tool is nearly clean; they
+are converging on the parts of the tool the corpus can reach. That is the single most important
+sentence in this brief.
+
+=========================================================================
+THE TWO LEAKS THE GATE COULD NOT SEE — ONE FIXED, ONE FOUND
+=========================================================================
+FIXED TODAY. A <w:altChunk> is an ENTIRE EXTERNAL DOCUMENT stored inside the .docx, which Word
+merges onto the page when it opens the file -- how Word stores pasted HTML. A paralegal pastes a
+block out of Outlook or the cadastre portal; the tool redacted the body around it, wrote a report
+listing what it removed, and shipped a document that showed the client's name to the next reader.
+The gate's verdict DEPENDED ON THE LENGTH OF THE NEEDLE: a full name was caught, a five-digit PSČ
+and a four-digit bank code were discounted as noise, because that surface was classified "opaque"
+on the premise that a binary part cannot hold document text.
+Fixed in BOTH halves: the document is REFUSED by name (0 false refusals over 74 real documents),
+and the part is no longer graded as opaque, so a four-digit needle in one now counts. Fixing only
+the writer would have left it ungated and a later regression invisible.
+
+FOUND TODAY AND ALSO FIXED, AND IT WAS WORSE. A PDF carries an attachment in one of TWO places.
+The tool knows one of them. The other -- an ASSOCIATED FILE, which is what PDF/A-3 is built on
+and what a hybrid cadastre export uses -- is never looked at, so a .docx attached that way ships
+completely unredacted. And because the attachment is a ZIP whose inner document is ITSELF
+compressed, NO surface of the leak gate can read a single character of it: the gate reports
+nothing found for a FOURTEEN-character name, not merely for a short one.
+
+So: the writer does not look, the extractor cannot see, the gate says clean, the page really is
+redacted so the reviewer sees a clean document, and the report says the document was processed --
+while a double-click in the reader's attachment pane opens a Word file with the client's name,
+rodné číslo, PSČ and bank code in it. That is four independent checks failing in the same
+direction at once, and it is the first time in six rounds that has happened.
+
+Fixed in both halves, like the altChunk one, and the walk is SHARED between the writer and the
+gate so a second copy cannot drift. And the fix corrected the red team: its recommendation for
+the grading half would have turned the gate RED on a correctly redacted document, because the
+digits '1100' occur inside a CID font's width table. Measured before shipping, and a narrower
+rule taken instead -- a match inside a PDF STRING counts at any length, a match in a number array
+does not. Shipping the original recommendation would have taught the office to ignore a red gate,
+which is worse than the leak.
+
+=========================================================================
+WHAT I BROKE, WHAT A SUBAGENT BROKE, AND WHAT I GOT WRONG
+=========================================================================
+THE WORST WAS MINE, AND IT WAS A SPEC ERROR. Reviewing the field-code scrub I specified the
+bookmark exemption as "a BARE (unquoted) argument beginning with _". Word writes every
+table-of-contents entry as  HYPERLINK \l "_Toc53871234"  -- QUOTED. So the cross-reference
+damage that review was written to PREVENT stayed live for the spelling Word actually emits, and
+the implementing round faithfully recorded my false premise in its docstring. Found by red-team
+round 5, whose first probe used a nine-digit bookmark and survived -- its digit sweep is what
+turned "does not reproduce" into a finding.
+
+A SUBAGENT'S FIELD SCRUB WOULD HAVE BROKEN EVERY SECOND CROSS-REFERENCE IN A REAL FILING. It
+ran the hyperlink-destination predicate over every argument of every Word field. A bookmark is
+"_Ref" plus 8 or 9 digits; eight digits is the IČO shape, which the checksum policy redacts
+whatever the checksum says. I rejected the work, it was fixed, and its new survival test
+immediately caught a SECOND bug in the fix.
+
+I REGENERATED A DATA FILE AND SILENTLY UNDID AN AMENDMENT. Adding one word to the place
+stoplist, I regenerated it from its own source -- and the file SHRANK. The source spelled two
+weekdays without diacritics while the shipped file had them correctly, and the stemmer folds
+vowel length but not diacritics, so only the correct spelling works. I measured "Štvrtok"
+auto-redacting again and restored it. There is now a test comparing the two, because nothing
+ever had.
+
+I ALSO BAKED DRIFT INTO THE ANTI-DRIFT FILE. Regenerating the holdout corpus, I did not notice
+that the generator does not clean its output directory -- 192 stale files from an older
+six-document-type generator stayed, and my first manifest covered all 434. The manifest exists
+to DETECT silent corpus drift. Caught by the file count going 242 -> 434 for a command whose
+arithmetic gives 242.
+
+A NOTE IN YOUR OWN README FAILED UNSAFELY. It told you the IČO with an invisible soft hyphen is
+a KNOWN GAP and that if it survives export "it is not a new fault". Measured: it is detected.
+The note was inviting you to wave through a real leak.
+
+TWO PROBES OF MINE WERE WRONG BEFORE THEY WERE RIGHT, and the habit is the point. I nearly filed
+a false alarm about a DMS link being handled inconsistently -- my probe passed an empty
+known-entity list. And checking the mojibake false-repair risk I first measured 41 358 "evidence
+characters" in the clean corpus, which would have condemned the whole design; I was scanning raw
+PDF bytes and a JPEG thumbnail, surfaces the detector never sees. Restricted to real text it is
+ZERO across 2 468 372 characters.
+
+=========================================================================
+STILL OPEN
+=========================================================================
+  - ONE round-6 finding: when a Form XObject is SHARED BETWEEN PAGES, the tool's own save leaves
+    the PRE-REDACTION content stream in the output. The rendered page is correct and a one-page
+    document leaves nothing behind, so this is about object reuse -- but the original text is
+    recoverable from the delivered file with an ordinary PDF tool. Filed with a reproduction and
+    a strict test. It is the one thing on this list I would have fixed next.
+  - letterspaced (0.120), mitigated by refusal.
+  - "Zálesie 3" falls to the review bucket: a municipality with no street entry, so the street
+    walk never sees it. Closing it means loosening the guard Amendment 17 protects. Pinned by a
+    strict test that will go red the day it is fixed.
+  - "Bod 7" and the OBEC/KATASTER label split: both types are redacted, only the label is wrong.
+    The corpus's own ground truth calls the same surface OBEC in one document and KATASTER in
+    another, so OBEC's precision number is not measuring what it looks like. CHECKPOINTS.md has
+    the numbers.
+  - ORG claims "ČSOB, a. s." while ground truth calls the bare "ČSOB" a NAZOV_BANKY. Redacted
+    either way; the label is wrong.
+  - eval/cross_format_gate.py still authors its own six fixtures. Now that the corpus is
+    genuinely paired it could grade the real one too, keeping the authored pairs as controls.
+  - THE STRUCTURAL ONE, above: the corpus cannot express a single shape round 5 attacked.
+
+=========================================================================
+YOUR ACTIONS
+=========================================================================
+  1. SMOKE TEST, 5 minutes. test_docs\ holds three Slovak documents and CITAJ_MA.md. Drag each
+     onto dist\Anonymizer\Anonymizer.exe, scan, export, and check the hand-written list of
+     strings that must disappear. test_docs\ocakavany_vystup\ holds the report this tree
+     produced, to compare yours against. The checklist is hand-written ON PURPOSE: a checklist
+     generated by the tool only proves the tool agrees with itself.
+  2. CLEAN-MACHINE TEST of the .exe is still yours. The build is rebuilt and verified -- six
+     data files under dist\Anonymizer\_internal\detect\gazetteer_data\, and the startup
+     self-check passes against the REAL artifact, not a simulated one, with a positive control
+     confirming that check can fail.
+  3. PUSH APPROVAL. Nothing has been pushed. Say the word and I hand you the commands.
+  4. OFFICE NOTE: office_note.md, Slovak, ready to send. Unchanged from this morning and still
+     accurate.
+  5. OPTIONAL: data\_paired_trial\ is a redundant trial corpus from the swap and is safe to
+     delete. I left it rather than deleting data on your machine.
+<<<END EVENING BRIEF — everything below is the previous session's record>>>
+
 <<<MORNING BRIEF — overnight run, 2026-09-16 → 2026-09-17>>>
 
 Every number below I measured myself on the committed tree. None is taken from a subagent's

@@ -1,5 +1,31 @@
 # Red-team findings, round 6 — THE PDF CONTAINER
 
+> ## STATUS, end of the daytime run 2026-09-17: **TEN OF ELEVEN CLOSED, SAME DAY**
+>
+> | finding | state |
+> |---|---|
+> | R6-01 outlines · R6-02 link targets · R6-05 hidden layer · R6-06 CropBox · R6-09 degenerate rect · R6-10 silent report | **FIXED** |
+> | R6-03 catalogue · R6-03b short needle on `pdf_objects` · R6-04 `/AF` attachment · R6-04b its gate verdict · R6-07 page XMP · R6-07b its gate verdict | **FIXED** |
+> | **R6-08** shared Form XObject residue | **OPEN**, marker intact |
+>
+> The prose below is the round AS WRITTEN, before any fix — it is the record of what was true
+> when it was found, and the "suggested fix" sections are what was proposed, not always what
+> landed. Two places where the fix DIVERGED from the proposal, both deliberately:
+>
+> * **R6-03b.** The round proposed taking `pdf_objects` out of `_OPAQUE_SURFACES`. Measured, that
+>   turns the gate RED on a correctly redacted corpus document: `'1100'` occurs inside a CID
+>   font's `/W` widths array. So the opaque premise IS true for the font machinery and false only
+>   for the dictionary-VALUE part. Shipped instead: a match inside a PDF **string literal** or hex
+>   string counts at any length, scoped to `pdf_objects`. Corpus effect: none.
+> * **R6-04b / R6-07b.** As filed, both required the gate to COUNT the needle in the OUTPUT —
+>   satisfiable only while the finding is open. Once the writer deletes the attachment there is
+>   nothing left to count, and `counted=()` means "clean" and "blind" alike, which is the one
+>   conflation these sub-findings exist to prevent. Both now grade the INPUT.
+>
+> One ordering bug was found while fixing: `rehide()` must run BEFORE the catalogue scrub, because
+> `unhide()` nulls `/OCProperties` and the optional-content group whose NAME is the client's was
+> therefore unreachable at exactly the moment the scrub went looking for it.
+
 *Transcribed to disk by the orchestrator: the round's harness forbids subagents writing report
 files. Every number below is reproduced by `tests/test_redteam_round6.py`, which IS on disk and
 is the authority if the two ever disagree.*
