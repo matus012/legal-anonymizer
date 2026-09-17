@@ -46,6 +46,7 @@ from lxml import etree
 from detect.config import DetectConfig
 from detect.core import detect_with_failures
 from writer.decisions import RedactionDecisions
+from writer.errors import UnreadableDocumentError
 from writer.labelmap import LabelMap, make_snippet
 from writer.report import write_report
 
@@ -663,6 +664,24 @@ def _drop_thumbnail(path: str) -> None:
             zout.writestr(name, data)
 
 
+def _open_docx(in_path: str):
+    """Open a .docx, converting anything the library can raise into a named refusal.
+
+    context.md 3 promises a refusal for a document the tool cannot process, with a message the
+    reviewer can act on. Measured before this existed (red-team round 4, R4-X3): a malformed
+    .rels part raised lxml's "Couldn't find end of Start Tag broken line 1", and a file that is
+    not a ZIP raised PackageNotFoundError. Neither reaches the lawyer as anything but a library
+    message, and neither answers the question they actually have -- whether a half-redacted
+    file is now sitting on disk.
+
+    Raised HERE, before any output is created, so the answer is always "nothing was written".
+    """
+    try:
+        return Document(in_path)
+    except Exception as exc:  # noqa: BLE001 -- python-docx, lxml and zipfile all reach here
+        raise UnreadableDocumentError(in_path, f"{type(exc).__name__}: {exc}") from exc
+
+
 def _redact_docx(
     in_path: str, out_path: str, known_entities: list[str] | None,
     decisions: RedactionDecisions | None,
@@ -678,7 +697,7 @@ def _redact_docx(
         extras = [t.strip() for t in decisions.extra_terms if t.strip()]
         known_entities = list(known_entities or []) + extras
 
-    doc = Document(in_path)
+    doc = _open_docx(in_path)
 
     # ONE LabelMap for the whole document, built BEFORE the passes: it is threaded through every
     # _redact_paragraph call so a given entity gets the same [TYPE_N] number everywhere (body,

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from detect.config import DetectConfig
 from writer.decisions import RedactionDecisions
+from writer.errors import PasswordProtectedError, UnreadableDocumentError
 from writer.docx_body import redact_docx_collect
 from writer.labelmap import LabelMap
 from writer.pdf_body import (
@@ -46,6 +47,19 @@ MSG_UNREADABLE_TEXT = (
 # is drawn one character at a time, so every extractor reads "P re d a v a ju ci" instead of a
 # name. Typical of a document-management export, a PDF/A converter or an OCR text layer. The
 # remedy is a re-export, and saying "this is a scan" would send the lawyer nowhere useful.
+# R4-X3. Two more refusals, and both name a remedy the lawyer can actually carry out. The
+# alternative is what they used to see: the library's own words -- "Couldn't find end of Start
+# Tag broken line 1" -- which says nothing about what to do and, worse, nothing about whether a
+# half-redacted file is now on disk. Both messages state outright that nothing was written.
+MSG_UNREADABLE_DOC = (
+    "Súbor sa nepodarilo otvoriť — je poškodený alebo to nie je platný dokument. "
+    "NEBOL vytvorený žiadny výstupný súbor. Skúste ho otvoriť vo Worde/Acrobate a uložiť "
+    "znova; ak sa nedá otvoriť ani tam, vyžiadajte si novú kópiu."
+)
+MSG_PASSWORD_PROTECTED = (
+    "Súbor je chránený heslom, takže sa nedá prečítať ani anonymizovať. NEBOL vytvorený "
+    "žiadny výstupný súbor. Otvorte ho s heslom a uložte nechránenú kópiu, tú potom načítajte."
+)
 MSG_SHREDDED_TEXT = (
     "Tento PDF má textovú vrstvu rozbitú na jednotlivé znaky (strany: {pages}) — nástroj "
     "z nej nevie prečítať mená ani čísla. NIE JE to sken. Býva to výsledok exportu z "
@@ -195,6 +209,12 @@ def scan_file(src: str, known_entities, extra_terms: tuple[str, ...] = (),
         out = os.path.join(tmp, "scan" + os.path.splitext(src)[1])
         try:
             lm = _collect(src, out, known_entities, decisions, config)
+        except PasswordProtectedError:
+            # BEFORE UnreadableDocumentError: it is a subclass, and the order decides whether
+            # the lawyer is told to re-save a damaged file or to enter the password they have.
+            return FileScan(src, [], MSG_PASSWORD_PROTECTED)
+        except UnreadableDocumentError:
+            return FileScan(src, [], MSG_UNREADABLE_DOC)
         except ShreddedTextLayerError as e:
             return FileScan(src, [], MSG_SHREDDED_TEXT.format(
                 pages=", ".join(str(p) for p in e.pages)))

@@ -59,6 +59,7 @@ from detect.config import DetectConfig
 from detect.core import detect_with_failures
 from detect.normalize import strip_format_chars
 from writer.decisions import RedactionDecisions
+from writer.errors import PasswordProtectedError, UnreadableDocumentError
 from writer.labelmap import LabelMap, make_snippet
 from writer.report import write_report
 
@@ -412,6 +413,26 @@ def _scrub_document_surfaces(doc: "fitz.Document") -> None:
         doc.embfile_del(name)
 
 
+def _open_pdf(in_path: str) -> "fitz.Document":
+    """Open a PDF, converting anything PyMuPDF can raise into a named refusal.
+
+    Measured (red-team round 4, R4-X3): a truncated file raised FileDataError, and a
+    password-protected one raised "ValueError: document closed or encrypted" from the first
+    method call rather than from the open. The Slovak land registry issues password-protected
+    PDFs, so that one is ordinary -- and its remedy is entirely within the lawyer's reach
+    (open it, enter the password, save an unprotected copy), which is why it gets its own type
+    and its own sentence rather than being folded into "damaged".
+    """
+    try:
+        doc = fitz.open(in_path)
+    except Exception as exc:  # noqa: BLE001
+        raise UnreadableDocumentError(in_path, f"{type(exc).__name__}: {exc}") from exc
+    if doc.needs_pass:
+        doc.close()
+        raise PasswordProtectedError(in_path)
+    return doc
+
+
 def _redact_pdf(
     in_path: str,
     out_path: str,
@@ -425,7 +446,7 @@ def _redact_pdf(
         extras = [t.strip() for t in decisions.extra_terms if t.strip()]
         known_entities = list(known_entities or []) + extras
 
-    doc = fitz.open(in_path)
+    doc = _open_pdf(in_path)
     # R3-C4: a page whose text we cannot decode is MORE dangerous than a page with none. The
     # glyphs are drawn and a human reads them; detect() sees control characters and removes
     # nothing; and eval/extract.py reads the same control characters, so the leak gate agrees
