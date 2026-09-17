@@ -1,15 +1,15 @@
 <<<MORNING BRIEF — overnight run, 2026-09-16 → 2026-09-17>>>
 
 Every number below I measured myself on the committed tree. None is taken from a subagent's
-report. 29 commits, NOTHING PUSHED.
+report. 31 commits, NOTHING PUSHED.
 
 =========================================================================
 GATES
 =========================================================================
   gate                       value                                  pass/fail
   -----------------------------------------------------------------------
-  full suite                 1482 passed, 8 skipped, 22 xfailed     PASS
-  dual leak gate             20 leaks, ALL type=ULICA               FAIL  (see note)
+  full suite                 1483 passed, 8 skipped, 22 xfailed     PASS
+  dual leak gate             0 leaks, NO type exclusions            PASS
   mutation gate              12 of 16 classes pass                  FAIL  (by design)
   cross-format consistency   0 unexplained asymmetries              PASS
   per-type precision         report only, never gates               n/a
@@ -17,14 +17,14 @@ GATES
   frozen build               rebuilt, 6/6 data files bundled        PASS
   R0 regression (your bug)   20 tests                               PASS
 
-  THE LEAK GATE NUMBER IS NOT A NEW LEAK. All 20 are ULICA, and they exist because ULICA was
-  GIVEN GROUND TRUTH FOR THE FIRST TIME last night. It had a detector and zero corpus
-  occurrences, so nothing graded it and the gate read zero. Those street names were being
-  missed before too; the gate simply had no way to say so. Every other type is at zero.
-  The cause is one thing: a Slovak street name that is an ADJECTIVE declines adjectivally
-  (Hlavná -> Hlavnej), and the shared stemmer deliberately excludes that ending to keep the
-  surname-versus-adjective discriminator working. The fix belongs in the gazetteer, not the
-  stemmer. CONTRACTS_v11.md Amendment 12.
+  THE LEAK GATE IS GREEN. 70 docx + 70 pdf, zero leaks, and with NO TYPE EXCLUSIONS AT ALL --
+  every type the tool can emit is graded. It was red for most of the night with 20 ULICA leaks,
+  and all 20 were one cause: a Slovak street name is usually an ADJECTIVE (Hlavná, Krátka,
+  Štúrova) and an address says "na Hlavnej ulici", not "na Hlavná ulici". Fixed at 03:07 by
+  GENERATING the declined forms in the gazetteer -- deliberately NOT by widening the shared
+  stemmer, because the ending it would have had to admit (-ej) is exactly what keeps a
+  possessive SURNAME form apart from an adjective built from the same surname. A test now pins
+  both stems, so that trade cannot be made silently later.
 
 =========================================================================
 MUTATION ROBUSTNESS (threshold 0.95, blind arm)
@@ -113,7 +113,6 @@ seeds), and a reported 3.19s detect() hang that does not reproduce (it is 0.13s 
 =========================================================================
 STILL OPEN -- nothing here is a known leak in a shape our corpus contains
 =========================================================================
-  - ULICA declined forms: the 20 leaks above. Fix belongs in the gazetteer.
   - letterspaced / mojibake / surname_caps mutation classes, all measured and documented.
   - Word field-code hyperlinks, mc:AlternateContent textbox copies, and data-bound content
     controls (Word re-populates those from customXml on open). All in redteam/FINDINGS_ROUND4.md
@@ -133,7 +132,7 @@ YOUR ACTIONS
      wrong and would have made a GOOD build look broken. The app now also self-checks this at
      startup and REFUSES TO SCAN if the data is missing, instead of silently redacting nothing.
      CLEAN-MACHINE TEST IS STILL YOURS; nothing here substitutes for running the real .exe.
-  2. PUSH APPROVAL. 29 commits, none pushed. Say the word and I hand you the commands.
+  2. PUSH APPROVAL. 31 commits, none pushed. Say the word and I hand you the commands.
   3. OFFICE NOTE: office_note.md, Slovak, ready to send.
 <<<END MORNING BRIEF — everything below is the previous session's record>>>
 
