@@ -193,7 +193,43 @@ adjective-aware stem pass — either widens recall on this shape but needs re-ch
 the discriminator `detect/declension.py` protects (`Kováč` vs `Kováčskej` must stay distinct).
 
 
-## Q14 — the corpus's docx/pdf pairs are not the same document, and are NOT being fixed tonight
+## Q14 — RESOLVED 2026-09-17 (daytime run). The corpus's docx/pdf pairs ARE the same document now.
+
+**Outcome.** Built exactly as the reversal recipe below describes: `corpus/builders_plan.py`
+authors a content PLAN once per (doc_type, index) and renders it to each format, and
+`DocxBuilder` was given its own RNG so its split-run draws can no longer perturb the content
+stream. Both causes named below were confirmed by measurement before anything was changed.
+
+    one-sided GT surfaces with no format explanation   5285  ->  0   (across 70 pairs)
+    surfaces common to both formats of a pair           136  ->  3039
+    kupna_zmluva_000 (docx / pdf / common)        46/40/3  ->  46/42/41
+
+Format difference is not eliminated, because some of it is REAL: a header, a footer, a textbox
+and a form field have no equivalent on the other side. The guarantee is narrower and checkable —
+the only surface that may appear in one format and not the other is one whose every occurrence
+lives in a `surface_part` the other format does not have. `tools/paired_gt_report.py` checks
+exactly that and prints anything it cannot explain.
+
+**It found a real leak on its first run**, which is the whole argument for having done it: a
+street named after a municipality ("na Polom 453") produced no ULICA candidate and only a
+review-bucket OBEC, so nothing auto-redacted it and the street survived into BOTH outputs of the
+same document. The old corpus drew "Paulenova" in that slot, which the -ova suffix rule catches,
+so the gate was green by luck of the draw. Fixed in `detect/gazetteer.py`'s street walk.
+
+**Before/after for every gate is in CHECKPOINTS.md**, measured with the control that makes it
+readable: every gate re-run on the OLD corpus with the CURRENT detectors first, so the only
+variable between the columns is the corpus.
+
+**Still outstanding from the recipe**: `eval/cross_format_gate.py` still authors its own six
+matched fixtures and its docstring's FINDING section is now stale — both causes it describes
+are fixed. Pointing it at `data/synthetic` (and keeping the authored pairs as controls, since
+that is where the NBSP and line-break leaks were actually found) is the remaining step.
+
+---
+
+### The original question, kept for the record
+
+
 **The fact:** `corpus/generate.py` derives a per-format seed (`seed*1000 + i*10 + f_idx`), so
 `kupna_zmluva_000.docx` (seed 42000) and `kupna_zmluva_000.pdf` (seed 42001) are built from
 different RNG streams. Verified: 46 vs 40 ground-truth PII surfaces, 3 in common, and those

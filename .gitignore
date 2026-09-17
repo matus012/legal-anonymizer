@@ -12,6 +12,9 @@ dist/
 data/real/
 data/synthetic/
 data/tmp*/
+# a one-off trial corpus from the Q14 swap; data/synthetic IS the paired corpus now,
+# so this is redundant and safe for the owner to delete.
+data/_paired_trial/
 
 # scratch
 check_*.py
