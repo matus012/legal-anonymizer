@@ -31,6 +31,7 @@ is never preserved (see _scrub_metadata).
 """
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 import urllib.parse
@@ -111,6 +112,24 @@ def _strip_tracked_changes(root) -> None:
         for offset, child in enumerate(list(ins)):
             parent.insert(idx + offset, child)
         parent.remove(ins)
+
+    # LAST, on whatever revision bookkeeping the strips above left behind (red-team round 4,
+    # R4-M4b). w:ins and w:del are not the only elements Word stamps with an author: every
+    # FORMATTING revision carries one too -- w:pPrChange (any change to a paragraph's
+    # formatting), w:rPrChange, w:sectPrChange, w:tblPrChange, w:trPrChange, w:tcPrChange,
+    # w:cellIns / w:cellDel. Those elements hold no visible text, only the PREVIOUS formatting,
+    # so nothing above removes them and their w:author survived verbatim into the output --
+    # measured on the xml_attributes surface as "JUDr. Ján Novák".
+    #
+    # Blanked BY POSITION, exactly like docProps/core.xml and for the same reason: a revision
+    # author is the name of a person whether or not it matches any detector pattern, and there
+    # is nothing in it worth preserving. Done as one attribute sweep over the tree rather than
+    # an element whitelist, because the whitelist is what failed here -- _strip_tracked_changes
+    # knew two of Word's revision elements out of the dozen that exist.
+    for elem in root.iter():
+        for attr in (qn("w:author"), qn("w:initials")):
+            if elem.get(attr) is not None:
+                elem.set(attr, "")
 
 
 def _strip_notes_tracked_changes(part) -> None:
@@ -200,6 +219,29 @@ def _all_paragraph_elements(root):
 _LOCATION_ANCESTORS = ((qn("w:txbxContent"), "textbox"), (qn("w:tbl"), "table_cell"))
 
 
+# <mc:AlternateContent> is how Word serialises EVERY textbox, shape and WordArt drawn since
+# 2007: the modern DrawingML rendering in <mc:Choice> and a legacy VML rendering of the SAME
+# content in <mc:Fallback>. Both copies carry their own <w:txbxContent><w:p>, so the same
+# sentence is in the file twice and both copies MUST be redacted -- scrubbing one branch ships
+# a document that reads clean in whichever Word branch you happen to open it in and leaks in
+# the other. The paragraph walk reaches both, which is what makes that safe.
+#
+# Exactly one of the two is ever DISPLAYED, though, so recording both would tell the reviewer
+# a name appears twice on a page where it appears once (red-team round 4, R4-T1). The Fallback
+# copy is therefore still redacted and simply not reported; document order puts Choice first,
+# so the occurrence that IS recorded is the one the reader sees.
+_MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+
+
+def _is_alternate_fallback(p_elem) -> bool:
+    node = p_elem.getparent()
+    while node is not None:
+        if node.tag == _MC_FALLBACK:
+            return True
+        node = node.getparent()
+    return False
+
+
 def _paragraph_location(p_elem, default: str) -> str:
     node = p_elem.getparent()
     while node is not None:
@@ -242,11 +284,16 @@ def _redact_paragraph(
     paragraph, known_entities, labelmap, location: str = "body",
     decisions: RedactionDecisions | None = None,
     config: DetectConfig | None = None,
+    record: bool = True,
 ) -> None:
     """Redact auto PII in one paragraph and record report-capture side-effects tagged with
     ``location`` (one of the fixed vocabulary strings, matching GT surface_part). The default is
     ``"body"``, the safe fallback for an un-tagged call — every real caller now passes
-    ``location`` explicitly, including ``_redact_cells`` for body table cells."""
+    ``location`` explicitly, including ``_redact_cells`` for body table cells.
+
+    ``record=False`` redacts exactly as usual but files nothing in the report: it is for a
+    paragraph that is a SECOND COPY of content the document displays once (see
+    _is_alternate_fallback). It never affects what is removed — only what is counted."""
     # Every run in the paragraph, nested ones included -- NOT paragraph.runs, which is a
     # direct-child view and silently omits anything inside a <w:hyperlink> or a <w:sdt>.
     runs = [Run(r, paragraph) for r in _paragraph_runs(paragraph._p)]
@@ -269,7 +316,7 @@ def _redact_paragraph(
     # ONE detect() over the post-strip reconstructed text; both captures below read this same
     # result the redaction path uses — never a second detect() over a different tree state.
     detected, failures = detect_with_failures(recon, known_entities, config)
-    for f in failures:
+    for f in failures if record else ():
         # A detector that raised produced NO candidates for THIS paragraph, so whatever it
         # would have found is still in the document. Nothing else in the report shows that:
         # the missing rows look exactly like 'there was nothing here'.
@@ -290,7 +337,7 @@ def _redact_paragraph(
                 redact = True
         if redact:
             keep.append(c)
-        else:
+        elif record:
             labelmap.record_low_confidence(
                 location, c.type, c.surface,
                 snippet=make_snippet(recon, c.start, c.end),
@@ -315,11 +362,12 @@ def _redact_paragraph(
         # Redaction capture: record EVERY kept occurrence (all spans, incl. repeats of an
         # already-numbered label). Non-overlapping distinct starts mean label_at[c.start] is
         # this candidate's own label; recording here does not touch counters or the cache.
-        labelmap.record_occurrence(
-            label_at[c.start], location, c.surface,
-            snippet=make_snippet(recon, c.start, c.end),
-            checksum=c.checksum,
-        )
+        if record:
+            labelmap.record_occurrence(
+                label_at[c.start], location, c.surface,
+                snippet=make_snippet(recon, c.start, c.end),
+                checksum=c.checksum,
+            )
 
     # Build, per touched run, the ordered surviving-text / label fragments, then rewrite it.
     for ri, r in enumerate(runs):
@@ -522,7 +570,45 @@ _TARGET_IGNORED_TYPES = frozenset({"URL"})
 
 
 # URL punctuation, turned into spaces so a name buried in a path becomes a name again.
+#
+# '.' is DELIBERATELY NOT in this class. Opening it up would dissolve every host name in the
+# document ("www.slov-lex.sk" -> "www slov lex sk") and feed the bare-name heuristic exactly
+# the input it is loosest on. The lowercase "jan.novak" this omission used to miss (red-team
+# round 4, R4-R3) is caught by _account_name_in_a_filesystem_path below, which does not need
+# the dot opened and cannot reach an http(s) link at all.
 _TARGET_PUNCT_RE = re.compile(r"[/\\_+:?=&#]+")
+
+# tel: is the one URI scheme whose ENTIRE value is, by definition (RFC 3966), a telephone
+# number. So a tel: target needs no detector and no guess: if it has a number in it, it is a
+# number belonging to whoever the link is for -- normally the client's mobile, pasted into a
+# letterhead out of an e-mail signature. The phone detector wants the spaced Slovak spelling
+# and did not recognise "tel:+421905123456" (R4-R4, an expectation the round stated as CLEAN
+# in advance and then falsified).
+_TEL_DIGITS_RE = re.compile(r"\d")
+
+# A dotted DIRECTORY name on a filesystem path -- "jan.novak" in
+# file:///C:/Users/jan.novak/... or \\fileserver\users\jan.novak\... -- is the standard
+# Windows account spelling, and an account name identifies a person whatever the gazetteer
+# thinks of it. detect() finds nothing in the lowercase form (measured: detect("jan novak")
+# returns []), so no amount of punctuation-opening was ever going to catch R4-R3.
+#
+# Confined to file:// and UNC targets ON PURPOSE. Those point at the office's own file server;
+# there is no statute book on a UNC share, so this evidence class cannot reach slov-lex,
+# justice.gov.sk or any other public link -- which is the failure mode this scrub has now had
+# twice. And a share path in a document leaving the office is a link that would not resolve
+# for the recipient anyway, so the cost of being wrong is a dead link, not a broken one.
+#
+# The LAST segment is excluded because it is the file name, and "zmluva.docx" has the same
+# shape as "jan.novak".
+_ACCOUNT_SEGMENT_RE = re.compile(r"^[^\W\d_]{2,}\.[^\W\d_]{2,}$", re.UNICODE)
+
+
+def _account_name_in_a_filesystem_path(target: str) -> bool:
+    lowered = target.lower()
+    if not (lowered.startswith("file:") or target.startswith("\\\\") or target.startswith("//")):
+        return False
+    segments = re.split(r"[/\\]+", target)
+    return any(_ACCOUNT_SEGMENT_RE.match(seg) for seg in segments[:-1])
 
 
 def _target_carries_pii(target: str, known_entities: list[str], config) -> bool:
@@ -547,6 +633,14 @@ def _target_carries_pii(target: str, known_entities: list[str], config) -> bool:
     # Percent-decoded FIRST, for both probes. Word stores what it encodes, so "Jan%20Novak"
     # has to read as "Jan Novak" or the scrub misses exactly the names it exists for.
     decoded = urllib.parse.unquote(target)
+
+    # PROBE 0: the two shapes that carry personal data in their STRUCTURE rather than in
+    # anything a detector can read off them -- a tel: URI and a Windows account name on a
+    # filesystem path. Both are decided by the scheme, so neither can fire on an http(s) link.
+    if decoded.lower().startswith("tel:") and _TEL_DIGITS_RE.search(decoded[4:]):
+        return True
+    if _account_name_in_a_filesystem_path(decoded):
+        return True
 
     # PROBE 1: the target as it is. Almost no guessing here -- an address in a mailto: is an
     # address -- with one exception. A URL match covers only the SCHEME AND HOST, so a digit
@@ -613,7 +707,19 @@ def _scrub_rel_targets(path: str, known_entities: list[str], config) -> int:
     rewritten = []
     for name, data in items:
         if name.endswith(".rels"):
-            root = etree.fromstring(data)
+            # Guarded, like eval/extract.py guards the same call and unlike this function used
+            # to (red-team round 4, R4-X3). A .rels part that will not parse is refused BY
+            # NAME rather than allowed to raise lxml's "Couldn't find end of Start Tag" out of
+            # the writer: the lawyer's actual question is whether a half-redacted file is now
+            # on disk, and a library message does not answer it. python-docx rejects most
+            # malformed packages at open (_open_docx turns that into the same refusal), so
+            # what reaches here is a .rels it copied through without parsing -- which is
+            # exactly where something could hide, so it is refused rather than skipped.
+            try:
+                root = etree.fromstring(data)
+            except etree.XMLSyntaxError as exc:
+                raise UnreadableDocumentError(
+                    path, f"unparseable relationship part {name}: {exc}") from exc
             changed = False
             for rel in root:
                 if rel.get("TargetMode") != _EXTERNAL:
@@ -639,6 +745,166 @@ def _scrub_rel_targets(path: str, known_entities: list[str], config) -> int:
     return replaced
 
 
+# ------------------------------------------------------------------- FIELD CODES (T4 / T5)
+# Word has THREE spellings for a hyperlink and this project only knew one. <w:hyperlink r:id>
+# puts the destination in a .rels part, which _scrub_rel_targets covers. The other two are
+# FIELD CODES, and they carry the destination inside the field instruction:
+#
+#   <w:fldSimple w:instr=' HYPERLINK "mailto:jan.novak@advokat.sk" '>   (R4-T4)
+#   <w:r><w:instrText> HYPERLINK "mailto:jan.novak@advokat.sk" </w:instrText></w:r>  (R4-T5)
+#
+# Neither goes through .rels, so _scrub_rel_targets never saw them; and w:instrText is not in
+# _TEXT_BEARING and python-docx's Run.text does not render it, so detect() never saw it either.
+# The page read "[MENO_1]" while document.xml -- a STRICT text surface -- still named the party
+# and carried their address. RTF->DOCX conversion, Word 97-era documents and several DMS and
+# court-portal exports write hyperlinks this way.
+#
+# The same code covers a MERGEFIELD or DOCVARIABLE instruction, because the rule is about the
+# ARGUMENTS of a field rather than about HYPERLINK: an argument that carries personal data is
+# replaced by the same marker a scrubbed relationship target gets.
+_FIELD_ARG_RE = re.compile(r'"([^"]*)"|([^\s"]+)')
+
+# WHICH fields are examined at all. A whitelist is normally the wrong instinct on this project
+# -- recall over precision, and the M4b fix above deliberately replaced an element whitelist
+# with a blanket sweep for exactly that reason. This is the exception, and the argument for it
+# is specific rather than general.
+#
+# WHAT THE BLANKET VERSION DID. The first version of this function ran _target_carries_pii over
+# every argument of every field. Measured on the ordinary fields a Slovak filing contains:
+#
+#   REF _Ref53871234 \h      ->  REF https://removed.invalid/ \h        cross-reference broken
+#   PAGEREF _Toc12345678 \h  ->  PAGEREF https://removed.invalid/ \h    TOC entry broken
+#   NOTEREF _Ref99887766 \h  ->  NOTEREF https://removed.invalid/ \h    footnote ref broken
+#   REF _Ref123456789 \r \h  ->  unchanged
+#
+# A Word auto-bookmark is "_Ref"/"_Toc" plus EIGHT OR NINE digits. Eight digits is the ICO
+# shape, and the v1.1 checksum policy auto-redacts a shape match whatever the checksum says --
+# deliberately and correctly, because a mistyped ICO is still an ICO. So the blanket rule broke
+# roughly every second cross-reference and every second table-of-contents entry in a real
+# document, on a coin flip of the digit count.
+#
+# THE CATEGORY ERROR, which is the same one that destroyed the slov-lex links twice:
+# _target_carries_pii is a predicate about a URI DESTINATION. A bookmark name is not a
+# destination. Running a destination predicate over arguments that are not links is what makes
+# "a link in a field and the identical link in .rels cannot get two different answers" -- true
+# and good for HYPERLINK -- into document damage everywhere else.
+#
+# WHY THE RECALL COST IS ACCEPTABLE, stated explicitly because it is a real cost. A field
+# instruction is reachable only as word/document.xml bytes, which the leak gate already grades
+# as a STRICT surface; and the field's displayed RESULT is a separate run that detect() already
+# reads on the page. So personal data in an argument of an unlisted field is still gated and
+# still visible to a reviewer. The trade is therefore: a gated, visible miss in a field nobody
+# has thought of, against CERTAIN damage to the cross-references and table of contents of an
+# ordinary filing. The damage wins.
+_FIELD_TYPES_WITH_PII_ARGS = frozenset({
+    "HYPERLINK", "INCLUDETEXT", "INCLUDEPICTURE", "MERGEFIELD", "DOCPROPERTY", "DOCVARIABLE",
+    "AUTHOR", "USERNAME", "USERADDRESS", "FILLIN", "ASK", "SUBJECT", "TITLE", "COMMENTS",
+})
+
+
+def _scrub_field_instruction(instr: str, known_entities, config) -> str | None:
+    """Return ``instr`` with every PII-bearing argument replaced, or None if nothing changed.
+
+    The FIRST token is the field type; it decides whether the field is examined at all (see
+    _FIELD_TYPES_WITH_PII_ARGS) and is never itself rewritten. Within a listed field, a token
+    starting with a backslash is a formatting switch (``\\* MERGEFORMAT``) and a BARE token
+    starting with an underscore is Word's internal bookmark namespace (``_Ref``/``_Toc``);
+    neither is a destination, and rewriting either breaks the field rather than redacting it.
+    Everything else is judged by the SAME _target_carries_pii used on a relationship target, so
+    a link in a HYPERLINK field and the identical link in a .rels part cannot get two different
+    answers."""
+    first = _FIELD_ARG_RE.search(instr)
+    if first is None:
+        return None
+    keyword = (first.group(1) if first.group(1) is not None else first.group(2)).upper()
+    if keyword not in _FIELD_TYPES_WITH_PII_ARGS:
+        return None
+
+    state = {"keyword": False, "changed": False}
+
+    def repl(m: re.Match) -> str:
+        quoted, bare = m.group(1), m.group(2)
+        value = quoted if quoted is not None else bare
+        if not state["keyword"]:
+            state["keyword"] = True
+            return m.group(0)
+        # Both exemptions apply to BARE tokens only. A switch is always written bare
+        # (``\* MERGEFORMAT``) and so is a bookmark name (``_Ref53871234``), whereas a QUOTED
+        # argument beginning with a backslash is a UNC path -- ``INCLUDETEXT "\\\\fileserver\\
+        # users\\jan.novak\\..."`` -- which is exactly the kind of destination this examines.
+        # Testing the value rather than the bare token exempted that path; the survival test
+        # in tests/test_docx_field_codes.py is what caught it.
+        if bare is not None and (bare.startswith("\\") or bare.startswith("_")):
+            return m.group(0)
+        if not _target_carries_pii(value, known_entities, config):
+            return m.group(0)
+        state["changed"] = True
+        return f'"{_SCRUBBED_TARGET}"' if quoted is not None else _SCRUBBED_TARGET
+
+    out = _FIELD_ARG_RE.sub(repl, instr)
+    return out if state["changed"] else None
+
+
+def _scrub_field_codes(root, known_entities, config) -> None:
+    """Scrub PII out of every field instruction under ``root``, in both of Word's spellings."""
+    for fld in root.findall(".//" + qn("w:fldSimple")):
+        instr = fld.get(qn("w:instr"))
+        if instr:
+            scrubbed = _scrub_field_instruction(instr, known_entities, config)
+            if scrubbed is not None:
+                fld.set(qn("w:instr"), scrubbed)
+
+    # Word splits one instruction across several <w:instrText> runs whenever it feels like it
+    # ('HYPERLINK "mailto:' in one run and the rest in the next), so the instruction is
+    # reassembled before it is read -- a per-element scrub would see half a URL and find
+    # nothing in it. The group boundary is <w:fldChar>, which delimits every field, so two
+    # fields in one paragraph are never welded into one instruction.
+    group: list = []
+    groups: list[list] = []
+    for elem in root.iter(qn("w:instrText"), qn("w:fldChar")):
+        if elem.tag == qn("w:fldChar"):
+            if group:
+                groups.append(group)
+                group = []
+        else:
+            group.append(elem)
+    if group:
+        groups.append(group)
+
+    for group in groups:
+        joined = "".join(e.text or "" for e in group)
+        scrubbed = _scrub_field_instruction(joined, known_entities, config)
+        if scrubbed is None:
+            continue
+        group[0].text = scrubbed
+        for e in group[1:]:
+            e.text = ""
+
+
+# ----------------------------------------------------------------- DATA BINDING (R4-T8)
+def _strip_data_bindings(root) -> None:
+    """Remove every <w:dataBinding> from a content control.
+
+    A data-bound content control does NOT display the text sitting in its <w:sdtContent>: Word
+    re-populates it from a customXml part every time the file is opened. So redacting the
+    on-page run produced a document that reads "[MENO_1]" to this tool and shows the party's
+    name to the next person who opens it (red-team round 4, R4-T8). Every Word form built on
+    the Developer tab and every document-assembly system (HotDocs, Contract Express, a DMS
+    macro) produces this shape.
+
+    BOTH halves of the fix are applied -- the binding is removed here and the store is blanked
+    in _scrub_extra_parts -- rather than the one the finding said would do. Removing the
+    binding alone leaves the name in customXml, which eval/extract.py reads as other_xml_parts
+    and grades as a leak, correctly: the data is still in the package whatever Word chooses to
+    display. Blanking the store alone leaves a live binding pointing at an empty node, so any
+    tool that re-binds from a restored store puts the name back. Neither half is sufficient and
+    together they are four lines."""
+    for binding in root.findall(".//" + qn("w:dataBinding")):
+        parent = binding.getparent()
+        if parent is not None:
+            parent.remove(binding)
+
+
 # OPC parts that carry PII and that nothing used to touch (red-team round 4, R4-M1/M2/M3).
 # eval/extract.py already READS all three, so a leak here was gated -- it was simply never
 # scrubbed. Blanked BY POSITION, like docProps/core.xml: a template variable named ClientName
@@ -648,6 +914,7 @@ _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _W15 = "{http://schemas.microsoft.com/office/word/2012/wordml}"
 _CUSTOM_PROPS = "{http://schemas.openxmlformats.org/officeDocument/2006/custom-properties}"
 _VT = "{http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes}"
+_CUSTOM_XML_ITEM_RE = re.compile(r"^customxml/item\d*\.xml$")
 
 
 def _scrub_extra_parts(path: str) -> int:
@@ -679,6 +946,22 @@ def _scrub_extra_parts(path: str) -> int:
                         if value.tag.startswith(_VT) and (value.text or "").strip():
                             value.text = ""
                             blanked += 1
+                data = etree.tostring(root, encoding="UTF-8", standalone=True)
+            elif _CUSTOM_XML_ITEM_RE.match(lowered):
+                # The other half of R4-T8: the STORE a data-bound content control reads from.
+                # Blanked WHOLESALE -- every text node in the part -- rather than only the node
+                # the w:xpath names, for two reasons. The xpath's namespace prefixes are
+                # declared in the sdtPr's own scope and Word rewrites them freely, so resolving
+                # it correctly is guesswork, and a guess here is a leak. And the part is an
+                # application's private data store that no reviewer ever reads, so blanking a
+                # value that was not PII costs nothing at all -- the asymmetry this whole tool
+                # is built on. itemProps*.xml is NOT matched: it holds the store's GUID and
+                # schema refs, and clearing those would orphan the store.
+                root = etree.fromstring(data)
+                for node in root.iter():
+                    if (node.text or "").strip():
+                        node.text = ""
+                        blanked += 1
                 data = etree.tostring(root, encoding="UTF-8", standalone=True)
             elif lowered == "word/people.xml":
                 root = etree.fromstring(data)
@@ -794,6 +1077,14 @@ def _redact_docx(
         if rt.endswith("footnotes") or rt.endswith("endnotes") or rt.endswith("comments"):
             _strip_notes_tracked_changes(rel.target_part)
 
+    # 0b) Field instructions and data bindings, on the same trees and for the same reason the
+    #     tracked-change strip runs first: both carry PII that is not text detect() can see,
+    #     and both must be settled before the paragraph passes rewrite the runs around them.
+    for tree in [doc.element] + [hf._element for s in doc.sections
+                                 for hf in (s.header, s.footer)]:
+        _scrub_field_codes(tree, known_entities, config)
+        _strip_data_bindings(tree)
+
     # ONE descendant walk per part, replacing the four direct-child walks this used to do
     # (body paragraphs, body tables' cells, header/footer paragraphs and tables, textboxes).
     # Each <w:p> is visited exactly once and tags itself by where it sits, so a nested table,
@@ -813,6 +1104,7 @@ def _redact_docx(
                 _paragraph_location(p_elem, default_location),
                 decisions=decisions,
                 config=config,
+                record=not _is_alternate_fallback(p_elem),
             )
 
     # 5) footnotes / endnotes / comments — each a SEPARATE OPC part, not in document.xml (W3).
@@ -839,11 +1131,19 @@ def _redact_docx(
     #     graded. Done as a post-save ZIP rewrite because python-docx offers no API to remove
     #     an arbitrary package part, and done AFTER doc.save so nothing in the redaction path
     #     depends on it.
-    _drop_thumbnail(out_path)
-    # Hyperlink destinations live in .rels, which no paragraph pass can reach.
-    _scrub_rel_targets(out_path, known_entities, config)
-    # settings.xml / custom.xml / people.xml: parts no paragraph pass reaches.
-    _scrub_extra_parts(out_path)
+    try:
+        _drop_thumbnail(out_path)
+        # Hyperlink destinations live in .rels, which no paragraph pass can reach.
+        _scrub_rel_targets(out_path, known_entities, config)
+        # settings.xml / custom.xml / people.xml / customXml: parts no paragraph pass reaches.
+        _scrub_extra_parts(out_path)
+    except UnreadableDocumentError:
+        # These passes run AFTER doc.save, so a refusal raised here would otherwise leave a
+        # partially scrubbed file on disk -- and the refusal's own message promises that
+        # nothing was written. Deleting the output is what makes that sentence true.
+        if os.path.exists(out_path):
+            os.remove(out_path)
+        raise
 
     # 7) W5b-2: emit the per-document report NEXT TO out_path (<stem>_report.txt), built from the
     #    LabelMap's capture side-channels (occurrences + low_confidence) the passes above filled.

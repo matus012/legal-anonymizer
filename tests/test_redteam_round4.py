@@ -32,6 +32,7 @@ from detect.core import detect
 from detect.normalize import normalize
 from eval.extract import extract
 from writer.docx_body import (_target_carries_pii, redact_docx_collect)
+from writer.errors import UnreadableDocumentError
 from writer.pdf_body import (NoTextLayerError, ShreddedTextLayerError,
                              UnreadableTextLayerError, page_has_unreadable_text,
                              page_is_shredded, redact_pdf)
@@ -171,6 +172,25 @@ def textbox(text):
 def doc_text(path):
     x = zipfile.ZipFile(path).read("word/document.xml")
     return "".join(etree.fromstring(x).itertext())
+
+
+def doc_xml(path):
+    return zipfile.ZipFile(path).read("word/document.xml").decode()
+
+
+def reopens(path):
+    """Word's own schema terms, as far as this repo can check them without Word: the package
+    re-opens through python-docx (so every part it needs parses and every relationship it
+    follows resolves) and the part list is intact. A fixture Word would reject proves nothing,
+    and neither does an output it would reject."""
+    assert Document(path).element.body is not None
+    names = set(zipfile.ZipFile(path).namelist())
+    assert {"[Content_Types].xml", "_rels/.rels", "word/document.xml",
+            "word/_rels/document.xml.rels"} <= names
+    for name in names:
+        if name.endswith(".xml") or name.endswith(".rels"):
+            etree.fromstring(zipfile.ZipFile(path).read(name))
+    return True
 
 
 def redact(tmp_path, name, fragments, known=(), patch=None):
@@ -364,9 +384,12 @@ def test_control_mojibake_mutation_is_character_local():
     assert mutate_mojibake_cp1250("850101/1234") == "850101/1234"
 
 
-@pytest.mark.xfail(reason="R4-I3: a mis-decoded (cp1250-as-WinAnsi) text layer is neither "
-                          "shredded nor undecodable, so it is accepted and the party's name "
-                          "is never found", strict=True)
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding that has
+# been fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
+# detect/normalize.py folds the cp1250-as-WinAnsi rewrite back, 1:1 and offset-preservingly,
+# in any unit that shows evidence of the failure; the party is found and the ORIGINAL mojibake
+# surface is what the writer redacts off the page.
 def test_mojibake_text_layer_still_finds_the_party(tmp_path):
     src = write_pdf(tmp_path, "i3", [
         (72, 90, "Predavajuci: Ľubomír Ďurčo, bytom Hlavna 25, Kosice".encode("cp1250")),
@@ -467,30 +490,88 @@ def _alternate_content(text):
             '</mc:Fallback></mc:AlternateContent></w:r></w:p>')
 
 
-@pytest.mark.xfail(reason="R4-T1: <mc:AlternateContent> carries the textbox TWICE, the two "
-                          "copies are welded into one reconstruction, and the Fallback copy "
-                          "loses the word before the join", strict=True)
+def _mc_branches(path):
+    """The <mc:Choice> and <mc:Fallback> halves of word/document.xml, as text."""
+    x = zipfile.ZipFile(path).read("word/document.xml").decode()
+    return (x[x.index("<mc:Choice"):x.index("</mc:Choice>")],
+            x[x.index("<mc:Fallback>"):x.index("</mc:Fallback>")])
+
+
+def test_control_alternate_content_needle_is_reachable_in_both_branches(tmp_path):
+    """T1's fixture control, and the one the finding most needed. python-docx cannot emit an
+    <mc:AlternateContent> at all, so the fixture is raw OOXML and a "needle not found" would
+    otherwise be indistinguishable from a fixture Word would reject.
+
+    Asserted on the UNREDACTED package: the name really is in BOTH branches before the writer
+    runs, so a test that finds it gone from both is measuring the writer and not the fixture.
+    The package is re-opened through python-docx as well, so a fixture that does not parse
+    fails here rather than silently passing the redaction tests."""
+    src = doc_with_body([_alternate_content("Predávajúci: Ján Novák")], tmp_path / "t1c.docx")
+    choice, fallback = _mc_branches(src)
+    assert "Ján Novák" in choice and "Ján Novák" in fallback
+    assert Document(src).element.body is not None
+    assert "word/document.xml" in zipfile.ZipFile(src).namelist()
+
+
+def test_control_a_one_branch_scrub_is_visibly_a_leak(tmp_path):
+    """The other half of T1's control: what a writer that scrubbed only <mc:Choice> would
+    leave. Hand-built as the output such a writer would produce -- Choice already reading
+    `[MENO_1]`, Fallback still reading the name -- and put through the leak extractor.
+
+    Without this, `test_alternate_content_fallback_copy_is_not_damaged` could pass because the
+    Fallback branch is invisible to `extract()` rather than because the writer scrubbed it."""
+    half = _alternate_content("Predávajúci: Ján Novák").replace(
+        "Predávajúci: Ján Novák", "Predávajúci: [MENO_1]", 1)      # only the Choice copy
+    src = doc_with_body([half], tmp_path / "t1half.docx")
+    choice, fallback = _mc_branches(src)
+    assert "[MENO_1]" in choice and "Ján Novák" in fallback
+    assert surfaces_with(src, "Ján Novák") != [], \
+        "a name left in the Fallback branch must be gradeable, or T1 proves nothing"
+
+
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_alternate_content_fallback_copy_is_not_damaged(tmp_path):
     out, lm = redact(tmp_path, "t1", [_alternate_content("Predávajúci: Ján Novák")], KNOWN)
-    x = zipfile.ZipFile(out).read("word/document.xml").decode()
-    fallback = x[x.index("<mc:Fallback>"):x.index("</mc:Fallback>")]
+    choice, fallback = _mc_branches(out)
     assert "Predávajúci" in fallback, "the label was deleted from the Fallback copy"
+    # BOTH copies scrubbed, never one: a document scrubbed in one branch only renders clean in
+    # whichever Word branch you happen to open it in, and leaks in the other.
+    assert "Ján Novák" not in choice and "Ján Novák" not in fallback
+    assert "[MENO_1]" in choice and "[MENO_1]" in fallback
+    assert surfaces_with(out, "Ján Novák") == []
     assert sum(len(v) for v in lm.occurrences.values()) == 1, \
         "one name on the page must be one occurrence in the report"
 
 
-@pytest.mark.xfail(reason="R4-T4: the hyperlink destination in a <w:fldSimple w:instr> "
-                          "attribute is never read by any pass", strict=True)
+T4_FRAGMENT = ('<w:p><w:fldSimple w:instr=" HYPERLINK &quot;mailto:jan.novak@advokat.sk&quot; ">'
+               '<w:r><w:t xml:space="preserve">kontakt na advokáta</w:t></w:r>'
+               "</w:fldSimple></w:p>")
+
+
+def test_control_fldsimple_instruction_is_reachable(tmp_path):
+    """T4/T5's fixture control. python-docx emits neither field spelling, so the fixtures are
+    raw OOXML; this asserts the package parses, keeps its part list, and that the address
+    really is on a gradeable surface BEFORE the writer runs -- otherwise "not found" after
+    redaction would be indistinguishable from a malformed fixture."""
+    src = doc_with_body([T4_FRAGMENT], tmp_path / "t4c.docx")
+    assert Document(src).element.body is not None
+    assert "word/_rels/document.xml.rels" in zipfile.ZipFile(src).namelist()
+    assert surfaces_with(src, "jan.novak@advokat.sk") != []
+
+
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_fldsimple_hyperlink_destination_is_scrubbed(tmp_path):
-    out, _ = redact(tmp_path, "t4", [
-        '<w:p><w:fldSimple w:instr=" HYPERLINK &quot;mailto:jan.novak@advokat.sk&quot; ">'
-        '<w:r><w:t xml:space="preserve">kontakt na advokáta</w:t></w:r></w:fldSimple></w:p>'])
+    out, _ = redact(tmp_path, "t4", [T4_FRAGMENT])
     assert surfaces_with(out, "jan.novak@advokat.sk") == []
 
 
-@pytest.mark.xfail(reason="R4-T5: <w:instrText> is not in _TEXT_BEARING and Run.text does not "
-                          "render it, so a HYPERLINK field's destination lands intact in "
-                          "document.xml — a STRICT text surface", strict=True)
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_instrtext_hyperlink_destination_is_scrubbed(tmp_path):
     out, _ = redact(tmp_path, "t5", [
         '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
@@ -502,10 +583,34 @@ def test_instrtext_hyperlink_destination_is_scrubbed(tmp_path):
     assert surfaces_with(out, "jan.novak@advokat.sk") == []
 
 
-@pytest.mark.xfail(reason="R4-T8: a data-bound content control's value lives in "
-                          "customXml/item1.xml, which is copied through untouched — Word "
-                          "re-populates the control from it when the redacted file is opened",
-                   strict=True)
+def test_instrtext_split_across_runs_is_still_scrubbed(tmp_path):
+    """Word splits one field instruction across several <w:instrText> runs whenever it feels
+    like it, so a per-element scrub would see half a URL and find nothing in it. The fixture
+    cuts the address in two, mid-local-part, which is the shape an RTF->DOCX conversion
+    actually produces."""
+    out, _ = redact(tmp_path, "t5b", [
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        '<w:r><w:instrText xml:space="preserve"> HYPERLINK "mailto:jan.no</w:instrText></w:r>'
+        '<w:r><w:instrText xml:space="preserve">vak@advokat.sk" </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        '<w:r><w:t xml:space="preserve">Ján Novák</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'], KNOWN)
+    assert surfaces_with(out, "jan.novak@advokat.sk") == []
+
+
+def test_a_field_code_with_an_innocuous_destination_survives(tmp_path):
+    """The quiet half, and the one this project has broken twice: a field-code link to the
+    statute book is not PII and must still work after redaction."""
+    out, _ = redact(tmp_path, "t4ok", [
+        '<w:p><w:fldSimple w:instr=" HYPERLINK &quot;https://www.slov-lex.sk/&quot; ">'
+        '<w:r><w:t xml:space="preserve">Zbierka zákonov</w:t></w:r></w:fldSimple></w:p>'])
+    assert "https://www.slov-lex.sk/" in doc_xml(out)
+    assert "removed.invalid" not in doc_xml(out)
+
+
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_databound_content_control_store_is_scrubbed(tmp_path):
     store = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
              '<zmluva xmlns="http://firma.sk/zmluva"><predavajuci>Ján Novák</predavajuci>'
@@ -520,6 +625,25 @@ def test_databound_content_control_store_is_scrubbed(tmp_path):
                                                 replace={"customXml/item1.xml": store}))
     assert surfaces_with(out, "Ján Novák") == []
     assert surfaces_with(out, "850101/1234") == []
+    # The binding is gone as well as the store, so nothing re-populates the control if the
+    # store is ever restored from a backup of the original.
+    assert "dataBinding" not in doc_xml(out)
+    assert reopens(out)
+
+
+def test_control_databound_store_is_a_gradeable_surface(tmp_path):
+    """T8's fixture control. The custom XML part is what Word actually displays, and it is a
+    part python-docx copies through byte-for-byte -- so if `extract()` could not read it, the
+    test above would pass on a fixture that never carried the needle at all."""
+    store = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+             '<zmluva xmlns="http://firma.sk/zmluva"><predavajuci>Ján Novák</predavajuci>'
+             "<rodneCislo>850101/1234</rodneCislo></zmluva>").encode()
+    src = doc_with_body(['<w:p><w:r><w:t>x</w:t></w:r></w:p>'], tmp_path / "t8c.docx")
+    src = patch_package(src, str(tmp_path / "t8c_p.docx"),
+                        replace={"customXml/item1.xml": store})
+    assert reopens(src)
+    assert surfaces_with(src, "Ján Novák") != []
+    assert surfaces_with(src, "850101/1234") != []
 
 
 # ========================================================= M: package parts nobody attacked
@@ -610,8 +734,9 @@ def test_movefrom_text_is_removed(tmp_path):
     assert surfaces_with(out, "855612/7788") == []
 
 
-@pytest.mark.xfail(reason="R4-M4b: w:pPrChange / w:rPrChange / w:moveFrom / w:moveTo carry a "
-                          "w:author attribute that no pass touches", strict=True)
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_revision_authors_outside_ins_and_del_are_scrubbed(tmp_path):
     out, _ = redact(tmp_path, "m4b", [
         '<w:p><w:pPr><w:pPrChange w:id="1" w:author="JUDr. Ján Novák" '
@@ -621,6 +746,22 @@ def test_revision_authors_outside_ins_and_del_are_scrubbed(tmp_path):
         '<w:t xml:space="preserve">Text odseku.</w:t></w:r></w:p>'], KNOWN)
     assert surfaces_with(out, "Ján Novák") == []
     assert surfaces_with(out, "Mária Kováčová") == []
+    # The revision elements themselves are NOT removed -- they carry only the previous
+    # formatting -- so the document still round-trips.
+    assert reopens(out)
+    assert "Text odseku." in doc_text(out)
+
+
+def test_control_revision_author_is_a_gradeable_surface(tmp_path):
+    """M4b's fixture control: a w:author on a w:pPrChange really is read by `extract()` (as
+    xml_attributes), so "not found" above is a scrub and not a blind spot."""
+    src = doc_with_body([
+        '<w:p><w:pPr><w:pPrChange w:id="1" w:author="JUDr. Ján Novák" '
+        'w:date="2026-01-01T00:00:00Z"><w:pPr/></w:pPrChange></w:pPr>'
+        '<w:r><w:t xml:space="preserve">Text odseku.</w:t></w:r></w:p>'],
+        tmp_path / "m4bc.docx")
+    assert reopens(src)
+    assert surfaces_with(src, "Ján Novák") == ["xml_attributes"]
 
 
 # ============================================================== R: _scrub_rel_targets
@@ -654,20 +795,32 @@ def test_double_encoded_target_is_scrubbed():
     assert _target_carries_pii(urllib.parse.unquote(t), [], None)
 
 
-@pytest.mark.xfail(reason="R4-R3: '.' is not in _TARGET_PUNCT_RE, so a lowercase Windows "
-                          "username in a file:// or UNC target stays one token", strict=True)
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 @pytest.mark.parametrize("target", [
     "file:///C:/Users/jan.novak/Documents/zmluva.docx",
     r"\\fileserver\users\jan.novak\matter\zmluva.docx",
+    "file:///C:/Users/Jan.Novak/Documents/zmluva.docx",      # the round's own control
 ])
 def test_lowercase_username_in_a_file_target_is_scrubbed(target):
     assert _target_carries_pii(urllib.parse.unquote(target), [], None)
 
 
-@pytest.mark.xfail(reason="R4-R4: a tel: link to the client's mobile is not recognised unless "
-                          "the number is written with spaces", strict=True)
+def test_a_filesystem_target_with_no_account_name_survives():
+    """The narrowing that keeps the R3 fix from becoming the R1 defect: the rule fires on a
+    dotted DIRECTORY segment, not on the file name. A share path with no account name in it is
+    not personal data and is left alone."""
+    assert not _target_carries_pii("file:///C:/Vzory/kupna-zmluva.docx", [], None)
+    assert not _target_carries_pii(r"\\fileserver\vzory\zmluva.docx", [], None)
+
+
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_tel_target_is_scrubbed():
     assert _target_carries_pii("tel:+421905123456", [], None)
+    assert _target_carries_pii("tel:+421 905 123 456", [], None)
 
 
 # ========================================= N1: the R3-A10 fix re-opened the homoglyph attack
@@ -744,18 +897,39 @@ def test_docx_and_pdf_agree_on_a_letterspaced_page(tmp_path):
         f"docx still holds the name: {'J a n   N o v a k' in doc_text(out)})")
 
 
-@pytest.mark.xfail(reason="R4-X3: _scrub_rel_targets parses .rels with no guard, so a "
-                          "malformed package raises XMLSyntaxError out of the writer where "
-                          "the contract promises a refusal. eval/extract.py guards the same "
-                          "call; writer/ does not", strict=True)
+# FIXED 2026-09-17, daytime run. The marker is gone rather than flipped to xpass: a finding
+# that has been fixed must become an ordinary regression test, or a later regression puts it
+# back to "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
+#
+# The assertion is STRONGER than the one the round wrote. The original only failed on a raw
+# XMLSyntaxError, which meant any other exception -- including the named refusal the finding
+# asked for -- also failed the test, so it could never have gone green. What the contract
+# actually promises is a NAMED refusal whose message says nothing was written, so that is what
+# is pinned: the exception type, and the absence of the output file.
 def test_malformed_rels_gives_a_clean_refusal(tmp_path):
     def patch(a, b):
         return patch_package(
             a, b, replace={"word/_rels/document.xml.rels": b"<Relationships><oops"})
 
-    try:
+    out = tmp_path / "x3_r.docx"
+    with pytest.raises(UnreadableDocumentError):
         redact(tmp_path, "x3", [
             '<w:p><w:r><w:t xml:space="preserve">Predávajúci: Ján Novák.</w:t></w:r></w:p>'],
             KNOWN, patch=patch)
-    except etree.XMLSyntaxError as e:                     # noqa: F841
-        pytest.fail("writer raised a raw XMLSyntaxError instead of refusing cleanly")
+    assert not out.exists(), "a half-redacted file was left on disk"
+
+
+def test_malformed_rels_deeper_in_the_package_also_refuses(tmp_path):
+    """The same promise for a .rels part python-docx does not parse on open, which is the
+    branch `_scrub_rel_targets` itself has to guard: it reaches that function as bytes and
+    used to raise lxml's own exception out of the writer."""
+    def patch(a, b):
+        return patch_package(
+            a, b, replace={"customXml/_rels/item1.xml.rels": b"<Relationships><oops"})
+
+    out = tmp_path / "x3b_r.docx"
+    with pytest.raises(UnreadableDocumentError):
+        redact(tmp_path, "x3b", [
+            '<w:p><w:r><w:t xml:space="preserve">Predávajúci: Ján Novák.</w:t></w:r></w:p>'],
+            KNOWN, patch=patch)
+    assert not out.exists(), "a half-redacted file was left on disk"
