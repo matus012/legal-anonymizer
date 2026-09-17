@@ -69,6 +69,10 @@ DONE HERE:
      digits, ligatures and the like onto their plain forms.
   5. NFD -> NFC: a combining mark that composes with the preceding character is composed
      into it, so "c"+U+030C becomes U+010D and the existing regexes match it.
+  6. CP1250-AS-WINANSI MOJIBAKE is folded back, 1:1, but ONLY IN A UNIT THAT SHOWS EVIDENCE
+     of the failure -- a Slovak contract may legitimately name "Citroën" or "Malmö". See
+     _build_mojibake_tables and has_mojibake_evidence for the table's derivation and the
+     measurement behind the evidence threshold.
 
 DELIBERATELY NOT DONE HERE:
   * CASE IS NOT FOLDED. Several detectors use CAPITALISATION AS EVIDENCE -- ``detect/orgs.py``
@@ -164,6 +168,188 @@ _HYPHENS = {
     0xFE63: "-",   # SMALL HYPHEN-MINUS
     0xFF0D: "-",   # FULLWIDTH HYPHEN-MINUS
 }
+
+
+# ------------------------------------------------------------------- cp1250-as-WinAnsi fold
+# THE CLASSIC CENTRAL-EUROPEAN ENCODING FAILURE, folded back (red-team round 4, R4-I3).
+#
+# A cp1250 (Central European) text layer drawn with /WinAnsiEncoding is re-read byte for byte
+# as cp1252: "č" (0xE8) arrives as "è", "ď" (0xEF) as "ï", "ň" (0xF2) as "ò", "ĺ" (0xE5) as
+# "å", "ľ" (0xBE) as "¾", "Ľ" (0xBC) as "¼". "á í é ó ú ý š ž" are IDENTICAL in both code
+# pages and come through untouched, which is what makes the damage partial and nearly
+# invisible -- most of the page reads perfectly, and NEITHER PDF refusal fires: every
+# replacement is a letter or a punctuation sign (never Cc/Cn), so page_has_unreadable_text is
+# False, and the token structure is unchanged, so page_is_shredded is False. The source is
+# ordinary: legacy Slovak court, land-registry and DMS systems, older Ghostscript paths and
+# RTF->PDF converters.
+#
+# WHY IT BELONGS HERE. The confusion is ONE CHARACTER FOR ONE CHARACTER, so the repair is
+# OFFSET-PRESERVING -- which is the property that decides where it can live. Both writers CUT
+# THE DOCUMENT at detector offsets, so a repair that changed lengths would corrupt files
+# rather than mislabel them. Offset-preserving means it is a fold, exactly like the Cyrillic
+# homoglyph fold above: detection runs over the repaired view, each hit maps back to ORIGINAL
+# offsets through the map this module already builds, and the writer redacts the original
+# mojibake surface -- which is what the reader actually sees on the page.
+#
+# THE TABLE IS DERIVED, NOT TYPED. Hand-typing 50 accented characters into this file is how a
+# table acquires a typo nobody can see. It is built by running each character through the two
+# codecs, which is the same construction corpus/mutations.py uses for the attack -- reached
+# independently, because detect/ may not import from corpus/ (tests/test_detect_registry.py
+# enforces that) and because a table shared with the attack would grade itself.
+
+
+def _build_mojibake_tables() -> tuple[dict[int, str], frozenset[str], frozenset[str]]:
+    """Derive (inverse fold, ambiguous images, evidence characters) from the codecs.
+
+    ``forward`` is what the failure does: character -> single cp1250 byte -> cp1252 reading.
+    The five bytes 0x81/0x8D/0x8F/0x90/0x9D are UNDEFINED in WinAnsi, and a decoder yields
+    U+FFFD for all of them -- so "Ť", "ť" and "Ź" all arrive as the SAME character and the
+    inverse is genuinely ambiguous there. Those images are excluded from the fold (guessing
+    which letter a lost byte was is not a repair) and returned separately, because a PDF page
+    that contains one is a page whose repair CANNOT be completed -- see
+    writer/pdf_body.MojibakeTextLayerError.
+
+    EVIDENCE is narrower than the fold on purpose: only the images of the letters that are
+    SLOVAK. Those are the characters whose presence in a Slovak document is the signature of
+    this failure rather than an ordinary foreign word. The rest of the table (Polish, Romanian,
+    Hungarian and Turkish letters, and the bare spacing diacritics) images onto characters that
+    occur legitimately -- "m³", "£", "¿", "1ª" -- and including them would have made "m³" the
+    evidence that a page is mis-decoded. Measured: the narrow set is worth nothing in
+    sensitivity (0.9707 of changed corpus units either way) and removes every one of those
+    false-evidence shapes.
+    """
+    forward: dict[str, str] = {}
+    for code in range(0x20, 0x2500):
+        ch = chr(code)
+        try:
+            raw = ch.encode("cp1250")
+        except UnicodeEncodeError:
+            continue
+        if len(raw) != 1:
+            continue
+        try:
+            seen = raw.decode("cp1252")
+        except UnicodeDecodeError:
+            seen = "�"
+        if seen != ch:
+            forward[ch] = seen
+
+    seen_count: dict[str, int] = {}
+    for image in forward.values():
+        seen_count[image] = seen_count.get(image, 0) + 1
+
+    inverse = {ord(image): src for src, image in forward.items() if seen_count[image] == 1}
+    collapsed = frozenset(im for im, n in seen_count.items() if n > 1)
+    evidence = frozenset(
+        forward[ch] for ch in _SLOVAK_LETTERS if ch in forward and forward[ch] not in collapsed
+    )
+    # The bullet is in the AMBIGUOUS set but NOT in the EVIDENCE set. It is what a PDF reader
+    # shows for a lost byte, so it says "this repair cannot be finished" -- but it is also an
+    # ordinary character in an ordinary document, so it must never be the thing that says "this
+    # document is mis-decoded" in the first place.
+    return inverse, collapsed | _SUBSTITUTE_GLYPHS, evidence | collapsed
+
+
+# Every letter of the Slovak alphabet that carries a diacritic. Written out rather than
+# derived, because "which letters are Slovak" is a fact about the language, not about Unicode.
+_SLOVAK_LETTERS = "ÁáÄäČčĎďÉéÍíĹĺĽľŇňÓóÔôŔŕŠšŤťÚúÝýŽž"
+
+# WHAT A READER SHOWS FOR A BYTE WINANSI DOES NOT DEFINE. Five cp1250 bytes -- 0x81, 0x8D,
+# 0x8F, 0x90, 0x9D -- have no WinAnsi character, and two of them are the Slovak "Ť" and "ť".
+# There is no single answer to what appears in their place, so BOTH answers this project
+# actually meets are listed:
+#
+#   * U+FFFD, what Python's cp1252 codec yields, and therefore what corpus/mutations.py writes
+#     when it models the failure on text;
+#   * U+2022 BULLET, what a PDF reader yields -- PDF 32000-1 Annex D.2 specifies the bullet as
+#     the character shown for every code WinAnsiEncoding leaves undefined, and PyMuPDF follows
+#     it. MEASURED, not assumed: a hand-built PDF carrying "príslušnosť" in cp1250 bytes with
+#     /WinAnsiEncoding extracts as "príslušnos•". Keying the refusal on U+FFFD alone would
+#     have made it dead code on the one path it exists for.
+#
+# A bullet is of course an ordinary character, which is why mojibake_is_unrepairable requires
+# BOTH the mojibake signature AND the bullet to sit INSIDE A WORD. A list bullet is followed by
+# a space; a destroyed letter is not. Measured over every corpus PDF: zero refusals.
+_SUBSTITUTE_GLYPHS = frozenset({"�", "•"})
+
+_MOJIBAKE_INVERSE, MOJIBAKE_AMBIGUOUS, _MOJIBAKE_EVIDENCE = _build_mojibake_tables()
+
+
+def _has_letter_neighbour(text: str, i: int) -> bool:
+    """Is ``text[i]`` immediately beside a letter -- i.e. inside a word rather than standing on
+    its own? The one test that separates "è" in a mis-decoded Slovak word from "à" standing
+    alone as a French preposition, and a destroyed letter from a list bullet."""
+    return (i > 0 and unicodedata.category(text[i - 1]).startswith("L")) or (
+        i + 1 < len(text) and unicodedata.category(text[i + 1]).startswith("L")
+    )
+
+
+def has_mojibake_evidence(text: str) -> bool:
+    """Does ``text`` carry the signature of a cp1250 text layer read as WinAnsi?
+
+    THE TEST IS ONE WORD-INTERNAL EVIDENCE CHARACTER, and the threshold is 1 because it was
+    MEASURED rather than guessed. Over the whole clean corpus -- 3 855 detect() units from the
+    71 corpus .docx plus the demo, and 82 PDF pages from the 71 corpus .pdf plus the demo --
+    the count of evidence characters is ZERO, not merely the count of firings. There is
+    nothing for a higher threshold to protect against, and a higher threshold costs recall on
+    exactly the short units that matter: a table cell holding nothing but "Ján Kováè" carries
+    one. Requiring two DISTINCT tokens was measured too and fired on 0.460 of the mutated
+    corpus units against 0.971 for this rule -- half the damage left unrepaired to defend
+    against a risk the corpus does not contain.
+
+    WORD-INTERNAL (a letter immediately before or after) is the part that does the work in a
+    document the corpus does NOT contain. "à" standing alone is French; "podľa" mis-decoded to
+    "pod¾a" is not a word in any language. The neighbour test costs nothing on mutated text --
+    almost every mojibaked letter sits inside a word by construction -- and removes the
+    standalone symbol readings entirely.
+
+    THE ABBREVIATION POINT IS THE ONE EXCEPTION, and it was measured rather than foreseen.
+    Slovak writes a number as "byt č. 151", so the mis-decoded "è" stands between a space and
+    a full stop with no letter beside it -- the unit "Byt: byt è. 151" has no other evidence
+    in it at all, and CISLO_BYTU sat at robustness 0.750 entirely on that shape. An evidence
+    character IMMEDIATELY FOLLOWED BY "." is therefore evidence too. It is a narrow
+    widening: "č." is an abbreviation marker on every Slovak filing, while a Slovak legal
+    document that ends a sentence with the bare Italian word "è" is not a document this tool
+    will ever meet.
+
+    WHAT THIS STILL RISKS, stated rather than hidden: a document whose ONLY foreign content is
+    a single word-internal evidence character -- "Renè", "Håkon", "Bjørn" -- is folded as
+    though it were mojibake. The cost of that is small and one-sided: the fold is
+    offset-preserving, so nothing is mis-cut, the reported surface is still sliced from the
+    ORIGINAL text, and detect() normalizes the user's known-entity list through this same fold,
+    so a lawyer who types "Renè" still matches a document that spells it "Renè". What changes
+    is only which spelling the detectors pattern-match against.
+    """
+    return any(
+        ch in _MOJIBAKE_EVIDENCE
+        and (
+            _has_letter_neighbour(text, i)
+            or (i + 1 < len(text) and text[i + 1] == ".")
+        )
+        for i, ch in enumerate(text)
+    )
+
+
+def mojibake_is_unrepairable(text: str) -> bool:
+    """Mojibake evidence AND at least one character whose repair is a GUESS.
+
+    The five WinAnsi-undefined bytes all decode to U+FFFD, so "Ť", "ť" and "Ź" are the same
+    character by the time the text reaches us -- and "ť" is one of the commonest letters in
+    Slovak. The information is genuinely gone: the PDF viewer draws nothing for that byte
+    either, so the human reader cannot recover it any more than we can. Choosing one of the
+    three would be inventing document text, and the character it replaced can be inside a
+    surname. So the PDF writer refuses instead; see writer/pdf_body.MojibakeTextLayerError.
+
+    THE SUBSTITUTE MUST SIT INSIDE A WORD. A PDF reader shows U+2022 BULLET for a lost byte
+    (see _SUBSTITUTE_GLYPHS), and a bullet is also what a bulleted list is made of. A list
+    bullet is followed by a space and preceded by a line break; the one in "príslušnos•" is
+    not. Without this the refusal would fire on any mis-decoded page that also has a list on
+    it -- and a refusal that fires on ordinary structure is how a tool gets switched off.
+    """
+    return has_mojibake_evidence(text) and any(
+        ch in MOJIBAKE_AMBIGUOUS and _has_letter_neighbour(text, i)
+        for i, ch in enumerate(text)
+    )
 
 
 # A character is "interesting" when normalization might change it. The fast path below
@@ -360,7 +546,13 @@ def normalize(text: str, join_wrapped: bool = False) -> Normalized:
     """
     joined = _wrapped_run_indices(text) if join_wrapped else frozenset()
     foldable = _fold_indices(text)
-    if not text or (not joined and not _INTERESTING_RE.search(text)):
+    # Decided ONCE for the whole unit, not per character: the encoding of a text layer is a
+    # property of the document, not of one letter, and a per-character test has no way to tell
+    # "è" in a mis-decoded Slovak page from "è" in a French name. It is also what keeps the
+    # fast path below honest -- most mojibake images (U+00C0..U+017F) sit INSIDE
+    # _INTERESTING_RE's allowed range, so "Ján Kováè" would otherwise be returned untouched.
+    mojibake = has_mojibake_evidence(text)
+    if not text or (not joined and not mojibake and not _INTERESTING_RE.search(text)):
         # Fast path: nothing to do. ``unchanged`` is True and span() is the identity, so no
         # arrays are built and detect() pays nothing for the common paragraph.
         return Normalized(text=text, original=text, starts=(), ends=())
@@ -446,11 +638,22 @@ def normalize(text: str, join_wrapped: bool = False) -> Normalized:
             # Does not compose (a stray mark, or a base that has no precomposed form).
             # Fall through and emit it as an ordinary character rather than dropping it.
 
-        # 4. HOMOGLYPH then COMPATIBILITY FOLD. The homoglyph map is 1:1; _compat may expand
-        # one character into several, each of which maps back to this single original index.
+        # 4. MOJIBAKE, then HOMOGLYPH, then COMPATIBILITY FOLD. The homoglyph map is 1:1;
+        # _compat may expand one character into several, each of which maps back to this single
+        # original index.
+        #
+        # The mojibake fold runs FIRST and EXCLUSIVELY: its images are accented Latin letters
+        # and two punctuation signs, none of which is a script confusable or a hyphen, so there
+        # is nothing for the other two maps to do to a character it claims. Running it before
+        # _compat is load-bearing in one place -- per-character NFKC turns "¾" into "3⁄4" and
+        # "¼" into "1⁄4", so without this fold a mis-decoded "nehnuteľnosť" reaches the
+        # detectors as "nehnute3⁄4nos?" and is not one token any more.
         code = ord(ch)
-        base = _HOMOGLYPHS.get(code, ch) if i in foldable else ch
-        base = _HYPHENS.get(code, base)
+        if mojibake and code in _MOJIBAKE_INVERSE:
+            base = _MOJIBAKE_INVERSE[code]
+        else:
+            base = _HOMOGLYPHS.get(code, ch) if i in foldable else ch
+            base = _HYPHENS.get(code, base)
         folded = _compat(base)
         for piece in folded:
             out.append(piece)

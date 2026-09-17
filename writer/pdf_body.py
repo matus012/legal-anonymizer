@@ -57,7 +57,7 @@ import fitz
 
 from detect.config import DetectConfig
 from detect.core import detect_with_failures
-from detect.normalize import strip_format_chars
+from detect.normalize import mojibake_is_unrepairable, strip_format_chars
 from writer.decisions import RedactionDecisions
 from writer.errors import PasswordProtectedError, UnreadableDocumentError
 from writer.labelmap import LabelMap, make_snippet
@@ -223,6 +223,64 @@ class ShreddedTextLayerError(NoTextLayerError):
             f"{', '.join(str(p) for p in self.pages)}; refusing rather than writing a file "
             f"whose text was never readable: {path}"
         )
+
+
+class MojibakeTextLayerError(NoTextLayerError):
+    """A page's text layer is a cp1250 (Central European) text drawn with /WinAnsiEncoding,
+    and the mis-decoding cannot be undone on this page.
+
+    A NoTextLayerError subclass for the same reason as the two above: every caller that
+    already refuses a PDF whose text cannot be read refuses this one unchanged, and the
+    distinct type exists so the GUI can say which of the three it is, because the remedy
+    differs. Here the remedy is to re-export the PDF from the system that produced it, or to
+    print it to a new PDF from a viewer that has the font.
+
+    WHY THIS IS NOT COVERED BY THE OTHER TWO. Every character the failure produces is a letter
+    or a punctuation sign, never a control character, so page_has_unreadable_text is False;
+    and the token structure is untouched, so page_is_shredded is False. The page is ACCEPTED by
+    both, reads almost perfectly to a human, and detect() silently fails to match the Slovak
+    words it contains. Red-team round 4, R4-I3.
+
+    WHY A REFUSAL AND NOT A REPAIR. Most of this damage IS repaired, offset-preservingly, by
+    detect/normalize.py. This error is raised only for the part that cannot be: the WinAnsi
+    code page leaves five bytes undefined, so "Ť", "ť" and "Ź" all arrive as one and the same
+    U+FFFD, and "ť" is one of the commonest letters in Slovak. Picking one of the three would
+    be inventing document text, and the letter it replaced can sit inside a party's surname.
+
+    Carries ``pages`` (1-based)."""
+
+    def __init__(self, path: str, pages: list[int]) -> None:
+        self.pages = list(pages)
+        super().__init__(
+            f"PDF text layer was written in the Central European code page and drawn as "
+            f"Western European on page(s) "
+            f"{', '.join(str(p) for p in self.pages)}; the Slovak letters lost there cannot "
+            f"be restored, so NO FILE WAS WRITTEN -- re-export or re-print the PDF and try "
+            f"again: {path}"
+        )
+
+
+def page_is_unrepairable_mojibake(text: str) -> bool:
+    """Does this page show the cp1250-as-WinAnsi signature AND contain a character whose
+    repair would be a guess?
+
+    Both halves are required, and the second is what keeps this quiet. U+FFFD on its own is
+    not evidence of anything in particular -- a decoder emits it for any byte it could not
+    place. It is only when the page ALSO carries the mojibake signature that the U+FFFD has a
+    known cause and a known, unrecoverable, meaning.
+
+    Measured before shipping, in the direction that has already gone wrong on this module
+    once (an isprintable() guard that would have refused 70 of 71 corpus PDFs): over all 72
+    corpus PDFs plus the demo -- 82 pages -- the evidence half fires ZERO times, so this
+    refuses NOTHING in the corpus. The count of evidence characters on those pages is itself
+    zero, not merely the count of firings."""
+    return mojibake_is_unrepairable(text)
+
+
+def mojibake_pages(doc: "fitz.Document") -> list[int]:
+    """1-based page numbers whose mis-decoded text layer cannot be repaired."""
+    return [i for i, page in enumerate(doc, 1)
+            if page_is_unrepairable_mojibake(page.get_text("text"))]
 
 
 def has_text_layer(doc: "fitz.Document") -> bool:
@@ -463,6 +521,17 @@ def _redact_pdf(
     if bad_pages:
         doc.close()
         raise UnreadableTextLayerError(in_path, bad_pages)
+
+    # R4-I3: a cp1250 text layer drawn as WinAnsi passes both checks above -- every character
+    # it produces is a letter or a punctuation sign, and the tokens are intact. Most of it is
+    # folded back by detect/normalize.py, offset-preservingly, so this refuses only the pages
+    # where the fold cannot finish: the WinAnsi-undefined bytes collapse "Ť"/"ť"/"Ź" onto a
+    # single U+FFFD, and "ť" inside a surname is then unreadable to us and to the reviewer
+    # alike. Half-redacting such a page is exactly the silent failure this project refuses.
+    mangled = mojibake_pages(doc)
+    if mangled:
+        doc.close()
+        raise MojibakeTextLayerError(in_path, mangled)
 
     if not has_text_layer(doc):
         doc.close()
