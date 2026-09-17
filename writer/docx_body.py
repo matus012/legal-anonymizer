@@ -32,6 +32,7 @@ is never preserved (see _scrub_metadata).
 from __future__ import annotations
 
 import re
+import unicodedata
 import urllib.parse
 import zipfile
 from copy import deepcopy
@@ -468,6 +469,43 @@ def _scrub_metadata(doc) -> None:
                 comment.set(qn("w:initials"), "")
 
 
+# Types whose shape alone is not evidence in a URL path -- a checksum has to agree. An
+# eight-digit run is a date as often as it is an ICO, and a legal citation is full of them.
+_TARGET_CHECKSUM_TYPES = frozenset({
+    "RODNE_CISLO", "ICO", "DIC", "IC_DPH", "IBAN", "BANKOVY_UCET",
+})
+
+
+def _looks_like_a_date(surface: str) -> bool:
+    """Is this digit run a plausible YYYYMMDD date rather than an identifier?
+
+    Needed because a checksum is not the discriminator here: "20180101" -- the effective date
+    in a slov-lex citation -- happens to be a checksum-VALID ICO, so requiring a valid checksum
+    did not save the link. Legal citations are FULL of effective dates, and an eight-digit run
+    in a legal URL path is a date more often than it is a company number.
+
+    Deliberately narrow: exactly eight digits, a year in a range a legal citation uses, and a
+    real month and day. A genuine ICO that happens to read as a date is possible and would be
+    kept -- but it would have to be in a URL path, which is already the rarer case, and the
+    display text and document body are redacted independently of this.
+    """
+    digits = surface.strip()
+    if len(digits) != 8 or not digits.isdigit():
+        return False
+    year, month, day = int(digits[:4]), int(digits[4:6]), int(digits[6:])
+    return 1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31
+
+
+def _fold_for_match(s: str) -> str:
+    """Casefold and strip diacritics, for comparing a candidate against the lawyer's own list.
+
+    A name in a URL path is written the way a filesystem tolerates -- "Jan-Novak" for
+    "Ján Novák" -- so an exact comparison would miss precisely the targets this exists for.
+    """
+    decomposed = unicodedata.normalize("NFKD", s.casefold())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).strip()
+
+
 # A hyperlink target is scrubbed when it CONTAINS personal data -- not merely because it is
 # itself a URL.
 #
@@ -506,10 +544,46 @@ def _target_carries_pii(target: str, known_entities: list[str], config) -> bool:
     are scrub it or ship it, and shipping it means a file that reads [MENO_1] while still
     naming the client in its own package.
     """
-    for probe in (target, _TARGET_PUNCT_RE.sub(" ", target).replace("-", " ")):
-        for c in detect_with_failures(probe, known_entities, config)[0]:
-            if c.type not in _TARGET_IGNORED_TYPES:
-                return True
+    # Percent-decoded FIRST, for both probes. Word stores what it encodes, so "Jan%20Novak"
+    # has to read as "Jan Novak" or the scrub misses exactly the names it exists for.
+    decoded = urllib.parse.unquote(target)
+
+    # PROBE 1: the target as it is. Almost no guessing here -- an address in a mailto: is an
+    # address -- with one exception. A URL match covers only the SCHEME AND HOST, so a digit
+    # run in the PATH is still visible to the identifier detectors, and an eight-digit date in
+    # a legal citation (slov-lex .../2016/18/20180101) reads as a checksum-valid ICO. That one
+    # is excluded here rather than in probe 2, because this is the probe it actually fires in.
+    for c in detect_with_failures(decoded, known_entities, config)[0]:
+        if c.type in _TARGET_IGNORED_TYPES:
+            continue
+        if c.type in _TARGET_CHECKSUM_TYPES and _looks_like_a_date(c.surface):
+            continue
+        return True
+
+    # PROBE 2: the target with its punctuation opened up, which is the only way to see a name
+    # buried in a path -- and ALSO the only place in this function that guesses, because a URL
+    # path read as prose is a string of Slovak words. Measured over 30 real Slovak legal links
+    # (red-team round 4, R4-R1), the unrestricted version destroyed three of them: an
+    # eight-digit DATE in a slov-lex citation read as an ICO, "Sudy" in a justice.gov.sk path
+    # read as a municipality, and "dane cla" on mfsr.sk read as a personal name.
+    #
+    # So this probe takes only evidence that cannot be produced by ordinary vocabulary:
+    # an e-mail address, a CHECKSUM-VALID identifier, or a name the lawyer typed themself.
+    # A gazetteer hit or a bare-name pair is exactly what a path full of Slovak words looks
+    # like, and is not enough to destroy somebody's link to the statute book.
+    opened = _TARGET_PUNCT_RE.sub(" ", decoded).replace("-", " ")
+    known_folded = {_fold_for_match(k) for k in known_entities}
+    for c in detect_with_failures(opened, known_entities, config)[0]:
+        if c.type in _TARGET_IGNORED_TYPES:
+            continue
+        if c.type == "EMAIL":
+            return True
+        if (c.type in _TARGET_CHECKSUM_TYPES
+                and c.checksum == "valid"
+                and not _looks_like_a_date(c.surface)):
+            return True
+        if _fold_for_match(c.surface) in known_folded:
+            return True
     return False
 
 

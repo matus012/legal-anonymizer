@@ -107,3 +107,59 @@ def test_an_internal_relationship_is_never_touched():
     assert "styles.xml" in rels, "an internal relationship was damaged"
     # and the file still opens
     assert Document(out).paragraphs
+
+
+# --------------------------------------------------------------- R4-R1: real Slovak links
+# Red-team round 4 ran 30 genuine Slovak legal links through the scrub and found three
+# destroyed. Amendment 15's own text records that the FIRST version of this scrub "destroyed
+# every working link in the document, including the statute book" -- and the narrowed version
+# still destroyed the statute book, by a different route. Narrowing a rule once is not evidence
+# that it is narrow enough, so the links are pinned here.
+REAL_LINKS_THAT_MUST_SURVIVE = [
+    "https://www.slov-lex.sk/pravne-predpisy/SK/ZZ/2016/18/20180101",  # 20180101 is a
+    #                                                                   checksum-VALID ICO
+    "https://www.justice.gov.sk/Stranky/Sudy/Sud.aspx?p_Id=123",       # "Sudy" is a gazetteer
+    #                                                                   place name
+    "https://www.mfsr.sk/sk/dane-cla-ucto/priame-dane/",               # "dane cla" reads as a
+    #                                                                   bare-name pair
+    "https://www.slov-lex.sk/",
+    "https://www.katasterportal.sk/kapor/",
+    "https://www.orsr.sk/vypis.asp?ID=12345&SID=2&P=0",
+    "https://www.zakonypreludi.sk/zz/2011-482",
+]
+
+
+@pytest.mark.parametrize("url", REAL_LINKS_THAT_MUST_SURVIVE)
+def test_a_real_slovak_legal_link_is_not_destroyed(url):
+    from detect.config import DEFAULT
+    from writer.docx_body import _target_carries_pii
+
+    assert not _target_carries_pii(url, [NAME], DEFAULT), (
+        f"the scrub would destroy a working link: {url}"
+    )
+
+
+@pytest.mark.parametrize("url", [
+    "mailto:jan.novak@advokat.sk",
+    "https://example.com/klienti/Jan-Novak/zmluva.pdf",
+    "https://example.com/k/Jan%20Novak/zmluva.pdf",     # percent-encoded, as Word stores it
+    "mailto:maria.kovacova@example.sk?subject=zmluva",
+])
+def test_a_target_carrying_personal_data_is_still_scrubbed(url):
+    """The other side of the same narrowing: tightening the rule must not blind it."""
+    from detect.config import DEFAULT
+    from writer.docx_body import _target_carries_pii
+
+    assert _target_carries_pii(url, [NAME, "Mária Kováčová"], DEFAULT)
+
+
+def test_an_eight_digit_date_is_not_read_as_an_identifier():
+    """A checksum is not the discriminator: 20180101 IS a checksum-valid ICO. Legal citations
+    are full of effective dates, and an eight-digit run in a legal URL path is a date far more
+    often than a company number."""
+    from writer.docx_body import _looks_like_a_date
+
+    assert _looks_like_a_date("20180101")
+    assert _looks_like_a_date("19960826")
+    assert not _looks_like_a_date("47123456")   # month 34 -- a real ICO
+    assert not _looks_like_a_date("1234567")    # too short

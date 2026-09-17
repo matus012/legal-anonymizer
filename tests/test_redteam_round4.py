@@ -631,9 +631,9 @@ REAL_LINKS = [
 ]
 
 
-@pytest.mark.xfail(reason="R4-R1: real Slovak statute-book and ministry links are read as "
-                          "carrying PII and are replaced by https://removed.invalid/ — a "
-                          "broken link the reviewer can never see", strict=True)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 @pytest.mark.parametrize("url", REAL_LINKS)
 def test_real_slovak_legal_links_survive_the_scrub(url):
     assert not _target_carries_pii(urllib.parse.unquote(url), [], None)
@@ -646,8 +646,9 @@ def test_control_a_pii_bearing_target_is_still_scrubbed():
     assert _target_carries_pii("mailto:jan.novak@advokat.sk", [], None)
 
 
-@pytest.mark.xfail(reason="R4-R2: unquote() runs once, so a double-encoded target keeps its "
-                          "%20 and the name never becomes two words", strict=True)
+# FIXED 2026-09-17, overnight run. The marker is gone rather than flipped to xpass: a finding that has been
+# fixed must become an ordinary regression test, or a later regression puts it back to
+# "xfail" -- the state this file calls normal -- and nobody notices the fix was undone.
 def test_double_encoded_target_is_scrubbed():
     t = "https://dms.firma.sk/klienti/Jan%2520Novak/zmluva.pdf"
     assert _target_carries_pii(urllib.parse.unquote(t), [], None)
