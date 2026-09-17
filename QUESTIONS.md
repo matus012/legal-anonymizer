@@ -288,3 +288,40 @@ silently weaker on exactly `ť`, which is a common Slovak letter.
 **Who should decide.** Whoever owns the PDF refusal thresholds, because the choice interacts
 with `_UNDECODABLE_CATEGORIES`: if U+FFFD were added to that set, this mutation class would
 become partly self-refusing and the number would stop measuring the detectors.
+
+---
+
+## Q18 — LibreOffice as a second corpus producer is NOT installed (daytime run, 2026-09-17)
+
+**Question.** The daytime brief asks, conditionally: "If LibreOffice is installed (soffice),
+add it as a second corpus producer (docx + pdf via `--headless --convert-to`) so gates run on
+non-python-docx XML shapes too." The condition is the whole point of the item -- every DOCX
+leak found in red-team round 4 lives in a shape `python-docx` **cannot emit**, which is exactly
+why every gate was green while the bugs were live. A second, independent producer would give
+the gates a population with those shapes in it.
+
+**Measured state: soffice is NOT on this machine.** `where soffice` returns nothing, and
+neither `C:\Program Files\LibreOffice\program\soffice.exe` nor the `(x86)` path exists.
+
+**Default taken: SKIPPED, and not installed.** Installing LibreOffice is a ~350 MB download and
+a system-wide install. Installing software is not something this run is authorised to do on the
+owner's machine, and the brief's own phrasing makes it conditional rather than required.
+
+**What replaces it, and why it is arguably the stronger test.** The red team builds the same
+XML shapes by hand as RAW OOXML instead. A hand-authored `<mc:AlternateContent>` with both a
+`<mc:Choice>` and an `<mc:Fallback>` copy, a `<w:dataBinding>` content control, and a
+`<w:fldSimple w:instr="HYPERLINK ...">` are all written directly, so the fixture targets the
+exact structure the finding names rather than whatever LibreOffice's exporter happens to
+produce for some input. The weakness of the substitution is equally plain and is recorded here
+rather than hidden: hand-authored fixtures test the shapes we **thought of**, and a real second
+producer would also deliver the ones we did not.
+
+**Reversal (one command once LibreOffice exists).**
+    soffice --headless --convert-to docx:"MS Word 2007 XML" --outdir <out> <in>
+    soffice --headless --convert-to pdf --outdir <out> <in>
+Wire it into `corpus/generate.py` behind a `--producer {python-docx,soffice,both}` flag,
+default `python-docx` so the seed-determined corpus and every gate number stay reproducible on
+a machine without it. Expect the gates to MOVE when it is switched on; that movement is the
+finding, not a regression.
+
+**Who should decide.** The owner, because it is an install on their machine.
