@@ -714,3 +714,48 @@ shape I can name a real document for.
   honest O(n²) scan.** The growth I measured is x4 per doubling, which is consistent with a
   quadratic scan over a welded mega-token; I did not isolate the individual regex. If it is
   catastrophic backtracking the exponent is worse than I have recorded, not better.
+
+
+---
+
+## ORCHESTRATOR FOLLOW-UP, 2026-09-17 — R4-X2 does not reproduce
+
+R4-X2 reported `detect()` taking **3.19 s on 11 360 characters** of capitalised surnames and
+suspected catastrophic backtracking in `detect/name_anchors.py`. The round flagged the number
+as unisolated, which was the right call, because it does not hold on the committed tree.
+
+Re-measured, both arms, both shapes (one name per line, and one long line):
+
+| chars | blind | with known entities |
+|------:|------:|--------------------:|
+| 3 814 | 0.115 s | 0.033 s |
+| 7 624 | 0.064 s | 0.087 s |
+| 15 249 | 0.183 s | 0.257 s |
+| 30 499 | 0.585 s | 0.868 s |
+
+About **3x per doubling** — super-linear, roughly O(n^1.6), and **0.13 s at the size where
+3.19 s was reported**, a factor of twenty-five out. The likeliest explanation is the same one
+that produced the earlier `RedactionIncompleteError` blocker: a measurement taken against a
+tree another agent was mid-refactor in. Recorded rather than dropped — a wrong performance
+number misleads exactly as much as a wrong recall number, and this one would have sent someone
+hunting a regex that is not the problem.
+
+**The growth is real; the exposure is not**, and the reason is the UNIT:
+
+* `writer/docx_body.py` calls `detect()` once per `<w:p>` — one PARAGRAPH;
+* `writer/pdf_body.py` calls it once per PAGE.
+
+Measured over the whole corpus: **longest paragraph 157 characters, longest PDF page 1 713**.
+The smallest row in the table above is already twice the largest real unit. `gui/worker.py`
+runs every scan on a `QThread`, so even a slow unit cannot freeze the window.
+
+Guarded by `tests/test_detect_scaling.py`, which pins a CEILING far above anything real
+(15 s for 30 000 characters, against a measured 0.6–0.9 s) rather than an exponent. A limit
+that loose fires only on a change of complexity class, which is the only thing here worth
+failing a build over; pinning the exponent would flake on a loaded machine and would pin a
+number nothing depends on.
+
+**Still unexamined from R4-X2's neighbourhood:** R4-X3, where a malformed `.rels` raises a raw
+`lxml.etree.XMLSyntaxError` out of `redact_docx_body`, and the owner-password PDF that reaches
+`fitz.open` before any guard. Both are "the writer raises where the contract promises a clean
+refusal", and both are open.
