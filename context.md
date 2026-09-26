@@ -1,5 +1,7 @@
 # context.md — Slovak Legal Document Anonymizer
 
+**State: active (2026-09-26).** Scope id C1 (client work). Public repo; no client data ever tracked (history scanned 2026-09-26). Licence position: THIRD_PARTY.md.
+
 ## 1. Purpose
 
 Desktop application for a 6-person Slovak law office. Removes personal and identifying

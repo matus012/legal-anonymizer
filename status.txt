@@ -1,3 +1,11 @@
+STATE: active (2026-09-26) — C1 law-anonymizer, v1.1 in use at the office.
+  Repo public (github.com/matus012/legal-anonymizer); full history scanned 2026-09-26 for
+  real personal data / client identity: clean (0 real-data hits; data/ corpus is
+  bit-reproducible from corpus/generate.py and was never tracked). 69 commits pushed 2026-09-26.
+  Open: no LICENSE file; PyMuPDF is AGPL-3.0 — see THIRD_PARTY.md (owner decision).
+  Plain-English summary: legal_anonymizer_plain.md.
+-------------------------------------------------------------------------
+
 <<<EVENING BRIEF — daytime run, 2026-09-17>>>
 
 Every number below I measured myself on the committed tree. None is taken from a subagent's
