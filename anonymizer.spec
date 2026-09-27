@@ -52,3 +52,13 @@ coll = COLLECT(
     upx=False,
     name="Anonymizer",
 )
+
+# AGPL-3.0 (PyMuPDF, see THIRD_PARTY.md): the licence text must travel with the program.
+# Copied next to Anonymizer.exe, NOT via `datas` -- PyInstaller >= 6 puts datas under
+# _internal/, where a recipient would never look. LICENSES.md carries the CC BY 4.0
+# attribution the bundled ÚGKK gazetteer requires.
+import os
+import shutil
+
+for _name in ("LICENSE", "THIRD_PARTY.md", "LICENSES.md"):
+    shutil.copy2(_name, os.path.join(DISTPATH, "Anonymizer", _name))
