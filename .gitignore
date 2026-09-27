@@ -33,3 +33,8 @@ demo/
 # throwaway build can never be mistaken for the real one the owner ships.
 dist_trial/
 build_trial/
+
+# 2026-09-27: former data/test/ — provenance unproven, not regenerable from the current
+# generator. Never track anything here except its README.
+data/_unproven_test/*
+!data/_unproven_test/README.md

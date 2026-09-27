@@ -19,17 +19,20 @@ metadata, 2026-09-26). Bundled **data** lists (gazetteers, name lists) are cover
 | Pygments | 2.20.0 | BSD-2-Clause | pytest dep | no |
 | colorama | 0.4.6 | BSD-3-Clause | pytest dep | no |
 
-## Licence implications (open — owner decision)
+## Licence (decided 2026-09-27)
 
-- **PyMuPDF is AGPL-3.0.** Distributing the frozen application (the PyInstaller build handed to
-  the office) conveys PyMuPDF, so the distributed program must be offered under AGPL-3.0 terms
-  (corresponding source available to the recipient) — or an Artifex commercial licence is
-  needed. Same class of issue as Ultralytics in the robotics repos.
+This project is licensed **AGPL-3.0-only** (`LICENSE`). Owner decision, 2026-09-27.
+
+- **PyMuPDF is AGPL-3.0 (Artifex Software, Inc.; dual-licensed AGPL-3.0 / Artifex
+  commercial).** The frozen application conveys PyMuPDF, so the distributed `Anonymizer.exe` is
+  itself AGPL-3.0. The Corresponding Source is offered at the public repository:
+  https://github.com/matus012/legal-anonymizer (tag / commit matching the build). No Artifex
+  commercial licence is held or needed under these terms.
 - **PySide6 is LGPL-3.0.** The PyInstaller one-folder build keeps Qt as replaceable shared
-  libraries, which satisfies LGPL relinking; keep it that way (no static linking).
-- **This repository has no LICENSE file.** Without one the code is all-rights-reserved even
-  though the repo is public. Choosing a licence is the owner's call; with PyMuPDF in the
-  dependency set, AGPL-3.0 is the only choice that needs no commercial PyMuPDF licence.
+  libraries, which satisfies LGPL relinking; keep it that way (no static linking). LGPL-3.0 is
+  compatible with distribution inside an AGPL-3.0 program.
+- All other shipped dependencies (MIT, BSD, PSF, PyInstaller bootloader under its exception) are
+  AGPL-compatible.
 
 ## Data
 

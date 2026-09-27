@@ -4,6 +4,9 @@ Desktop application for a 6-person Slovak law office. Removes personal and ident
 from legal documents entirely on-device — no cloud, no network calls, no telemetry. Full
 background and design rationale: `context.md`. Frozen v1.1 interfaces: `CONTRACTS_v11.md`.
 
+**Licence:** AGPL-3.0-only (`LICENSE`) — required by PyMuPDF (AGPL-3.0, Artifex); the distributed
+.exe is AGPL too, source at https://github.com/matus012/legal-anonymizer. Third-party: `THIRD_PARTY.md`.
+
 ## What it does
 
 - Takes `.docx` and `.pdf` files (digital-born, with a text layer) and produces a redacted
