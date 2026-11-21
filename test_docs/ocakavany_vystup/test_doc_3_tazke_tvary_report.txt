@@ -1,0 +1,22 @@
+=== LEGAL ANONYMIZER — REDACTION REPORT ===
+
+This report records what the tool CHANGED and what it was UNSURE about.
+It does NOT certify that the document is clean. A human must review the
+redacted document before it is shared or filed.
+
+[REDACTED]
+TYPE | label | count | locations | checksum
+CISLO_KLIENTA | [CISLO_KLIENTA_1] | 1 | body | n/a
+DATUM | [DATUM_1] | 2 | body | n/a
+ICO | [ICO_1] | 1 | body | valid
+MENO | [MENO_1] | 2 | body | n/a
+MENO | [MENO_2] | 1 | body | n/a
+OBEC | [OBEC_1] | 1 | body | n/a
+OBEC | [OBEC_2] | 1 | body | n/a
+RODNE_CISLO | [RODNE_CISLO_1] | 1 | body | valid
+ULICA | [ULICA_1] | 1 | body | n/a
+ULICA | [ULICA_2] | 1 | body | n/a
+
+[LOW CONFIDENCE / NOT REDACTED]
+type | surface | location | checksum
+(none)

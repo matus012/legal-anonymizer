@@ -1,0 +1,363 @@
+# QUESTIONS.md — open questions and the default the orchestrator chose
+
+Sprint rule: never block on a question. Every entry here records the question, the
+default chosen so work could continue, and how to reverse it if the owner disagrees.
+
+---
+
+## Q1 — Does `strict_checksums` belong in the GUI at all?
+**Default chosen:** yes, but collapsed under "Advanced" and OFF.
+**Why:** A1 makes checksum-failing identifiers auto-redact. That is right for a law
+office (recall over precision), but it removes the only lever a user had to stop the
+tool eating a mistyped number. Keeping the v1 behaviour reachable costs one checkbox.
+**To reverse:** delete the toggle from the GUI advanced panel; the config field stays.
+
+## Q2 — Are stray redaction outputs in data/synthetic safe to delete?
+**Default chosen:** moved, not deleted, to the session scratchpad.
+**Why:** six *_anon.* files from an earlier live GUI test were crashing eval.leak_gate
+on a missing .gt.json. data/ is gitignored and seed-regenerable, so deleting was
+probably safe — but "probably" is not a reason to delete someone else output.
+**To reverse:** they are in the scratchpad dir named in status.txt.
+
+## Q3 — ADRESA swallowing PSC and OBEC: one candidate or three?
+**Default chosen:** ONE composite ADRESA candidate that covers the whole
+`Hlavná 12/A, 040 01 Košice` span; the inner PSC/OBEC candidates are dropped by the
+core overlap resolver.
+**Why:** the writers slice output by character offsets, so overlapping spans corrupt
+the document. One wide span redacts strictly more text than three narrow ones, which
+is the recall-over-precision direction. Cost: the report shows [ADRESA_1] rather than
+naming the town separately.
+**To reverse:** rank PSC/OBEC above ADRESA in CONTRACTS_v11.md §4 and emit the parts.
+
+## Q4 — Unanchored CISLO_OP / CISLO_PASU: match or require an anchor?
+**Default chosen:** match unanchored, provided the shape is standalone and
+word-boundaried on both ends.
+**Why:** recall over precision. `AB123456` standing alone in a Slovak legal document is
+overwhelmingly an ID number.
+**To reverse:** make both anchor-required, like VODICSKY_PREUKAZ already is.
+
+## Q5 — BIC without an anchor
+**Default chosen:** a deliberate PRECISION exception — BIC is emitted only with an
+anchor (BIC/SWIFT) or when the country-code position is literally `SK`.
+**Why:** a bare 8-letter uppercase run is also an ordinary ALL-CAPS Slovak word, and
+the red-team phase deliberately feeds the tool ALL-CAPS documents. Unanchored BIC would
+turn every capitalised word in such a document into a redaction.
+**This is the one place in v1.1 where precision beats recall, and it is recorded here
+because that is a deviation from the governing rule.**
+**To reverse:** drop the anchor requirement and accept the ALL-CAPS behaviour.
+
+## Q6 — FAX vs TELEFON on the same digits
+**Default chosen:** FAX outranks TELEFON in the precedence tuple.
+**Why:** both are auto-redacted, so nothing leaks either way; the choice decides only which
+label the report shows. A report that says [FAX_1] where the document says "fax:" is
+checkable by the reviewer; one that says [TELEFON_3] is not.
+**To reverse:** swap the two entries in detect/core.py _TYPE_PRECEDENCE.
+
+## Q7 — Anchors written without diacritics
+**Status: OPEN, handed to the red-team phase rather than patched ad hoc.**
+Slovak legal documents are frequently typed without diacritics. Every anchor-required type
+(KOD_BANKY, NAZOV_UCTU, CISLO_KLIENTA, FAX, VODICSKY_PREUKAZ, the address anchors, the role
+and field-label name anchors) currently matches its anchor WITH diacritics. "kod banky 1100"
+therefore does not match while "kód banky 1100" does. RODNE_CISLO is the exception — its
+anchor matching is already diacritic-folded.
+**Why not patched here:** it is one systematic defect across ~10 modules, not ten separate
+bugs. Patching each regex by hand would be error-prone and unreviewable. The fix is one
+shared diacritic-folding anchor helper applied uniformly, which is red-team scope because
+the red team is already building the missing-diacritics mutation that proves it.
+**Measured, not assumed.** Probing each anchor-required type with and without diacritics:
+| type | with diacritics | without |
+|---|---|---|
+| KOD_BANKY | detected | **MISSED** |
+| NAZOV_UCTU | detected | **MISSED** |
+| CISLO_KLIENTA | detected | **MISSED** |
+| FAX | detected | **MISSED** |
+| ADRESA (`so sídlom`) | detected | **MISSED** |
+| ADRESA (`trvale bytom`) | detected | detected |
+| RODNE_CISLO | detected | detected (already folded) |
+| CISLO_PASU | detected | detected |
+
+Five types silently lose their anchor when a document is typed without diacritics.
+**Severity: HIGH for recall.** Recorded here so it cannot be lost.
+
+(Separately checked and NOT a defect: `VODICSKY_PREUKAZ` appeared to "miss" but is in fact
+detected and redacted — it was losing the exact-span tie to `CISLO_OP`/`CISLO_PASU`, i.e. a
+label difference, not a leak. Fixed by ranking the anchor-required type first.)
+
+## Q8 — the digit/letter boundary defect (FOUND AND FIXED, recorded because it was a live leak)
+**Status: FIXED.** Recorded because it is the kind of defect that silently comes back.
+`\b` sits between a word char and a non-word char. A digit and a letter are BOTH word chars,
+so `\b\d{8}\b` does **not** match the eight digits in `43235222IBAN`. Every numeric identifier
+(IČO, DIČ, IČ DPH, IBAN) was therefore invisible whenever it abutted a letter with no space —
+which is exactly what a PDF text layer produces where two layout cells meet, and what a DOCX
+table produces when cell text is reconstructed without separators.
+
+Worse than a miss: on `IBAN (chybný)SK22 1111 7955 0033 3133 5578Účet` the IBAN was not matched
+at all and the widened RODNE_CISLO pattern claimed the fragment `22 1111 7955` instead — so the
+report would have named a rodné číslo that does not exist while the real IBAN leaked.
+
+**Fix:** `(?<!\d)` / `(?!\d)` guards instead of `\b`. Still refuses to split a longer digit run;
+no longer suppressed by an adjacent letter. Verified both directions, 170 detect-side tests green.
+
+**Why it was not caught before:** the leak gate redacts through the WRITERS, which reconstruct
+text per paragraph and per table cell, so the glued form never arose there. It only appeared
+when detection was run over `eval.extract`'s own no-separator concatenation. Two different
+strings, two different answers — worth remembering when reading any recall number.
+
+## Q9 — cross-format consistency gate: real corpus pairs vs. a hand-authored fixture
+**Default chosen:** `eval/cross_format_gate.py` does NOT run against `data/synthetic`. It
+authors its own small matched-pair fixture corpus (6 pairs) directly from
+`corpus.docx_builder`/`corpus.pdf_builder`/`corpus.pii.*`, with literal PII content computed
+once and placed identically into both builders.
+**Why:** `corpus/generate.py::_emit` derives a DIFFERENT RNG seed per format
+(`seed*1000 + i*10 + f_idx`), so `kupna_zmluva_000.docx` and `kupna_zmluva_000.pdf` are not the
+same logical document today — verified: 53 vs 49 GT rows, almost no surface overlap. Even
+re-deriving one shared seed would not fix it: `corpus.docx_builder.DocxBuilder` consumes the
+SAME `random.Random` instance for its split-run decision as the template uses for content, so
+the two builders' draw counts diverge as soon as the first PiiSpec is placed. This is a
+`corpus/` defect, out of scope for this eval/tests-only round (task rules: read `corpus/`
+only). Reported to the orchestrator in the same-session final message.
+**To reverse:** once `corpus/generate.py` derives one seed per logical document AND
+`DocxBuilder`'s internal RNG is decoupled from the template's content RNG (two independent
+`random.Random` instances), replace `eval/cross_format_gate.py`'s `_author_pair`/`_content`
+with a loader over `data/synthetic/*.docx` / `*.pdf` pairs by shared index, keeping
+`judge_pair` (the actual comparison logic) unchanged — it already takes GT dicts + extracted
+text and does not care where they came from.
+
+## Q10 — perf report memory instrument: tracemalloc instead of psutil
+**Default chosen:** `eval/perf_report.py` measures peak memory with `tracemalloc` (stdlib),
+labelled explicitly as Python-heap only, not process RSS.
+**Why:** `psutil` is not installed in `.venv` and is not in `requirements.txt`; adding a new
+dependency is out of scope for an eval-only round. `tracemalloc` needs no install and the
+report says plainly what it does NOT capture (native allocations in `lxml`/`python-docx`'s
+zip writer/PyMuPDF).
+**To reverse:** add `psutil` to `requirements.txt`, then swap `_measure()` to poll
+`psutil.Process().memory_info().rss` (e.g. from a background thread while the redaction call
+runs) for a true peak-RSS number.
+
+
+## Q11 — the normalization layer does NOT fold case
+**Default chosen:** `detect/normalize.py` normalizes format characters, homoglyphs,
+whitespace runs, NFKC compatibility forms and NFD→NFC. It does **not** case-fold.
+**Why:** case-folding the text globally would not make the detectors case-insensitive — it
+would destroy the only signal several of them have. `detect/orgs.py` keys on a CAPITALIZED
+token beside a legal-form suffix and the bare-name heuristic in `detect/name_anchors.py`
+does the same; on lower-cased text those rules stop being "find a name" and become "match
+everything". The `all_caps` / `lowercase` classes are being fixed per anchor site instead,
+where the difference between "an anchor word" (case carries nothing) and "evidence" (case is
+the whole claim) is visible in the code.
+**To reverse:** add a `casefold` step to `normalize()` and delete the capitalisation
+requirement from `detect/orgs.py` and `name_anchors.py`'s `_CAP`, replacing it with some
+other evidence — there is currently none, which is the point.
+
+## Q12 — a wrap is rejoined only inside a run of CAPITALS AND DIGITS
+**Default chosen:** `detect()`'s second view (`normalize(text, join_wrapped=True)`) deletes a
+line break between two alphanumeric runs only when NEITHER run contains a lowercase letter.
+A wrap inside a mixed-case or lowercase token is left as a line break, and a whitespace
+character that is not a line break (a TAB, an NBSP, a space) inside a token is never deleted
+at all.
+**Why:** joining on any alphanumeric pair fuses the last word of every wrapped line with the
+first word of the next. Measured on a two-line fixture it produced the auto=True MENO surface
+`Novák\nRodne` — a party's surname welded to the label starting the following line — which
+would have redacted that label every time a name fell at a line end. Restricting to
+capitals-and-digits keeps the identifiers a renderer can break (IBAN, BIC, VIN, EČV, spisová
+značka, account numbers) and excludes ordinary Slovak words. Deleting a plain SPACE between
+digits was rejected for the same reason in the other direction: `\d{8}` would then match
+"v rokoch 2020 2021" and auto-redact a date range out of every contract that mentions one.
+**Cost, and where it is visible:** the `line_break_mid` class cannot reach 1.000 on types
+whose surfaces contain lowercase. That is not hidden — `eval/mutation_gate.py` grades it
+against the same 0.95 threshold every run.
+**To reverse:** relax `detect/normalize.py:_is_identifier_run` (drop the lowercase test to
+join any alphanumeric pair, or extend `_WRAPPED_TOKEN_RE` to whitespace runs without a line
+break) and then re-measure per-type PRECISION — that is the number this choice is trading.
+
+## Q13 — ULICA corpus coverage: which street stands in for the declined-form hard case
+**Default chosen:** `corpus/pii/ulica.py::make_ulica_declined` always seeds the SAME
+fixture, `"Hlavná"` declined to `"Hlavnej"` ("na Hlavnej ulici"), rather than a random
+street from the pool.
+**Why:** the task asks for a deliberately hard, EXPECTED-miss fixture proving the
+declined-form gap rather than a representative sample. `Hlavná` is a plain adjective, whose
+oblique-case ending (`-ej`) is NOT in `detect/declension.py`'s closed suffix inventory (only
+the possessive `-ovej` is), so it is a genuine miss — a possessive-adjective street name like
+`Štúrova` would have declined to `Štúrovej`, which the stemmer DOES catch (`-ovej` is in the
+inventory), and picking one of those by chance would have made this fixture flaky (sometimes
+proving the gap, sometimes accidentally passing). One fixed, hand-picked fixture is
+deterministic and always exercises the real gap.
+**Cost:** this is the one shape of the four the task asked for that scores 0/N recall today
+(measured: 20/20 misses across the full regenerated corpus — 10 zmluva_v11 docs × 2
+formats). Overall ULICA recall on the current corpus is 70/90 = 0.778, entirely attributable
+to this one fixture; every other shape (`ul.` prefix, the other five keyword prefixes, a
+trailing house number, split across DOCX runs) scores 70/70 = 1.000.
+**To reverse:** extend `detect/declension.py`'s closed suffix inventory to include the plain
+adjectival `-ej` ending (off `-á`/`-a`), OR give `detect/gazetteer.py::_street_hits` a second,
+adjective-aware stem pass — either widens recall on this shape but needs re-checking against
+the discriminator `detect/declension.py` protects (`Kováč` vs `Kováčskej` must stay distinct).
+
+
+## Q14 — RESOLVED 2026-09-17 (daytime run). The corpus's docx/pdf pairs ARE the same document now.
+
+**Outcome.** Built exactly as the reversal recipe below describes: `corpus/builders_plan.py`
+authors a content PLAN once per (doc_type, index) and renders it to each format, and
+`DocxBuilder` was given its own RNG so its split-run draws can no longer perturb the content
+stream. Both causes named below were confirmed by measurement before anything was changed.
+
+    one-sided GT surfaces with no format explanation   5285  ->  0   (across 70 pairs)
+    surfaces common to both formats of a pair           136  ->  3039
+    kupna_zmluva_000 (docx / pdf / common)        46/40/3  ->  46/42/41
+
+Format difference is not eliminated, because some of it is REAL: a header, a footer, a textbox
+and a form field have no equivalent on the other side. The guarantee is narrower and checkable —
+the only surface that may appear in one format and not the other is one whose every occurrence
+lives in a `surface_part` the other format does not have. `tools/paired_gt_report.py` checks
+exactly that and prints anything it cannot explain.
+
+**It found a real leak on its first run**, which is the whole argument for having done it: a
+street named after a municipality ("na Polom 453") produced no ULICA candidate and only a
+review-bucket OBEC, so nothing auto-redacted it and the street survived into BOTH outputs of the
+same document. The old corpus drew "Paulenova" in that slot, which the -ova suffix rule catches,
+so the gate was green by luck of the draw. Fixed in `detect/gazetteer.py`'s street walk.
+
+**Before/after for every gate is in CHECKPOINTS.md**, measured with the control that makes it
+readable: every gate re-run on the OLD corpus with the CURRENT detectors first, so the only
+variable between the columns is the corpus.
+
+**Still outstanding from the recipe**: `eval/cross_format_gate.py` still authors its own six
+matched fixtures and its docstring's FINDING section is now stale — both causes it describes
+are fixed. Pointing it at `data/synthetic` (and keeping the authored pairs as controls, since
+that is where the NBSP and line-break leaks were actually found) is the remaining step.
+
+---
+
+### The original question, kept for the record
+
+
+**The fact:** `corpus/generate.py` derives a per-format seed (`seed*1000 + i*10 + f_idx`), so
+`kupna_zmluva_000.docx` (seed 42000) and `kupna_zmluva_000.pdf` (seed 42001) are built from
+different RNG streams. Verified: 46 vs 40 ground-truth PII surfaces, 3 in common, and those
+three are coincidental repeats. The corpus is 140 DIFFERENT documents named as though it were
+70 documents in two formats.
+
+**Default chosen:** leave `corpus/generate.py` alone. `eval/cross_format_gate.py` authors its
+own matched fixtures and states in its own output that it is not using `data/synthetic`.
+
+**Why:** making both formats render one shared content plan is a real refactor of `_emit` —
+`DocxBuilder` draws from the same `random.Random` as the content for its split-run decision,
+so the streams diverge the moment a `PiiSpec` is placed and one shared seed would not be
+enough. It would also change every `.gt.json` in the corpus and therefore every gate number in
+the project — recall, the leak gate, the mutation table — in the middle of an unattended
+overnight run, with no owner to confirm the new baselines against. A corpus change is the one
+change that moves every measurement at once, and it should not land unwatched.
+
+**What is NOT affected:** every gate that treats the corpus as 140 independent documents. The
+dual leak gate, per-type recall and the mutation gate are all valid as they stand.
+
+**What IS affected, and should be corrected wherever it is repeated:** any claim of the form
+"the PDF leaked while the DOCX of the same document was clean". Those two files are different
+documents. The defects behind such claims (an NBSP and a line break inside a multi-word anchor)
+were real and independently reproduced — but the DOCX-was-clean half was never evidence.
+
+**To reverse:** refactor `_emit` to build a document CONTENT PLAN once per (doc_type, index)
+from one seed, then render that same plan to each requested format, giving `DocxBuilder` its
+own separate RNG for layout decisions so its draws cannot perturb the content stream. Then
+regenerate, re-baseline every gate deliberately, and point `eval/cross_format_gate.py` at
+`data/synthetic` instead of its own fixtures.
+
+---
+
+## Q15 (red-team round 3, 2026-09-16) — is `surname_caps` a CASE_DESTROYING mutation?
+
+**Question.** `corpus/mutations.py` carries a `CASE_DESTROYING` frozenset that ANNOTATES (never
+exempts) a flagged cell. Round 3 adds `surname_caps`, which uppercases some tokens. Should it
+join that set?
+
+**Default chosen: NO, it is deliberately left out.** `CASE_DESTROYING` exists for
+`all_caps`/`lowercase`, whose damage to a CAPITALISATION-DEPENDENT heuristic is inherent because
+the document has no capitalisation signal left anywhere. `surname_caps` keeps the document
+mixed-case on purpose — the surrounding prose still carries every bit of the evidence the
+bare-name heuristic and the ORG detector rely on. Its loss is therefore NOT inherent, and
+annotating it as if it were would invite exactly the "excuse the failure" reading the set's own
+comment forbids. The brief for this round also forbids modifying existing entries in that module.
+
+**Reversal.** One line: add `"surname_caps"` to `CASE_DESTROYING`. It changes no number and no
+verdict — the set only prints `[case-destroying mutation]` next to a flagged cell.
+
+## Q16 (red-team round 3, 2026-09-16) — is SPISOVA_ZNACKA's agenda list meant to be closed?
+
+**Question.** `detect/registry_refs.py::_SPISOVA_ZNACKA_RE` accepts the fused agendas
+`Cb|Ro|Er|C|T|D` only. Real Slovak references include three-letter agendas (`Cdo`, `Obdo`,
+`Tdo`, `Sžk`, `CbPv`), the Constitutional Court's Roman-numeral form `II. ÚS 45/2024`, and the
+space-separated district form `2 C 45/2019`. Round 3 measured all four as undetected (A7).
+Is the current list the intended scope, or is it the corpus generator's repertoire mistaken for
+the type's definition?
+
+**Default chosen: it is the corpus's repertoire, i.e. a DEFECT, and it is filed as one.** The
+type is listed in context.md §4.1 without qualification ("Court/admin refs"), and nothing in
+CONTRACTS_v11.md restricts it. Recorded as R3-A7.
+
+**Reversal.** If the office decides a court file mark is not PII in their workflow, the type
+should be removed from §4.1 and from `_TYPE_PRECEDENCE` rather than left half-implemented —
+a type that matches one spelling of four is worse than no type, because the report claims the
+category is covered.
+
+---
+
+## Q17 — the five WinAnsi-undefined bytes in `mutate_mojibake_cp1250` (red-team round 4, 2026-09-17)
+
+**Question.** `corpus/mutations.py::mutate_mojibake_cp1250` models a cp1250 text layer drawn
+with `/WinAnsiEncoding`. Five cp1250 characters (`ť ‘ ’ “ ”`-adjacent bytes 0x81, 0x8D, 0x8F,
+0x90, 0x9D) map to bytes that are UNDEFINED in WinAnsi. What should the mutation emit for them?
+
+**Default taken (reversible in one line).** `U+FFFD REPLACEMENT CHARACTER`. It keeps the
+rewrite 1 character for 1 character, so the homomorphism requirement `s in t => mutate(s) in
+mutate(t)` still holds unconditionally, and U+FFFD is Unicode category `So` — so it does NOT
+trip `writer/pdf_body.page_has_unreadable_text`, which is the honest model of the accepted-
+and-leaking state the mutation is measuring.
+
+**The alternative and why it was not taken.** Leaving the character unchanged would be the
+conservative choice, but it UNDER-states the damage: a real extractor does not hand back the
+correct Slovak letter for a byte the encoding does not define. It would also make the mutation
+silently weaker on exactly `ť`, which is a common Slovak letter.
+
+**Reversal.** In `_build_cp1250_as_winansi`, replace `seen = "�"` in the
+`except UnicodeDecodeError` branch with `continue`. The corpus-scale number
+(`mojibake_cp1250` blind 0.843 / known 0.850) will move up slightly; nothing else depends on it.
+
+**Who should decide.** Whoever owns the PDF refusal thresholds, because the choice interacts
+with `_UNDECODABLE_CATEGORIES`: if U+FFFD were added to that set, this mutation class would
+become partly self-refusing and the number would stop measuring the detectors.
+
+---
+
+## Q18 — LibreOffice as a second corpus producer is NOT installed (daytime run, 2026-09-17)
+
+**Question.** The daytime brief asks, conditionally: "If LibreOffice is installed (soffice),
+add it as a second corpus producer (docx + pdf via `--headless --convert-to`) so gates run on
+non-python-docx XML shapes too." The condition is the whole point of the item -- every DOCX
+leak found in red-team round 4 lives in a shape `python-docx` **cannot emit**, which is exactly
+why every gate was green while the bugs were live. A second, independent producer would give
+the gates a population with those shapes in it.
+
+**Measured state: soffice is NOT on this machine.** `where soffice` returns nothing, and
+neither `C:\Program Files\LibreOffice\program\soffice.exe` nor the `(x86)` path exists.
+
+**Default taken: SKIPPED, and not installed.** Installing LibreOffice is a ~350 MB download and
+a system-wide install. Installing software is not something this run is authorised to do on the
+owner's machine, and the brief's own phrasing makes it conditional rather than required.
+
+**What replaces it, and why it is arguably the stronger test.** The red team builds the same
+XML shapes by hand as RAW OOXML instead. A hand-authored `<mc:AlternateContent>` with both a
+`<mc:Choice>` and an `<mc:Fallback>` copy, a `<w:dataBinding>` content control, and a
+`<w:fldSimple w:instr="HYPERLINK ...">` are all written directly, so the fixture targets the
+exact structure the finding names rather than whatever LibreOffice's exporter happens to
+produce for some input. The weakness of the substitution is equally plain and is recorded here
+rather than hidden: hand-authored fixtures test the shapes we **thought of**, and a real second
+producer would also deliver the ones we did not.
+
+**Reversal (one command once LibreOffice exists).**
+    soffice --headless --convert-to docx:"MS Word 2007 XML" --outdir <out> <in>
+    soffice --headless --convert-to pdf --outdir <out> <in>
+Wire it into `corpus/generate.py` behind a `--producer {python-docx,soffice,both}` flag,
+default `python-docx` so the seed-determined corpus and every gate number stay reproducible on
+a machine without it. Expect the gates to MOVE when it is switched on; that movement is the
+finding, not a regression.
+
+**Who should decide.** The owner, because it is an install on their machine.

@@ -1,0 +1,9 @@
+# Project metadata only (licence declaration). Not a build config: runtime deps stay pinned in
+# requirements.txt and the .exe is built from anonymizer.spec.
+[project]
+name = "legal-anonymizer"
+version = "1.1.0"
+description = "On-device anonymizer for Slovak legal documents (.docx / .pdf)"
+requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]

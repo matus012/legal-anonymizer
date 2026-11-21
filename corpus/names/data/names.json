@@ -1,0 +1,67 @@
+{
+  "_comment": "Hand-written Slovak declension tables (context.md §5). Cases: nom gen dat acc loc ins (singular). Surnames also carry the plural family form (Novákovci/Novákovcov).",
+  "first_names": {
+    "male": [
+      {"nom": "Ján",    "gen": "Jána",    "dat": "Jánovi",    "acc": "Jána",    "loc": "Jánovi",    "ins": "Jánom"},
+      {"nom": "Peter",  "gen": "Petra",   "dat": "Petrovi",   "acc": "Petra",   "loc": "Petrovi",   "ins": "Petrom"},
+      {"nom": "Milan",  "gen": "Milana",  "dat": "Milanovi",  "acc": "Milana",  "loc": "Milanovi",  "ins": "Milanom"},
+      {"nom": "Jozef",  "gen": "Jozefa",  "dat": "Jozefovi",  "acc": "Jozefa",  "loc": "Jozefovi",  "ins": "Jozefom"},
+      {"nom": "Martin", "gen": "Martina", "dat": "Martinovi", "acc": "Martina", "loc": "Martinovi", "ins": "Martinom"},
+      {"nom": "Michal", "gen": "Michala", "dat": "Michalovi", "acc": "Michala", "loc": "Michalovi", "ins": "Michalom"},
+      {"nom": "Marián", "gen": "Mariána", "dat": "Mariánovi", "acc": "Mariána", "loc": "Mariánovi", "ins": "Mariánom"},
+      {"nom": "Tomáš",  "gen": "Tomáša",  "dat": "Tomášovi",  "acc": "Tomáša",  "loc": "Tomášovi",  "ins": "Tomášom"}
+    ],
+    "female": [
+      {"nom": "Mária",    "gen": "Márie",    "dat": "Márii",    "acc": "Máriu",    "loc": "Márii",    "ins": "Máriou"},
+      {"nom": "Anna",     "gen": "Anny",     "dat": "Anne",     "acc": "Annu",     "loc": "Anne",     "ins": "Annou"},
+      {"nom": "Eva",      "gen": "Evy",      "dat": "Eve",      "acc": "Evu",      "loc": "Eve",      "ins": "Evou"},
+      {"nom": "Zuzana",   "gen": "Zuzany",   "dat": "Zuzane",   "acc": "Zuzanu",   "loc": "Zuzane",   "ins": "Zuzanou"},
+      {"nom": "Katarína", "gen": "Kataríny", "dat": "Kataríne", "acc": "Katarínu", "loc": "Kataríne", "ins": "Katarínou"},
+      {"nom": "Jana",     "gen": "Jany",     "dat": "Jane",     "acc": "Janu",     "loc": "Jane",     "ins": "Janou"},
+      {"nom": "Helena",   "gen": "Heleny",   "dat": "Helene",   "acc": "Helenu",   "loc": "Helene",   "ins": "Helenou"},
+      {"nom": "Lucia",    "gen": "Lucie",    "dat": "Lucii",    "acc": "Luciu",    "loc": "Lucii",    "ins": "Luciou"}
+    ]
+  },
+  "surnames": [
+    {
+      "male":   {"nom": "Novák", "gen": "Nováka", "dat": "Novákovi", "acc": "Nováka", "loc": "Novákovi", "ins": "Novákom", "family_nom": "Novákovci", "family_gen": "Novákovcov"},
+      "female": {"nom": "Nováková", "gen": "Novákovej", "dat": "Novákovej", "acc": "Novákovú", "loc": "Novákovej", "ins": "Novákovou"}
+    },
+    {
+      "male":   {"nom": "Horváth", "gen": "Horvátha", "dat": "Horváthovi", "acc": "Horvátha", "loc": "Horváthovi", "ins": "Horváthom", "family_nom": "Horváthovci", "family_gen": "Horváthovcov"},
+      "female": {"nom": "Horváthová", "gen": "Horváthovej", "dat": "Horváthovej", "acc": "Horváthovú", "loc": "Horváthovej", "ins": "Horváthovou"}
+    },
+    {
+      "male":   {"nom": "Kováč", "gen": "Kováča", "dat": "Kováčovi", "acc": "Kováča", "loc": "Kováčovi", "ins": "Kováčom", "family_nom": "Kováčovci", "family_gen": "Kováčovcov"},
+      "female": {"nom": "Kováčová", "gen": "Kováčovej", "dat": "Kováčovej", "acc": "Kováčovú", "loc": "Kováčovej", "ins": "Kováčovou"}
+    },
+    {
+      "male":   {"nom": "Baláž", "gen": "Baláža", "dat": "Balážovi", "acc": "Baláža", "loc": "Balážovi", "ins": "Balážom", "family_nom": "Balážovci", "family_gen": "Balážovcov"},
+      "female": {"nom": "Balážová", "gen": "Balážovej", "dat": "Balážovej", "acc": "Balážovú", "loc": "Balážovej", "ins": "Balážovou"}
+    },
+    {
+      "male":   {"nom": "Tóth", "gen": "Tótha", "dat": "Tóthovi", "acc": "Tótha", "loc": "Tóthovi", "ins": "Tóthom", "family_nom": "Tóthovci", "family_gen": "Tóthovcov"},
+      "female": {"nom": "Tóthová", "gen": "Tóthovej", "dat": "Tóthovej", "acc": "Tóthovú", "loc": "Tóthovej", "ins": "Tóthovou"}
+    },
+    {
+      "male":   {"nom": "Šimko", "gen": "Šimka", "dat": "Šimkovi", "acc": "Šimka", "loc": "Šimkovi", "ins": "Šimkom", "family_nom": "Šimkovci", "family_gen": "Šimkovcov"},
+      "female": {"nom": "Šimková", "gen": "Šimkovej", "dat": "Šimkovej", "acc": "Šimkovú", "loc": "Šimkovej", "ins": "Šimkovou"}
+    },
+    {
+      "male":   {"nom": "Hudák", "gen": "Hudáka", "dat": "Hudákovi", "acc": "Hudáka", "loc": "Hudákovi", "ins": "Hudákom", "family_nom": "Hudákovci", "family_gen": "Hudákovcov"},
+      "female": {"nom": "Hudáková", "gen": "Hudákovej", "dat": "Hudákovej", "acc": "Hudákovú", "loc": "Hudákovej", "ins": "Hudákovou"}
+    },
+    {
+      "male":   {"nom": "Molnár", "gen": "Molnára", "dat": "Molnárovi", "acc": "Molnára", "loc": "Molnárovi", "ins": "Molnárom", "family_nom": "Molnárovci", "family_gen": "Molnárovcov"},
+      "female": {"nom": "Molnárová", "gen": "Molnárovej", "dat": "Molnárovej", "acc": "Molnárovú", "loc": "Molnárovej", "ins": "Molnárovou"}
+    },
+    {
+      "male":   {"nom": "Varga", "gen": "Vargu", "dat": "Vargovi", "acc": "Vargu", "loc": "Vargovi", "ins": "Vargom", "family_nom": "Vargovci", "family_gen": "Vargovcov"},
+      "female": {"nom": "Vargová", "gen": "Vargovej", "dat": "Vargovej", "acc": "Vargovú", "loc": "Vargovej", "ins": "Vargovou"}
+    },
+    {
+      "male":   {"nom": "Kučera", "gen": "Kučeru", "dat": "Kučerovi", "acc": "Kučeru", "loc": "Kučerovi", "ins": "Kučerom", "family_nom": "Kučerovci", "family_gen": "Kučerovcov"},
+      "female": {"nom": "Kučerová", "gen": "Kučerovej", "dat": "Kučerovej", "acc": "Kučerovú", "loc": "Kučerovej", "ins": "Kučerovou"}
+    }
+  ]
+}

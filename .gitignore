@@ -1,0 +1,43 @@
+# CRITICAL: no client document may ever enter git history
+*.docx
+*.pdf
+
+# environment / build artifacts
+.venv/
+__pycache__/
+build/
+dist/
+
+# data
+data/real/
+data/synthetic/
+data/tmp*/
+# frozen eval holdout: hash-pinned by the tracked data/holdout.manifest.json, never tracked
+# itself (was only in .git/info/exclude, so a fresh clone would not ignore its .gt.json files).
+data/holdout/
+# a one-off trial corpus from the Q14 swap; data/synthetic IS the paired corpus now,
+# so this is redundant and safe for the owner to delete.
+data/_paired_trial/
+
+# scratch
+check_*.py
+diff.txt
+review_baselines.diff
+handoff.md
+# v1.1 gazetteer: raw open-data downloads are regenerable (tools/build_gazetteer.py);
+# only the normalised JSON lists are committed. See LICENSES.md.
+detect/gazetteer_data/_raw/
+
+# v1.1 demo artifacts: regenerate with `python -m tools.make_demo`. Never tracked --
+# the PII guard forbids committed .docx/.pdf, and these carry (synthetic) PII.
+demo/
+
+# trial PyInstaller output (overnight run). Named separately from dist/ and build/ so a
+# throwaway build can never be mistaken for the real one the owner ships.
+dist_trial/
+build_trial/
+
+# 2026-09-27: former data/test/ — provenance unproven, not regenerable from the current
+# generator. Never track anything here except its README.
+data/_unproven_test/*
+!data/_unproven_test/README.md

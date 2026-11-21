@@ -1,0 +1,449 @@
+"""v1 detection engine, layer 1 (context.md §4.1, §6): the five checksum/format-bearing
+identifier types. Text-in, spans-out. No file I/O, no docx/pdf, no ground truth.
+
+Every checksum here is reimplemented from the spec independently of corpus/pii/* (the
+dev-only fixture generator) so the generator and the detector can never silently agree
+while both are wrong.
+
+v1.1 (CONTRACTS_v11.md §6, policy A1): THE CHECKSUM IS A TAG, NOT A FILTER. A shape-valid
+but checksum-INVALID identifier is still redacted by default (auto=True) and merely carries
+checksum="invalid". The rationale is context.md §6, recall over precision: a mistyped IČO is
+still an IČO, and leaving it un-redacted because one digit is wrong is the exact failure mode
+this tool exists to prevent. The reviewer sees the "invalid" tag in the report and in the GUI
+review column instead of having to notice an un-redacted number. DetectConfig(
+strict_checksums=True) restores the v1 behaviour (auto=False -> review bucket) and still sets
+the tag.
+
+DIC and IC_DPH have no documented checksum (context.md §4.1: "10 digits" / "SK + DIČ"
+only). For those two, shape validity is the only gate: shape valid -> auto=True always,
+checksum="n/a".
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+
+from .config import DEFAULT, DetectConfig
+from .core import Candidate
+
+NBSP = " "
+
+# --------------------------------------------------------------------------- TELEFON
+# Every generated phone carries structure (+421, a leading-0 mobile prefix, or an
+# area/local slash) with a group separator that is a normal space or NBSP (U+00A0),
+# never both collapsed into a bare \s (that would also swallow newlines). A contiguous
+# digit run (RODNE_CISLO, DIC, ICO) is never matched: every alternative below requires
+# a literal separator or slash between digit groups, which a bare digit run lacks.
+# v1.1 SEPARATOR WIDENING (red-team round 2, finding R2-1). This class used to be exactly
+# a space or an NBSP. That accepted the one spelling the corpus generator writes and
+# rejected every other way the same text reaches us: a TAB (a form-style DOCX table cell is
+# tab-aligned), TWO SPACES (column padding), or a LINE BREAK (a PDF text layer wraps on
+# every page). Measured over 2559 corpus surfaces, a line break in these positions took
+# overall detection robustness to 0.113 and CISLO_KLIENTA to 0.000 -- the very type whose
+# anchor was widened after it leaked a client number out of a wrapped PDF. That earlier fix
+# widened the separator BETWEEN THE WORDS OF AN ANCHOR and not the one between an anchor
+# and its VALUE, so a wrap one word later leaked the same number again.
+#
+# The class below is horizontal whitespace only -- space, NBSP, tab -- with line breaks
+# still EXCLUDED, because a separator INSIDE a surface must not join two lines into one
+# phone number. Anchor-to-value separators are widened to full whitespace separately.
+# v1.1 LINE-BREAK TOLERANCE INSIDE A VALUE (mutation class line_break_mid).
+# This class used to EXCLUDE the line break, with the reasoning that "a separator INSIDE a
+# surface must not join two lines into one phone number". That was the wrong trade and the
+# mutation gate priced it: line_break_mid measured 0.119 with the exclusion in place, and a
+# wrapped PDF text layer had already leaked a client number out of a corpus document.
+#
+# A PDF text layer wraps every page, so the break lands between the groups of a phone number,
+# an IBAN, a date or an amount as a matter of routine. Joining them can over-match; refusing
+# to join them demonstrably leaks, and the governing rule (context.md 6) is recall over
+# precision. Every separator in this module sits inside a value whose shape the pattern
+# already bounds, so a joined match cannot run away down the page -- which is exactly why the
+# free-text value patterns elsewhere (a field label's value, NAZOV_UCTU) keep the narrow
+# class: those BOUND THEMSELVES on a line break, and widening them would let a value swallow
+# the rest of the document.
+_SEP = r'\s'
+
+
+def _checksum_verdict(ok: bool, config: DetectConfig) -> tuple[bool, str]:
+    """(auto, checksum tag) for a shape-valid surface of a checksum-bearing type."""
+    if ok:
+        return True, "valid"
+    return (not config.strict_checksums), "invalid"
+
+
+# --------------------------------------------------------------------------- RODNE_CISLO
+# CONTRACTS_v11.md §6a. Two lengths with different rules:
+#   10 digits YYMMDD/XXXX -> mod-11 applies.
+#   9 digits  YYMMDD/XXX  -> issued before 1954, HAS NO CHECKSUM AT ALL. Applying mod-11
+#                            to it is the A2 bug; it is always checksum="n/a", auto=True.
+# Separator between the two groups: '/', space, NBSP, or nothing. Internal space/NBSP
+# inside either digit group is accepted and is part of the matched surface.
+#
+# Two patterns rather than one optional separator, deliberately: the SEPARATED form may
+# carry internal whitespace, the CONTIGUOUS form may not. Allowing both at once makes
+# "0905 123 456" parse as "0905 12" + "" + "3 456" and steals every phone number from
+# TELEFON. Requiring the separator-less form to be a solid digit run removes that whole
+# class of mis-parse without losing any authored RČ shape.
+_D6 = rf"\d(?:[ {NBSP}]?\d){{5}}"
+_D4 = rf"\d(?:[ {NBSP}]?\d){{3}}"
+_D3 = rf"\d(?:[ {NBSP}]?\d){{2}}"
+# The SLASH form is self-identifying: no other Slovak identifier is written 6 digits, slash,
+# 3-or-4 digits. The SPACE/NBSP-separated form is NOT -- it is the same shape as a phone
+# number. Measured on the demo contract: "Fax: 055 123 4567" parsed as 6 digits ("055 12"),
+# separator, 4 digits ("3 4567"), passed the month/day shape check (month 51 -> 51-50 = 1,
+# day 23) and was auto-redacted and reported as a RODNE_CISLO. It beat FAX and TELEFON to the
+# span. Nothing leaked -- it was redacted either way -- but a report that calls a fax number a
+# birth number is not checkable against the document, which is the whole point of the report.
+#
+# So the two forms are split: SLASH matches anywhere; SPACE/NBSP requires the same RC context
+# anchor the contiguous form already requires (CONTRACTS_v11.md 6a).
+_RC_SLASH_RE = re.compile(rf"(?<!\d)({_D6})/(?:{_D4}|{_D3})(?!\d)")
+_RC_SPACED_RE = re.compile(rf"(?<!\d)({_D6})[ {NBSP}](?:{_D4}|{_D3})(?!\d)")
+_RC_CONTIG_RE = re.compile(r"(?<!\d)\d{9,10}(?!\d)")
+
+# The contiguous form is only armed by an RČ context anchor within 40 characters before
+# the match (§6a). Without it a bare 9/10-digit run stays owned by DIC exactly as in v1 —
+# matching it unconditionally would claim every 10-digit number in every document.
+# Matched against a diacritic-stripped, lowercased copy of the window, so "r.č." / "rč" /
+# "rodné číslo" / "rodného čísla" / "nar." all reduce to their ASCII skeletons.
+_RC_ANCHOR_WINDOW = 40
+_RC_ANCHOR_RE = re.compile(
+    r"\br\.?[  ]?c\.?"  # r.č. / rč / r č
+    r"|\brodne(?:ho)?[  ]+cisl[oa]"  # rodné číslo / rodného čísla
+    r"|\bnar\."
+    # Spelled-out birth context. "Narodil sa 850315 0018" is ordinary Slovak phrasing and
+    # was NOT matched while the abbreviated "nar." was -- a recall gap with no
+    # justification, surfaced when the spaced form became anchor-gated. Matched against
+    # the diacritic-folded window, so "narodený"/"narodená" reduce to these skeletons.
+    r"|\bnaroden[yao]|\bnarodil|\bnarodila|\bdatum[  ]+narodenia|\bdat\.[  ]?nar\."
+)
+
+
+# --------------------------------------------------------------------------- shared folds
+# CENTRALIZED HERE per the round-2 red-team brief (all_caps / lowercase / no_diacritics):
+# CASE is not folded globally (detect/normalize.py's docstring -- several detectors use
+# capitalisation as evidence) and DIACRITICS are not stripped globally (folding c->c would
+# silently widen every Slovak-word pattern in detect/ at once). Both classes are fixed PER
+# ANCHOR SITE instead, with exactly two offset-safe techniques, both used across every
+# module in this round rather than reimplemented nine times:
+#
+#   * `ascii_fold` -- casefold + diacritic-strip a context WINDOW that is only ever TESTED
+#     against (never sliced, never a source of an offset). This is the technique this
+#     module already used for the RODNE_CISLO anchor (formerly `_ascii_fold`, renamed and
+#     exported here) and that datetime_amounts.py's `_is_dob` uses independently -- safe
+#     because NFKD + drop-combining is NOT 1:1 (it can change length) and a length-changing
+#     fold must never touch text that offsets are taken from.
+#   * `diacritic_pattern` -- build the regex PATTERN itself diacritic-insensitive by turning
+#     each accented character into a bracket class (`c` -> `[cc]`), so the match still runs
+#     against the ORIGINAL text and every offset still comes off it untouched. Used wherever
+#     the anchor word is embedded inside the primary matching regex (so there is no separate
+#     "context window" to fold) -- e.g. a registry prefix that is itself part of the redacted
+#     surface, or a role/label word immediately followed by the captured value.
+#
+# CASE is handled separately at each site, almost always via `(?i:...)` scoped to the ANCHOR
+# only -- never a bare module-wide `re.IGNORECASE`, which would also fold the case of a VALUE
+# character class built to require true capitalisation as evidence.
+_DIACRITIC_CLASSES = {
+    "á": "[áa]", "ä": "[äa]", "č": "[čc]", "ď": "[ďd]", "é": "[ée]", "í": "[íi]",
+    "ľ": "[ľl]", "ĺ": "[ĺl]", "ň": "[ňn]", "ó": "[óo]", "ô": "[ôo]", "ŕ": "[ŕr]",
+    "š": "[šs]", "ť": "[ťt]", "ú": "[úu]", "ý": "[ýy]", "ž": "[žz]",
+}
+
+
+def ascii_fold(s: str) -> str:
+    """Casefold + strip every combining mark (NFKD). For a boolean anchor TEST against a
+    context window ONLY -- never slice the result, never compute an offset from it (see the
+    module-level comment above and detect/normalize.py's docstring)."""
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", s.casefold()) if not unicodedata.combining(ch)
+    )
+
+
+# CASE-AS-BOUNDARY (round-2 red-team, R2-5): several modules use TRUE capitalisation not
+# just as evidence but as the RIGHT-hand boundary of a value run next to a lowercase-word
+# anchor (name_anchors.py's title/role captures, orgs.py's office/bank-name runs,
+# addresses.py's keyword-less ADRESA form). Folding that token class to accept any case
+# UNCONDITIONALLY was tried first and regressed real mixed-case documents: with case no
+# longer distinguishing "the anchor word" from "the value", a greedy run swallows the
+# anchor itself ("vypracoval Ján Novák, PhD." matched "vypracoval Ján Novák" as the name).
+# The fix threads a per-call, per-unit "relaxed" flag instead: a document with no letters
+# left in any other case (the shape an all_caps/lowercase mutation actually produces) has no
+# capitalisation signal to lose either way, so relaxing there costs nothing a mixed-case
+# document still has. Below `_SINGLE_CASE_MIN_LETTERS` a short unit is never judged, so a
+# short single-case label ("VIN", "OP") never re-admits a collision a real mixed-case
+# document would have avoided (redteam finding C-5).
+_SINGLE_CASE_MIN_LETTERS = 20
+
+
+def document_is_single_case(text: str) -> bool:
+    """True when ``text`` has enough letters to judge, and they are (almost) all one case."""
+    letters = [ch for ch in text if ch.isalpha()]
+    if len(letters) < _SINGLE_CASE_MIN_LETTERS:
+        return False
+    upper = sum(ch.isupper() for ch in letters)
+    return upper == 0 or upper == len(letters)
+
+
+def diacritic_pattern(word: str) -> str:
+    """A regex fragment matching ``word`` OR its diacritic-stripped spelling, one character
+    at a time -- ``č`` becomes the bracket class ``[čc]``, every other character is
+    ``re.escape``d literally. Offset-safe because it widens the PATTERN, not the TEXT: the
+    match is still taken directly off the original string. Case is NOT handled here -- wrap
+    the caller's alternation in a scoped ``(?i:...)`` where case should fold too."""
+    return "".join(_DIACRITIC_CLASSES.get(ch, re.escape(ch)) for ch in word)
+
+
+def _rc_anchored(text: str, start: int, end: int | None = None) -> bool:
+    """Is there rodné-číslo context within the window on EITHER side?
+
+    Slovak puts the label on either side of the number with equal ease -- "rodné číslo
+    850315/001" and "850315/001 je rodné číslo" are both ordinary. Looking only backwards
+    missed the second, so the window is symmetric. Recall over precision (context.md 6): the
+    cost of the forward window is a phone number that happens to be followed within 40
+    characters by the words "rodné číslo", which in a legal document is vanishingly rare and
+    would in any case be redacted rather than leaked."""
+    before = text[max(0, start - _RC_ANCHOR_WINDOW) : start]
+    if _RC_ANCHOR_RE.search(ascii_fold(before)) is not None:
+        return True
+    if end is None:
+        return False
+    after = text[end : end + _RC_ANCHOR_WINDOW]
+    return _RC_ANCHOR_RE.search(ascii_fold(after)) is not None
+
+
+def _rc_shape_ok(digits: str) -> bool:
+    month = int(digits[2:4])
+    for offset in (0, 50, 20, 70):  # +20/+70 are post-2004 overflow allocations
+        m = month - offset
+        if 1 <= m <= 12:
+            break
+    else:
+        return False
+    return 1 <= int(digits[4:6]) <= 31
+
+
+def _rc_checksum_ok(digits: str) -> bool:
+    return int(digits) % 11 == 0
+
+
+def _detect_rc(text: str, config: DetectConfig = DEFAULT) -> list[Candidate]:
+    spans = [(m.start(), m.end()) for m in _RC_SLASH_RE.finditer(text)]
+    spans += [
+        (m.start(), m.end())
+        for m in _RC_SPACED_RE.finditer(text)
+        if _rc_anchored(text, m.start(), m.end())
+    ]
+    spans += [
+        (m.start(), m.end())
+        for m in _RC_CONTIG_RE.finditer(text)
+        if _rc_anchored(text, m.start(), m.end())
+    ]
+    out = []
+    for start, end in spans:
+        surface = text[start:end]
+        digits = "".join(ch for ch in surface if ch.isdigit())
+        if not _rc_shape_ok(digits):
+            continue
+        if len(digits) == 9:  # pre-1954 form: no checksum exists, never tag it "invalid"
+            auto, checksum = True, "n/a"
+        else:
+            auto, checksum = _checksum_verdict(_rc_checksum_ok(digits), config)
+        out.append(
+            Candidate(
+                type="RODNE_CISLO",
+                surface=surface,
+                start=start,
+                end=end,
+                auto=auto,
+                checksum=checksum,
+            )
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- ICO
+# THE DIGIT/LETTER BOUNDARY DEFECT (v1.1). `\b` sits between a word char and a NON-word
+# char. A digit and a letter are BOTH word chars, so there is no `\b` between them, and
+# `\b\d{8}\b` does NOT match the eight digits in "43235222IBAN". That is not hypothetical:
+# it is what a PDF text layer produces where two layout cells abut with no space, and what
+# a DOCX table produces when cell text is reconstructed without separators. The identifier
+# is then INVISIBLE to detection and leaks -- and worse, the widened RODNE_CISLO pattern
+# can match a fragment of it instead. So every numeric identifier here is guarded with
+# `(?<!\d)`/`(?!\d)`: still refusing to split a longer digit run, but no longer suppressed
+# by an adjacent LETTER. Recall over precision (context.md 6).
+_ICO_RE = re.compile(r"(?<!\d)\d{8}(?!\d)")
+_ICO_WEIGHTS = (8, 7, 6, 5, 4, 3, 2)
+
+
+def _ico_checksum_ok(digits: str) -> bool:
+    s = sum(int(c) * w for c, w in zip(digits[:7], _ICO_WEIGHTS))
+    mod = s % 11
+    check = 1 if mod == 0 else (0 if mod == 1 else 11 - mod)
+    return check == int(digits[7])
+
+
+def _detect_ico(text: str, config: DetectConfig = DEFAULT) -> list[Candidate]:
+    out = []
+    for m in _ICO_RE.finditer(text):
+        digits = m.group(0)
+        auto, checksum = _checksum_verdict(_ico_checksum_ok(digits), config)
+        out.append(
+            Candidate(
+                type="ICO",
+                surface=digits,
+                start=m.start(),
+                end=m.end(),
+                auto=auto,
+                checksum=checksum,
+            )
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- IC_DPH / DIC
+# IC_DPH is "SK" + 10 digits. v1 relied on a `\b` ACCIDENT to stop the bare-DIC pattern
+# re-claiming those same ten digits ("K" is a word char, so `\b\d{10}\b` could not match
+# inside "SK1234567890"). That accident is GONE under the digit guards above, so DIC now
+# DOES emit a candidate on the inner span. Handled explicitly instead of by luck: the
+# IC_DPH span strictly CONTAINS the DIC span, so detect.core's containment resolver drops
+# the inner DIC and keeps IC_DPH. Identical outcome, documented mechanism not a side effect.
+_IC_DPH_RE = re.compile(r"(?<![A-Za-z0-9])SK(\d{10})(?!\d)", re.IGNORECASE)
+_DIC_RE = re.compile(r"(?<!\d)\d{10}(?!\d)")
+
+
+def _detect_ic_dph(text: str) -> list[Candidate]:
+    return [
+        Candidate(type="IC_DPH", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
+        for m in _IC_DPH_RE.finditer(text)
+    ]
+
+
+def _detect_dic(text: str) -> list[Candidate]:
+    return [
+        Candidate(type="DIC", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
+        for m in _DIC_RE.finditer(text)
+    ]
+
+
+# --------------------------------------------------------------------------- IBAN
+# The group separator was a hardcoded " ?" -- exactly ONE optional space -- so an IBAN
+# pasted from a bank portal with doubled or tabbed grouping was not matched at all.
+# It uses the shared horizontal-whitespace class now, quantified with *.
+_IBAN_RE = re.compile(rf"(?<![A-Za-z0-9])SK\d{{2}}(?:{_SEP}*\d{{4}}){{5}}(?!\d)", re.IGNORECASE)
+
+
+def _iban_mod97_ok(compact: str) -> bool:
+    s = compact[4:] + compact[:4]
+    digits = "".join(str(int(c, 36)) for c in s)  # A-Z -> 10-35
+    return int(digits) % 97 == 1
+
+
+def _detect_iban(text: str, config: DetectConfig = DEFAULT) -> list[Candidate]:
+    out = []
+    for m in _IBAN_RE.finditer(text):
+        # Strip ALL whitespace, not just the ASCII space. The group separator widened to any
+        # horizontal whitespace in v1.1, so an IBAN written with TABS reaches here with tabs
+        # still in it -- and _iban_mod97_ok does int(c, 36) over every character, which raises
+        # ValueError on a tab. That is a CRASH in a shipped desktop app, strictly worse than a
+        # missed detection, and it is exactly what the mutation gate caught the moment the
+        # separator was widened.
+        compact = re.sub(r"\s", "", m.group(0))
+        auto, checksum = _checksum_verdict(_iban_mod97_ok(compact), config)
+        out.append(
+            Candidate(
+                type="IBAN",
+                surface=m.group(0),
+                start=m.start(),
+                end=m.end(),
+                auto=auto,
+                checksum=checksum,
+            )
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- BANKOVY_UCET
+# Legacy SK domestic account, prefix-base/bankcode (GT labels this BANKOVY_UCET, not
+# IBAN). The dashed prefix is REQUIRED: a bare base/bankcode (no dash) collides with
+# decoy order numbers ("Obj. c. 123/2019"), so the prefixless form is deliberately not
+# matched. The bank code is not validated against any list.
+_BANKOVY_UCET_RE = re.compile(r"(?<!\d)(\d{1,6})-(\d{2,10})/(\d{4})(?!\d)")
+
+_PREFIX_WEIGHTS = (10, 5, 8, 4, 2, 1)
+_BASE_WEIGHTS = (6, 3, 7, 9, 10, 5, 8, 4, 2, 1)
+
+
+def _weighted_mod11_ok(number: str, weights: tuple[int, ...]) -> bool:
+    tail = number[-len(weights):]
+    s = sum(int(c) * w for c, w in zip(reversed(tail), reversed(weights)))
+    return s % 11 == 0
+
+
+def _detect_bankovy_ucet(text: str, config: DetectConfig = DEFAULT) -> list[Candidate]:
+    out = []
+    for m in _BANKOVY_UCET_RE.finditer(text):
+        prefix, base = m.group(1), m.group(2)
+        valid = _weighted_mod11_ok(prefix, _PREFIX_WEIGHTS) and _weighted_mod11_ok(
+            base, _BASE_WEIGHTS
+        )
+        auto, checksum = _checksum_verdict(valid, config)
+        out.append(
+            Candidate(
+                type="BANKOVY_UCET",
+                surface=m.group(0),
+                start=m.start(),
+                end=m.end(),
+                auto=auto,
+                checksum=checksum,
+            )
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- EMAIL
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b")
+
+
+def _detect_email(text: str) -> list[Candidate]:
+    return [
+        Candidate(type="EMAIL", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
+        for m in _EMAIL_RE.finditer(text)
+    ]
+
+
+# --------------------------------------------------------------------------- URL
+# Bare-scheme form ("name.tld") is shape-identical to an email domain part; EMAIL wins
+# via containment suppression in detect.core, not via type precedence (no exact-span collision).
+# A scheme-less match ("name.tld") is otherwise indistinguishable from a filename
+# ("dokument.pdf"), so it is only accepted when the final label is a real-world TLD;
+# an explicit http(s)/www scheme disambiguates intent, so that form keeps the looser rule.
+_URL_TLD_ALLOW = r"(?:sk|cz|com|eu|org|net|info|biz|edu|gov|io|dev)"
+_URL_RE = re.compile(
+    r"\b(?:https?://(?:www\.)?|www\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
+    r"|"
+    rf"\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.{_URL_TLD_ALLOW}\b"
+)
+
+
+def _detect_url(text: str) -> list[Candidate]:
+    return [
+        Candidate(type="URL", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
+        for m in _URL_RE.finditer(text)
+    ]
+
+
+_TELEFON_RE = re.compile(
+    r"\+421"
+    rf"{_SEP}\d{{1,3}}{_SEP}\d{{3,4}}{_SEP}\d{{3,4}}"  # mobile_intl / landline_intl
+    r"|"
+    rf"\b0\d{{3}}{_SEP}\d{{3}}{_SEP}\d{{3}}\b"  # mobile_local
+    r"|"
+    rf"\b0\d{{1,2}}/\d{{3}}{_SEP}\d{{3}}{_SEP}\d{{3}}\b"  # landline_local
+)
+
+
+def _detect_telefon(text: str) -> list[Candidate]:
+    return [
+        Candidate(type="TELEFON", surface=m.group(0), start=m.start(), end=m.end(), auto=True)
+        for m in _TELEFON_RE.finditer(text)
+    ]
