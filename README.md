@@ -1,149 +1,160 @@
 # Slovak Legal Document Anonymizer
 
-Desktop application for a 6-person Slovak law office. Removes personal and identifying data
-from legal documents entirely on-device — no cloud, no network calls, no telemetry. Full
-background and design rationale: `context.md`. Frozen v1.1 interfaces: `CONTRACTS_v11.md`.
+A desktop app that removes names, birth numbers, addresses, bank accounts and other personal
+data from Slovak legal documents (`.docx` and `.pdf`), entirely on your own computer: no cloud,
+no network calls.
 
-**Licence:** AGPL-3.0-only (`LICENSE`) — required by PyMuPDF (AGPL-3.0, Artifex); the distributed
-.exe is AGPL too, source at https://github.com/matus012/legal-anonymizer. Third-party: `THIRD_PARTY.md`.
+<a href="docs/demo_before_after.png"><img src="docs/demo_before_after.png" width="720" alt="A synthetic test contract before (left) and after redaction (right): names, birth numbers, IBANs and other identifiers replaced by labels such as [MENO_1]"></a>
 
-## What it does
+**On this document: 0 of 33 must-redact items left with the parties' names typed in, 6 left
+without them.** One uncertain name was flagged for the reviewer to decide (orange box, drawn for
+the demo only).
 
-- Takes `.docx` and `.pdf` files (digital-born, with a text layer) and produces a redacted
-  copy with consistent in-document labels (`[MENO_1]`, `[RODNE_CISLO_1]`, …), never a mapping file, and
-  never touching the original.
-- Detection runs in three layers: deterministic regex + checksum identifiers, a bundled
-  gazetteer (municipalities, streets, cadastral areas, given names, surnames), and
-  user-supplied known entities (the lawyer types the parties' names/addresses up front — the
-  single highest-recall input in the system). A fourth bucket, low-confidence candidates, goes
-  to human review instead of being auto-redacted.
-- Produces a report per document listing every redaction, plus a "near miss, not redacted"
-  section, so the human review step is checkable against the document rather than a blind
-  trust exercise.
-- Governing rule: **recall over precision**. Every ambiguous detection decision resolves
-  toward redacting, not toward leaving text alone. A false positive costs the reviewer a
-  two-second un-tick; a false negative is a data breach.
+<sub>A synthetic test contract: the first file this repo's generator writes, not hand-picked, and
+a checklist of test cases rather than a real-looking contract. *Must-redact* = items the generator
+marks as always to be removed. Doubled labels are a known cosmetic PDF issue. Click for full size.</sub>
 
-## What it explicitly does NOT do
+- **What it does:** finds personal data in a Word or PDF document and writes a redacted copy in
+  which each person gets one consistent label (`Ján Novák`, `Jána Nováka` → `[MENO_1]`), plus a
+  report of every change and of everything it was unsure about.
+- **Headline result:** on 140 generated test files (70 synthetic legal documents, each as `.docx`
+  and `.pdf`), with the parties' names supplied as the app asks, **no must-redact item survives**,
+  checked in the text, metadata, comments and hidden parts. These files come from the repo's own
+  generator, so this is not recall on real documents. Letter-spaced text is still mostly missed ([all checks](#tests-and-quality-checks)).
+- **How:** rules, not machine learning: patterns with checksum validation for identifiers, public
+  Slovak lists of towns, streets and names that understand Slovak word endings, and the names you
+  type in. Uncertain cases go to you for review.
 
-- **Scanned documents / images.** The app works on the text layer only. A PDF with no
-  extractable text is refused outright, with a clear message — it will not silently hand back
-  an unredacted copy dressed up as anonymized.
-- **Signatures and stamps (podpis / pečiatka).** These are images, not text; the app cannot
-  see them and leaves them in place. Deferred to v2. The office has been told this in writing
-  (`office_note.md`).
-- **Vyhláška MS SR č. 482/2011 Z. z. clause (i) — utajované informácie a obchodné tajomstvo
-  (classified information / trade secrets).** This is the authoritative basis for the type list
-  the tool implements (the clause-by-clause mapping is `CONTRACTS_v11.md` §12), and clause (i)
-  is declared **permanently out of scope**: it is defined by MEANING, not by any surface
-  pattern, so no regex, checksum, or gazetteer can decide that a given sentence discloses a
-  trade secret. A tool that quietly skipped this clause while claiming to implement "the
-  vyhláška list" would misrepresent its own coverage — the human reviewer is the only thing
-  that handles clause (i), on every document.
-- ML-based NER (deferred to v2 — see `context.md` §6 for why v1 ships without it).
-- Any format other than `.docx` / `.pdf`, and any network functionality whatsoever.
+[Plain-language overview](legal_anonymizer_plain.md) · [Internal red-team rounds](redteam/) ·
+[Licence and data sources](#licence-and-data-sources)
 
-## Install and run
+## How it works
 
-```
-uv venv
-uv sync            # or: uv pip install -r requirements.txt
-.venv\Scripts\python.exe -m gui
-```
+1. **You add files** and, optionally but strongly recommended, type the parties' names and
+   addresses. Those are the most reliable input the tool gets.
+2. **It scans** the text with three detectors: identifier patterns with checksums (*rodné číslo*
+   = birth number, *IČO* / *DIČ* / *IČ DPH* = company, tax and VAT numbers, IBAN …), public lists
+   of towns, streets, cadastral areas, first names and surnames, and your names in all their
+   Slovak grammatical forms (`Ján Novák`, `Jána Nováka`, `p. Novák`).
+3. **You review** a table of what was found. Confident hits are ticked; uncertain ones are
+   unticked and wait for your decision.
+4. **It writes** `<name>_anon.docx` / `.pdf` next to the original (which is never changed) and a
+   report listing every redaction and every item it left for review.
 
-Fully offline by design — the app must run with the network adapter disabled.
+The rule for every unclear case is **redact rather than leave**: an extra redaction costs a
+reviewer two seconds, a missed one is a data breach. The tool never claims a document is
+"clean"; the report is there so a person can check it.
 
-## Build (PyInstaller)
+## What it does not do
 
-```
-.venv\Scripts\python.exe -m PyInstaller anonymizer.spec --noconfirm
-```
+- **Scanned documents or images.** It reads the text layer only. A PDF with no text layer is
+  refused with a message, never handed back looking anonymized.
+- **Signatures and stamps** are images, so they stay in place.
+- **Trade secrets and classified information** (clause (i) of Slovak decree 482/2011) are defined
+  by meaning, not by any pattern, so they are out of scope. A person has to handle them.
+- **No machine-learning name recognition**, so an unusual surname that is not in the public lists
+  and not typed in can be missed (the demo's empty-names run leaves 6 mentions of such a surname).
+- **Letter-spaced text** (`J á n  N o v á k`) is mostly missed (see the checks below).
+- **Cosmetic:** in PDFs, two labels can print on top of each other where a name was matched twice
+  (for example a first name and a full name). The text under the box is removed either way.
 
-Produces a one-folder build at `dist/Anonymizer/Anonymizer.exe`.
+## Quickstart
 
-**WARNING — verify before shipping a build.** `detect/gazetteer_data/*.json` (municipalities,
-streets, cadastral areas, given names, surnames, stoplist) are plain data files. PyInstaller's
-import analysis cannot see them; they are bundled only because `anonymizer.spec` names them
-explicitly. If that line is ever dropped, mistyped, or defeated by a path change, the frozen
-app still starts, still scans, still writes a redacted document and a report — and silently
-stops matching every place name and personal name in the country. There is no crash and no
-empty output, so nothing about running the app tells you this happened. After every build,
-confirm by hand that the six `.json` files (`obce.json`, `ulice.json`,
-`katastralne_uzemia.json`, `first_names.json`, `surnames.json`, `stoplist.json`) are present
-under `dist\Anonymizer\_internal\detect\gazetteer_data\`. **Note the `_internal\`** —
-PyInstaller 6.x puts collected data there, not directly under `dist\Anonymizer\`. Verified
-against a real build; checking the path without `_internal\` finds nothing even when the
-build is perfectly good, which makes a working build look broken and a broken one
-indistinguishable from it. `detect/selfcheck.py` also checks this
-at startup and refuses to scan if the data is missing or suspiciously small — but that is the
-app protecting itself at runtime, not a substitute for checking the build.
+Needs Python 3.11 and [uv](https://docs.astral.sh/uv/). Developed and tested on Windows 11;
+other systems are untested. Direct dependencies are pinned in `requirements.txt` (no lockfile).
 
-## Running the gates
-
-All commands below were run against this checkout to confirm they start; see each module's
-own output/`--help` for details.
-
-```
-.venv\Scripts\python.exe -m eval.leak_gate            # the killer test: greps every redacted
-                                                        # output for every ground-truth PII string
-                                                        # across every extractable surface. Zero
-                                                        # leaks is non-negotiable (context.md §8.1).
-.venv\Scripts\python.exe -m eval.mutation_gate         # detection-robustness gate (red team round 2):
-                                                        # can a detector still find PII spelled with
-                                                        # an NBSP, a line wrap, no diacritics, etc.
-.venv\Scripts\python.exe -m eval.cross_format_gate     # same logical document as .docx and .pdf
-                                                        # must yield the same hit set. NOTE it authors
-                                                        # its own matched fixtures: data/synthetic's
-                                                        # same-index .docx/.pdf are NOT the same
-                                                        # document (QUESTIONS.md Q14).
-.venv\Scripts\python.exe -m eval.precision_report      # per-type precision, REPORT ONLY — this
-                                                        # never gates; recall over precision is the
-                                                        # governing rule and a low number here can be
-                                                        # the policy working as designed.
-.venv\Scripts\python.exe -m eval.perf_report           # time/page, and peak PYTHON-HEAP memory
-                                                        # via tracemalloc -- NOT process RSS; psutil
-                                                        # is not a dependency (QUESTIONS.md Q10).
-.venv\Scripts\python.exe -m eval.run --corpus <dir-with-gt-json> --redacted <dir>
-                                                        # the general harness (per-entity-type
-                                                        # recall, context.md §8.2).
+```bash
+git clone https://github.com/matus012/legal-anonymizer.git
+cd legal-anonymizer
+uv venv --python 3.11
+uv pip install -r requirements.txt
 ```
 
-As of this writing the leak gate is **not** green: 20 leaks, all `type=ULICA` (10 `.docx` +
-10 `.pdf`), and the mutation gate is failing on `line_break_mid` by design (0.376, threshold
-0.95) — both are open, known, and tracked in `redteam/FINDINGS_ROUND2.md`.
-Do not take a stale "PASS" claim anywhere in this repo's history at face value; run the gate.
+Activate the environment (Windows: `.venv\Scripts\activate`, macOS / Linux:
+`source .venv/bin/activate`), then make 140 synthetic files in `data/synthetic/` and start the app:
 
-## Regenerating the synthetic corpus
-
-Real client documents are never used for development or testing (`context.md` §7 — this is
-non-negotiable). The corpus is synthetic, seed-deterministic, and gitignored:
-
-```
-.venv\Scripts\python.exe -m corpus.generate --n 70 --out data\synthetic --seed 42 --formats docx,pdf
+```bash
+python -m corpus.generate --n 70 --out data/synthetic --seed 42 --formats docx,pdf
+python -m gui
 ```
 
-(`--n 70`, not 60 — there is a seventh document type, `zmluva_v11`, that seeds every v1.1 type.)
+In the app: **Pridať súbory…** (add files) → pick e.g. `data/synthetic/kupna_zmluva_000.pdf` →
+type the parties' names → **Skenovať** (scan) → review → **Exportovať všetko** (export all). The
+app works fully offline; it is meant to run with the network adapter disabled.
 
-## Gazetteer data and licensing
+## Tests and quality checks
 
-Every list bundled under `detect/gazetteer_data/*.json` is derived from a public source with
-its licence recorded in `LICENSES.md`: Register adries obce and ulice (Ministerstvo vnútra SR,
-**CC0 1.0**), katastrálne územia (ÚGKK SR codelist CL000026, **CC BY 4.0** — attribution:
-*"Contains data from ÚGKK SR, codelist CL000026, licensed under CC BY 4.0."*), given names
-(name-day calendar + a names-generator corpus, **MIT** / **CC0 1.0**), and surnames (**CC0
-1.0**). Name lists derived from the Facebook data breach were considered and explicitly
-rejected — see `LICENSES.md` for the reasoning. Regenerate the derived JSON with:
+Run in the activated environment, after the corpus command above. Real client documents are never
+used for development or testing.
+
+```bash
+python -m tools.make_demo       # writes demo files that some tests read (not the README figure)
+python -m pytest -q
+python -m eval.leak_gate
+python -m eval.mutation_gate
+python -m eval.cross_format_gate
+python -m eval.precision_report
+```
+
+| check | what it asks | result |
+|---|---|---|
+| test suite | does everything still behave as specified? | 1711 passed, 9 skipped, 12 expected failures (open red-team findings, pinned so a fix shows up) |
+| leak gate | after redaction, does any must-redact string survive anywhere in the file (text, metadata, comments, hidden parts)? | **pass**: 0 in 140 files (2 bank-code byte matches set aside by rule) |
+| mutation gate | is data still found when written with odd spacing, line breaks, no accents, look-alike letters …? | **fails**: of 16 gated spellings, 15 are found ≥ 95 % of the time; letter-spaced text 12 %. Words split across lines: 46 % (measured, not gated) |
+| cross-format gate | does the same document give the same hits as `.docx` and `.pdf`? | **pass**: 76 pairs, 0 differences |
+| precision report | how much is redacted that did not need to be? (never pass / fail) | most types 100 %, names 98.9 %; towns 24 %, cadastral areas 36 % (it would rather black out too much than miss something) |
+
+<sub>Measured 2026-11-21 with Python 3.11 on code commit `064f3b5` (this README update changes no
+app code). The leak gate supplies each document's party names, as a user would; it sets aside two
+4-digit bank codes that match inside raw PDF bytes, by a documented rule, and prints them. The
+cross-format gate checks the 70 corpus pairs plus 6 control pairs it builds itself. The test
+documents come from this repo's own generator, which uses the same public lists as the detectors,
+so these checks test the pipeline end to end; they are not a measure of recall on real documents.
+Six internal red-team rounds attacked the extractor, the detectors, the Word package and the PDF
+container; findings and fixes are in [`redteam/`](redteam/).</sub>
+
+<details>
+<summary>Building the Windows .exe (PyInstaller)</summary>
+
+```bash
+python -m PyInstaller anonymizer.spec --noconfirm
+```
+
+This makes a one-folder build at `dist/Anonymizer/Anonymizer.exe`. After every build, check that
+the six list files (`obce.json`, `ulice.json`, `katastralne_uzemia.json`, `first_names.json`,
+`surnames.json`, `stoplist.json`) are under `dist\Anonymizer\_internal\detect\gazetteer_data\`
+(note the `_internal\`). A build without them would stop finding place names and personal names;
+the app checks for them at start-up and refuses to scan, but check the build anyway.
+
+</details>
+
+The README figure is rebuilt with `python -m tools.make_readme_demo` (needs `pillow`).
+
+## Repo layout
 
 ```
-.venv\Scripts\python.exe -m tools.build_gazetteer
+gui/        the desktop app (PySide6): add files → review → export
+detect/     the detectors and the bundled lists (detect/gazetteer_data/*.json)
+writer/     writes the redacted .docx / .pdf and the report
+corpus/     synthetic document generator with ground truth
+eval/       leak, mutation, cross-format, precision and speed checks
+redteam/    six rounds of adversarial findings
+tests/      pytest suite
+tools/      list builder, demo and test-document generators
+test_docs/  a quick manual test guide for the office (Slovak)
+docs/       the before/after figure
 ```
 
-## Recall over precision
+Design documents: [`CONTRACTS_v11.md`](CONTRACTS_v11.md) (frozen v1.1 interfaces), [`QUESTIONS.md`](QUESTIONS.md) (design questions and answers),
+[`office_note.md`](office_note.md) (note to the office about what v1 does not cover).
 
-The governing rule for every ambiguous detection decision in this codebase (`context.md` §6).
-When a detector cannot be sure whether something is PII, it redacts it or routes it to human
-review — it never silently leaves it in the text. Justification: an over-redaction costs the
-reviewer a two-second un-tick; an under-redaction is a confidentiality breach for a law office
-whose entire reason for using this tool is to avoid exactly that. This is also why the tool
-never claims a document is "clean" — it produces a report of what it changed and what it was
-unsure about, and the human review step is structural, not a disclaimer nobody reads.
+## Licence and data sources
+
+Code: **AGPL-3.0-only** ([LICENSE](LICENSE)), because the PDF engine, PyMuPDF, is AGPL-3.0. Every
+code dependency with its licence: [THIRD_PARTY.md](THIRD_PARTY.md).
+
+The bundled lists are built from public sources ([LICENSES.md](LICENSES.md); rebuild with
+`python -m tools.build_gazetteer`): towns and streets from the Ministry of Interior address
+register (CC0 1.0); cadastral areas from ÚGKK SR codelist CL000026 (CC BY 4.0: *"Contains data
+from ÚGKK SR, codelist CL000026, licensed under CC BY 4.0."*); first names (MIT / CC0 1.0) and
+surnames (CC0 1.0). Name lists derived from leaked personal data were rejected on purpose.
